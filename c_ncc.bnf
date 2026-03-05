@@ -1,0 +1,743 @@
+# C2Y Grammar (translated from ncc parse.c)
+
+<provided_identifier> ::= %IDENTIFIER
+    | %"_Once"
+    | %"_kargs"
+    | %"opaque"
+    | %"package"
+    | %"c_va"
+    | %"constexpr_eval"
+    | %"constexpr_max"
+    | %"constexpr_min"
+    | %"constexpr_paste"
+    | %"constexpr_strcmp"
+    | %"constexpr_strlen"
+
+<constant> ::= %INTEGER
+    | %FLOAT
+    | %CHAR
+    | %"true"
+    | %"false"
+    | %"nullptr"
+
+<string_literal> ::= %STRING+
+
+<typedef_name_terminal> ::= %TYPEDEF_NAME
+
+# Ambiguity-aware typedef: the parser considers both interpretations
+# (typedef name vs plain identifier).  Tree scoring resolves the ambiguity.
+<typedef_name> ::= <typedef_name_terminal> | %IDENTIFIER
+
+<non_bracket_token> ::= %IDENTIFIER
+    | %INTEGER
+    | %FLOAT
+    | %STRING
+    | %CHAR
+    | %TYPEDEF_NAME
+    | %"+"
+    | %"-"
+    | %"*"
+    | %"/"
+    | %"%"
+    | %"&"
+    | %"|"
+    | %"^"
+    | %"~"
+    | %"!"
+    | %"="
+    | %"<"
+    | %">"
+    | %"."
+    | %","
+    | %";"
+    | %":"
+    | %"?"
+    | %"#"
+    | %"@"
+    | %"->"
+    | %"++"
+    | %"--"
+    | %"<<"
+    | %">>"
+    | %"<="
+    | %">="
+    | %"=="
+    | %"!="
+    | %"&&"
+    | %"||"
+    | %"+="
+    | %"-="
+    | %"*="
+    | %"/="
+    | %"%="
+    | %"&="
+    | %"^="
+    | %"|="
+    | %"<<="
+    | %">>="
+    | %"..."
+    | %"::"
+    | %"__asm__"
+    | %"__asm"
+    | %"__attribute__"
+    | %"__attribute"
+    | %"__bf16"
+    | %"__Float32x4_t"
+    | %"__Float64x2_t"
+    | %"__SVBool_t"
+    | %"__SVFloat32_t"
+    | %"__SVFloat64_t"
+    | %"__builtin_bit_cast"
+    | %"__builtin_offsetof"
+    | %"__builtin_types_compatible_p"
+    | %"__builtin_va_arg"
+    | %"__builtin_va_list"
+    | %"__const__"
+    | %"__const"
+    | %"__extension__"
+    | %"__fp16"
+    | %"__inline__"
+    | %"__inline"
+    | %"__int128_t"
+    | %"__int128"
+    | %"__mfp8"
+    | %"__nonnull"
+    | %"__null_unspecified"
+    | %"__nullable"
+    | %"__restrict__"
+    | %"__restrict"
+    | %"__signed__"
+    | %"__signed"
+    | %"__thread"
+    | %"__typeof__"
+    | %"__typeof"
+    | %"__uint128_t"
+    | %"__volatile__"
+    | %"__volatile"
+    | %"_Alignas"
+    | %"_Alignof"
+    | %"_Atomic"
+    | %"_BitInt"
+    | %"_Bool"
+    | %"_Complex"
+    | %"_Countof"
+    | %"_Decimal128"
+    | %"_Decimal32"
+    | %"_Decimal64"
+    | %"_Float128"
+    | %"_Float16"
+    | %"_Float32"
+    | %"_Float32x"
+    | %"_Float64"
+    | %"_Float64x"
+    | %"_Generic"
+    | %"_Nonnull"
+    | %"_Noreturn"
+    | %"_Null_unspecified"
+    | %"_Nullable"
+    | %"_Static_assert"
+    | %"_Thread_local"
+    | %"alignas"
+    | %"alignof"
+    | %"asm"
+    | %"auto"
+    | %"bool"
+    | %"break"
+    | %"c_va"
+    | %"case"
+    | %"char"
+    | %"const"
+    | %"constexpr"
+    | %"constexpr_eval"
+    | %"constexpr_max"
+    | %"constexpr_min"
+    | %"constexpr_paste"
+    | %"constexpr_strcmp"
+    | %"constexpr_strlen"
+    | %"continue"
+    | %"default"
+    | %"do"
+    | %"double"
+    | %"else"
+    | %"enum"
+    | %"extern"
+    | %"false"
+    | %"float"
+    | %"for"
+    | %"goto"
+    | %"if"
+    | %"inline"
+    | %"int"
+    | %"_kargs"
+    | %"long"
+    | %"nullptr"
+    | %"_Once"
+    | %"opaque"
+    | %"package"
+    | %"register"
+    | %"restrict"
+    | %"return"
+    | %"short"
+    | %"signed"
+    | %"sizeof"
+    | %"static_assert"
+    | %"static"
+    | %"struct"
+    | %"switch"
+    | %"thread_local"
+    | %"true"
+    | %"typedef"
+    | %"typehash"
+    | %"typeid"
+    | %"typeof_unqual"
+    | %"typeof"
+    | %"typestr"
+    | %"union"
+    | %"unsigned"
+    | %"void"
+    | %"volatile"
+    | %"while"
+
+<token> ::= <non_bracket_token>
+    | %"("
+    | %")"
+    | %"["
+    | %"]"
+    | %"{"
+    | %"}"
+
+<AND_expression> ::= <AND_expression> %"&" <equality_expression>
+    | <equality_expression>
+
+<abstract_declarator> ::= <pointer>? <direct_abstract_declarator>
+    | <pointer>
+
+<additive_expression> ::= <additive_expression> %"+" <multiplicative_expression>
+    | <additive_expression> %"-" <multiplicative_expression>
+    | <multiplicative_expression>
+
+<_kw_kw_type_alignment> ::= %"alignas"
+    | %"_Alignas"
+
+<alignment_specifier> ::= <_kw_kw_type_alignment> %"(" <type_name> %")"
+    | <_kw_kw_type_alignment> %"(" <constant_expression> %")"
+
+<argument_expression_list> ::= <keyword_argument>
+    | <assignment_expression>
+    | <argument_expression_list> %"," <keyword_argument>
+    | <argument_expression_list> %"," <assignment_expression>
+
+<array_abstract_declarator> ::= <direct_abstract_declarator>? %"[" <type_qualifier_list>? <assignment_expression>? %"]"
+    | <direct_abstract_declarator>? %"[" %"static"? <type_qualifier_list>? <assignment_expression>? %"]"
+    | <direct_abstract_declarator>? %"[" <type_qualifier_list> %"static" <assignment_expression> %"]"
+    | <direct_abstract_declarator>? %"[" %"*" %"]"
+
+<array_declarator> ::= <direct_declarator> %"[" <type_qualifier_list>? <assignment_expression>? %"]"
+    | <direct_declarator> %"[" %"static" <type_qualifier_list>? <assignment_expression> %"]"
+    | <direct_declarator> %"[" %"static"? <type_qualifier_list>? <assignment_expression>? %"]"
+    | <direct_declarator> %"[" <type_qualifier_list> %"static" <assignment_expression> %"]"
+
+<assignment_expression> ::= <unary_expression> <assignment_operator> <assignment_expression>
+    | <conditional_expression>
+
+<_ops_op_assign> ::= %"="
+    | %"*="
+    | %"/="
+    | %"%="
+    | %"+="
+    | %"-="
+    | %"<<="
+    | %">>="
+    | %"&="
+    | %"^="
+    | %"|="
+
+<assignment_operator> ::= <_ops_op_assign>
+
+<atomic_type_specifier> ::= %"_Atomic" %"(" <type_name> %")"
+
+<attribute> ::= <attribute_token> <attribute_argument_clause>?
+
+<attribute_argument_clause> ::= %"(" <balanced_token_sequence>? %")"
+
+<attribute_declaration> ::= <attribute_specifier_sequence> %";"
+
+<attribute_list> ::= <attribute>? (%"," <attribute>?)*
+
+<attribute_prefix> ::= <identifier>
+
+<attribute_prefixed_token> ::= <attribute_prefix> %"::" <identifier>
+
+<attribute_specifier> ::= %"[" %"[" <attribute_list> %"]" %"]"
+    | <_kw_kw_gcc_attribute> %"(" %"(" <balanced_token_sequence>? %")" %")"
+
+<_kw_kw_gcc_attribute> ::= %"__attribute__"
+    | %"__attribute"
+
+<attribute_specifier_sequence> ::= <attribute_specifier>+
+
+<attribute_token> ::= <attribute_prefixed_token>
+    | <standard_attribute>
+
+<balanced_token> ::= %"(" <balanced_token_sequence>? %")"
+    | %"[" <balanced_token_sequence>? %"]"
+    | %"{" <balanced_token_sequence>? %"}"
+    | <non_bracket_token>
+
+<balanced_token_sequence> ::= <balanced_token>+
+
+<block_item> ::= <declaration>
+    | <label>
+    | <unlabeled_statement>
+
+<block_item_list> ::= <block_item>+
+
+<braced_initializer> ::= %"{" <initializer_list> %","? %"}"
+    | %"{" %"}"
+
+<cast_expression> ::= %"(" <type_name> %")" <cast_expression>
+    | <unary_expression>
+
+<compound_literal> ::= %"(" <storage_class_specifiers>? <type_name> %")" <braced_initializer>
+
+<compound_statement> ::= %"{" <block_item_list>? %"}"
+
+<conditional_expression> ::= <logical_OR_expression> %"?" <expression> %":" <conditional_expression>
+<conditional_expression> ::= <logical_OR_expression>
+
+<constant_expression> ::= <conditional_expression>
+
+<constant_range_expression> ::= <constant_expression> %"..." <constant_expression>
+
+<declaration> ::= <attribute_specifier_sequence> <declaration_specifiers> <init_declarator_list> %";"
+    | <declaration_specifiers> <init_declarator_list>? %";"
+<declaration> ::= <static_assert_declaration>
+    | <attribute_declaration>
+    | <declaration_specifiers> <declarator> <keyword_clause> %";"
+    | <declaration_specifiers> <attribute_specifier_sequence> %";"
+    | %"__extension__" <declaration>
+
+<declaration_specifier> ::= <storage_class_specifier>
+    | <type_specifier_qualifier>
+    | <function_specifier>
+
+<declaration_specifiers> ::= <declaration_specifier> <attribute_specifier_sequence>?
+    | <declaration_specifiers> <declaration_specifier> <attribute_specifier_sequence>?
+
+<declarator> ::= <pointer>? <direct_declarator>
+
+<designation> ::= <designator_list> %"="
+
+<designator> ::= %"[" <constant_expression> %"]"
+    | %"." <_member_name>
+
+<designator_list> ::= <designator>+
+
+<direct_abstract_declarator> ::= <function_abstract_declarator> <attribute_specifier_sequence>?
+    | <array_abstract_declarator> <attribute_specifier_sequence>?
+    | %"(" <abstract_declarator> %")"
+
+<direct_declarator> ::= %"(" <declarator> %")"
+    | <array_declarator> <attribute_specifier_sequence>?
+    | <function_declarator> <attribute_specifier_sequence>?
+    | <identifier> <attribute_specifier_sequence>?
+    | %TYPEDEF_NAME <attribute_specifier_sequence>?
+    | <synthetic_identifier> <attribute_specifier_sequence>?
+
+<enum_specifier> ::= %"enum" <attribute_specifier_sequence>? <tag_name>? <enum_type_specifier>? %"{" <enumerator_list> %"}"
+    | %"enum" <attribute_specifier_sequence>? <tag_name>? <enum_type_specifier>? %"{" <enumerator_list> %"," %"}"
+    | %"enum" <tag_name> <enum_type_specifier>?
+
+<enum_type_specifier> ::= %":" <specifier_qualifier_list>
+
+<enumeration_constant> ::= <identifier>
+
+<enumerator> ::= <enumeration_constant> <attribute_specifier_sequence>? %"=" <constant_expression>
+    | <enumeration_constant> <attribute_specifier_sequence>?
+
+<enumerator_list> ::= <enumerator> (%"," <enumerator>)*
+
+<equality_expression> ::= <equality_expression> %"==" <relational_expression>
+    | <equality_expression> %"!=" <relational_expression>
+    | <relational_expression>
+
+<exclusive_OR_expression> ::= <exclusive_OR_expression> %"^" <AND_expression>
+    | <AND_expression>
+
+<expression> ::= <expression> %"," <assignment_expression>
+    | <assignment_expression>
+
+<expression_statement> ::= <attribute_specifier_sequence> <expression> %";"
+    | <expression> %";"
+    | %";"
+
+<external_declaration> ::= <function_definition>
+    | <declaration>
+    | %";"
+    | %"package" <identifier> %";"
+
+<function_abstract_declarator> ::= <direct_abstract_declarator>? %"(" <parameter_type_list>? %")"
+
+<function_body> ::= <compound_statement>
+
+<function_declarator> ::= <direct_declarator> %"(" <parameter_type_list>? %")"
+
+<function_definition> ::= <attribute_specifier_sequence>? <declaration_specifiers> <declarator> <keyword_clause> <function_body>
+    | <attribute_specifier_sequence>? <declaration_specifiers> <declarator> <function_body>
+    | %"__extension__" <function_definition>
+
+<_kw_kw_fn_specifier> ::= %"inline"
+    | %"_Noreturn"
+    | %"__inline__"
+    | %"__inline"
+
+<function_specifier> ::= <_kw_kw_fn_specifier>
+    | %"_Once"
+
+<_kw_kw_gcc_asm> ::= %"__asm__"
+    | %"__asm"
+    | %"asm"
+
+<gcc_asm_label> ::= <_kw_kw_gcc_asm> %"(" <string_literal> %")"
+
+<gcc_asm_statement> ::= <_kw_kw_gcc_asm> <_kw_kw_type_qualifier>? %"goto"? %"(" <balanced_token_sequence>? %")" %";"
+
+<generic_assoc_list> ::= <generic_association> (%"," <generic_association>)*
+
+<generic_association> ::= %"default" %":" <assignment_expression>
+    | <type_name> %":" <assignment_expression>
+
+<generic_controlling_operand> ::= <type_name>
+    | <assignment_expression>
+
+<generic_selection> ::= %"_Generic" %"(" <generic_controlling_operand> %"," <generic_assoc_list> %")"
+
+<identifier> ::= <synthetic_identifier>
+    | <provided_identifier>
+
+<inclusive_OR_expression> ::= <inclusive_OR_expression> %"|" <exclusive_OR_expression>
+    | <exclusive_OR_expression>
+
+<init_declarator> ::= <declarator> <gcc_asm_label>? <attribute_specifier_sequence>? %"=" <initializer>
+    | <declarator> <gcc_asm_label>? <attribute_specifier_sequence>?
+
+<init_declarator_list> ::= <init_declarator> (%"," <init_declarator>)*
+
+<initializer> ::= <braced_initializer>
+    | <assignment_expression>
+
+<initializer_list> ::= <designation>? <initializer> (%"," <designation>? <initializer>)*
+
+<iteration_statement> ::= %"while" %"(" <expression> %")" <secondary_block>
+<iteration_statement> ::= %"do" <secondary_block> %"while" %"(" <expression> %")" %";"
+<iteration_statement> ::= %"for" %"(" <expression>? %";" <expression>? %";" <expression>? %")" <secondary_block>
+    | %"for" %"(" <declaration> <expression>? %";" <expression>? %")" <secondary_block>
+
+<jump_statement> ::= %"goto" <identifier> %";"
+    | %"continue" <identifier> %";"
+    | %"continue" %";"
+    | %"break" <identifier> %";"
+    | %"break" %";"
+    | %"return" <expression>? %";"
+    | %"goto" %"*" <expression> %";"
+
+<keyword_argument> ::= %"." <identifier> %"=" <assignment_expression>
+
+<keyword_clause> ::= %"_kargs" %"{" <keyword_param_list> %"}"
+    | %"_kargs" %":" %"opaque"
+
+<keyword_param> ::= <declaration_specifiers> <declarator> %"=" <initializer> %";"
+    | <declaration_specifiers> <declarator> %";"
+
+<keyword_param_list> ::= <keyword_param>+
+
+<label> ::= <attribute_specifier_sequence>? <identifier> %":"
+    | <attribute_specifier_sequence>? %"case" <constant_range_expression> %":"
+    | <attribute_specifier_sequence>? %"case" <constant_expression> %":"
+    | <attribute_specifier_sequence>? %"default" %":"
+
+<labeled_statement> ::= <label> <statement>
+
+<logical_AND_expression> ::= <logical_AND_expression> %"&&" <inclusive_OR_expression>
+    | <inclusive_OR_expression>
+
+<logical_OR_expression> ::= <logical_OR_expression> %"||" <logical_AND_expression>
+    | <logical_AND_expression>
+
+<member_declaration> ::= <attribute_specifier_sequence>? <specifier_qualifier_list> <member_declarator_list>? %";"
+    | <static_assert_declaration>
+    | %"__extension__" <member_declaration>
+
+<member_declaration_list> ::= <member_declaration>+
+
+<member_declarator> ::= <declarator>? %":" <constant_expression>
+    | <declarator>
+
+<member_declarator_list> ::= <member_declarator> (%"," <member_declarator>)*
+
+<multiplicative_expression> ::= <multiplicative_expression> %"*" <cast_expression>
+    | <multiplicative_expression> %"/" <cast_expression>
+    | <multiplicative_expression> %"%" <cast_expression>
+    | <cast_expression>
+
+<parameter_declaration> ::= <attribute_specifier_sequence>? <declaration_specifiers> <declarator>
+    | <attribute_specifier_sequence>? <declaration_specifiers> <abstract_declarator>?
+
+<parameter_list> ::= <parameter_declaration> (%"," <parameter_declaration>)*
+
+<parameter_type_list> ::= <parameter_list> %"," %"c_va" %"..."
+    | %"c_va" %"..."
+    | <parameter_list> %"," <type_name> %"+"
+    | <parameter_list> %"," %"+"
+    | <type_name> %"+"
+    | %"+"
+    | <parameter_list> %"," %"..."
+    | %"..."
+    | <parameter_list>
+
+<pointer> ::= %"*" <attribute_specifier_sequence>? <type_qualifier_list>? <pointer>
+    | %"*" <attribute_specifier_sequence>? <type_qualifier_list>?
+    | %"^" <attribute_specifier_sequence>? <type_qualifier_list>? <pointer>
+    | %"^" <attribute_specifier_sequence>? <type_qualifier_list>?
+
+<postfix_expression> ::= <postfix_expression> %"[" <expression> %"]"
+    | <postfix_expression> %"(" <argument_expression_list>? %")"
+    | <postfix_expression> %"." <_member_name>
+    | <postfix_expression> %"->" <_member_name>
+    | <postfix_expression> %"++"
+    | <postfix_expression> %"--"
+    | <compound_literal>
+    | %"(" <type_name> %")" <braced_initializer>
+    | %"(" <storage_class_specifiers> <type_name> %")" <braced_initializer>
+    | <primary_expression>
+    | <postfix_expression> %"!"
+    | <_kw_option_some> %"(" <typeid_atom> <typeid_continuation>? %"," <assignment_expression> %")"
+    | <_kw_option_none> %"(" <typeid_atom> <typeid_continuation>? %")"
+    | <_kw_option_is_some> %"(" <argument_expression_list> %")"
+    | <_kw_option_is_none> %"(" <argument_expression_list> %")"
+    | <_kw_option_unwrap> %"(" <argument_expression_list> %")"
+
+<_member_name> ::= <identifier>
+    | %TYPEDEF_NAME
+    | <synthetic_identifier>
+
+<primary_block> ::= <compound_statement>
+    | <selection_statement>
+    | <iteration_statement>
+
+<primary_expression> ::= <constant>
+    | <synthetic_string_literal>
+    | %"(" <expression> %")"
+    | <generic_selection>
+    | <static_assert_declaration>
+    | %"(" <compound_statement> %")"
+    | <identifier>
+    | %"__builtin_va_arg" %"(" <assignment_expression> %"," <type_name> %")"
+    | %"__builtin_types_compatible_p" %"(" <type_name> %"," <type_name> %")"
+    | %"__builtin_bit_cast" %"(" <type_name> %"," <assignment_expression> %")"
+    | %"__builtin_offsetof" %"(" <type_name> %"," <identifier> %")"
+    | %"__extension__" <primary_expression>
+    | %"constexpr_eval" %"(" <argument_expression_list> %")"
+    | %"constexpr_max" %"(" <argument_expression_list> %")"
+    | %"constexpr_min" %"(" <argument_expression_list> %")"
+    | %"constexpr_strcmp" %"(" <argument_expression_list> %")"
+    | %"constexpr_strlen" %"(" <argument_expression_list> %")"
+    | %"typehash" %"(" <typeid_atom> <typeid_continuation>? %")"
+
+<relational_expression> ::= <relational_expression> %"<" <shift_expression>
+    | <relational_expression> %">" <shift_expression>
+    | <relational_expression> %"<=" <shift_expression>
+    | <relational_expression> %">=" <shift_expression>
+    | <shift_expression>
+
+<secondary_block> ::= <statement>
+
+<selection_header> ::= <simple_declaration>
+    | <declaration> <expression>
+    | <expression>
+
+<selection_statement> ::= %"if" %"(" <selection_header> %")" <secondary_block> %"else" <secondary_block>
+    | %"if" %"(" <selection_header> %")" <secondary_block>
+<selection_statement> ::= %"switch" %"(" <selection_header> %")" <secondary_block>
+
+<shift_expression> ::= <shift_expression> %"<<" <additive_expression>
+    | <shift_expression> %">>" <additive_expression>
+    | <additive_expression>
+
+<simple_declaration> ::= <attribute_specifier_sequence>? <declaration_specifiers> <declarator> %"=" <initializer>
+
+<specifier_qualifier_list> ::= <specifier_qualifier_list> <type_specifier_qualifier> <attribute_specifier_sequence>?
+    | <type_specifier_qualifier> <attribute_specifier_sequence>?
+
+<standard_attribute> ::= <identifier>
+
+<statement> ::= <labeled_statement>
+    | <unlabeled_statement>
+
+<_kw_kw_static_assert> ::= %"static_assert"
+    | %"_Static_assert"
+
+<static_assert_declaration> ::= <_kw_kw_static_assert> %"(" <constant_expression> %","? <string_literal>? %")" %";"
+
+<_kw_kw_storage_class> ::= %"auto"
+    | %"constexpr"
+    | %"extern"
+    | %"register"
+    | %"static"
+    | %"thread_local"
+    | %"typedef"
+    | %"_Thread_local"
+    | %"__thread"
+
+<storage_class_specifier> ::= <_kw_kw_storage_class>
+
+<storage_class_specifiers> ::= <storage_class_specifier>+
+
+<_kw_kw_struct_or_union> ::= %"struct"
+    | %"union"
+
+<tag_name> ::= <identifier>
+    | %TYPEDEF_NAME
+    | <synthetic_identifier>
+
+<_kw_generic_struct> ::= %"_generic_struct"
+
+<struct_or_union_specifier> ::= <_kw_kw_struct_or_union> <attribute_specifier_sequence>? <tag_name>? %"{" <member_declaration_list> %"}"
+    | <_kw_kw_struct_or_union> <attribute_specifier_sequence>? <tag_name>? %"{" %"}"
+    | <_kw_kw_struct_or_union> <attribute_specifier_sequence>? <tag_name>
+    | <_kw_generic_struct> <attribute_specifier_sequence>? <tag_name> %"{" <member_declaration_list> %"}"
+    | <_kw_generic_struct> <attribute_specifier_sequence>? <tag_name> %"{" %"}"
+    | <_kw_generic_struct> <attribute_specifier_sequence>? <tag_name>
+
+<_named_id_kw_typeid> ::= %"typeid"
+<_named_id_kw_option> ::= %"_option"
+<_kw_option_some> ::= %"_some"
+<_kw_option_none> ::= %"_none"
+<_kw_option_is_some> ::= %"_is_some"
+<_kw_option_is_none> ::= %"_is_none"
+<_kw_option_unwrap> ::= %"_unwrap"
+
+<synthetic_identifier> ::= <_named_id_kw_typeid> %"(" <typeid_atom> <typeid_continuation>? %")"
+    | <_named_id_kw_option> %"(" <typeid_atom> <typeid_continuation>? %")"
+    | %"constexpr_paste" %"(" <argument_expression_list> %")"
+
+<_named_id_kw_typestr> ::= %"typestr"
+
+<synthetic_string_literal> ::= <_named_id_kw_typestr> %"(" <typeid_atom> <typeid_continuation>? %")"
+    | <string_literal>
+
+<translation_unit> ::= <external_declaration>+
+
+<type_name> ::= <specifier_qualifier_list> <abstract_declarator>?
+
+<_kw_kw_type_qualifier> ::= %"const"
+    | %"restrict"
+    | %"volatile"
+    | %"_Atomic"
+    | %"__const__"
+    | %"__const"
+    | %"__restrict__"
+    | %"__restrict"
+    | %"__volatile__"
+    | %"__volatile"
+    | %"_Nullable"
+    | %"_Nonnull"
+    | %"_Null_unspecified"
+    | %"__nullable"
+    | %"__nonnull"
+    | %"__null_unspecified"
+
+<type_qualifier_list> ::= <_kw_kw_type_qualifier>+
+
+<_kw_kw_type_specifier> ::= %"void"
+    | %"char"
+    | %"short"
+    | %"int"
+    | %"long"
+    | %"float"
+    | %"double"
+    | %"signed"
+    | %"unsigned"
+    | %"bool"
+    | %"_Bool"
+    | %"_Complex"
+    | %"_Decimal32"
+    | %"_Decimal64"
+    | %"_Decimal128"
+    | %"_Float16"
+    | %"_Float32"
+    | %"_Float32x"
+    | %"_Float64"
+    | %"_Float64x"
+    | %"_Float128"
+    | %"__signed__"
+    | %"__signed"
+    | %"__builtin_va_list"
+    | %"__int128"
+    | %"__int128_t"
+    | %"__uint128_t"
+    | %"__fp16"
+    | %"__bf16"
+    | %"__mfp8"
+    | %"__Float32x4_t"
+    | %"__Float64x2_t"
+    | %"__SVFloat32_t"
+    | %"__SVFloat64_t"
+    | %"__SVBool_t"
+
+<type_specifier> ::= <_kw_kw_type_specifier>
+    | %"_BitInt" %"(" <constant_expression> %")"
+    | <atomic_type_specifier>
+    | <struct_or_union_specifier>
+    | <enum_specifier>
+    | <typedef_name>
+    | <typeof_specifier>
+    | <synthetic_identifier>
+
+<type_specifier_qualifier> ::= <type_specifier>
+    | <_kw_kw_type_qualifier>
+    | <alignment_specifier>
+
+<typeid_atom> ::= <string_literal>
+    | <typeof_specifier_argument>
+
+<typeid_continuation> ::= %"," <typeid_atom> <typeid_continuation>?
+    | %","
+
+<_kw_kw_typeof> ::= %"typeof"
+    | %"__typeof__"
+    | %"__typeof"
+
+<typeof_specifier> ::= <_kw_kw_typeof> %"(" <typeof_specifier_argument> %")"
+    | %"typeof_unqual" %"(" <typeof_specifier_argument> %")"
+
+<typeof_specifier_argument> ::= <type_name>
+    | <expression>
+
+<unary_expression> ::= %"++" <unary_expression>
+    | %"--" <unary_expression>
+    | <unary_operator> <cast_expression>
+    | %"sizeof" %"(" <type_name> %")"
+    | %"sizeof" <unary_expression>
+    | <_kw_kw_alignof> %"(" <type_name> %")"
+    | %"_Countof" %"(" <type_name> %")"
+    | %"_Countof" <unary_expression>
+    | %"&&" <identifier>
+    | <postfix_expression>
+
+<_kw_kw_alignof> ::= %"alignof"
+    | %"_Alignof"
+
+<_ops_op_unary> ::= %"&"
+    | %"*"
+    | %"+"
+    | %"-"
+    | %"~"
+    | %"!"
+
+<unary_operator> ::= <_ops_op_unary>
+
+<unlabeled_statement> ::= <expression_statement>
+    | <attribute_specifier_sequence>? <primary_block>
+    | <attribute_specifier_sequence>? <jump_statement>
+    | <gcc_asm_statement>

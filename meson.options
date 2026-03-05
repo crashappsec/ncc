@@ -1,0 +1,28 @@
+option('cc_path',
+       type: 'string',
+       value: '',
+       description: 'Location of the core C23 compiler')
+option('coverage',
+       type: 'boolean',
+       value: false,
+       description: 'Build with Clang source-based code coverage instrumentation')
+option('rstr_template_styled',
+       type: 'string',
+       value: '',
+       description: 'Override the default styled rstr code generation template')
+option('rstr_template_plain',
+       type: 'string',
+       value: '',
+       description: 'Override the default plain rstr code generation template')
+option('vargs_type',
+       type: 'string',
+       value: '',
+       description: 'Override the vargs struct type name (default: ncc_vargs_t)')
+option('once_prefix',
+       type: 'string',
+       value: '',
+       description: 'Override the once-guard identifier prefix (default: __ncc_)')
+option('rstr_string_type',
+       type: 'string',
+       value: '',
+       description: 'Override the rstr string type name for typehash (default: ncc_string_t*)')
