@@ -47,9 +47,10 @@ should both work.
 
 
 ```sh
-meson setup build
-meson compile -C build
-meson install -C build --destdir /usr/local
+C23CC=/path/to/cc/with/c23/support
+CC=${C23CC} meson setup build
+CC=${C23CC} meson compile -C build
+CC=${C23CC} meson install -C build
 ```
 
 You can then use `ncc` as if it were any other C compiler; generally
