@@ -14,6 +14,7 @@
 
 #include "lib/alloc.h"
 #include "parse/emit.h"
+#include "xform/xform_data.h"
 #include "xform/xform_helpers.h"
 
 #include <ctype.h>
@@ -26,19 +27,12 @@
 #include <unistd.h>
 
 // ============================================================================
-// Helpers: parse template
+// Helpers: parse template (wrapper around shared helper)
 // ============================================================================
 
 static ncc_parse_tree_t *parse_template(ncc_grammar_t *g, const char *nt_name,
                                         const char *src) {
-  ncc_result_t(ncc_parse_tree_ptr_t) r =
-      ncc_xform_parse_template(g, nt_name, src, nullptr);
-  if (ncc_result_is_err(r)) {
-    fprintf(stderr, "xform_constexpr: template parse failed for '%s':\n  %s\n",
-            nt_name, src);
-    return nullptr;
-  }
-  return ncc_result_get(r);
+  return ncc_xform_parse_source(g, nt_name, src, "xform_constexpr");
 }
 
 // ============================================================================
@@ -514,20 +508,7 @@ static char *strip_line_directives(const char *src) {
 
 // Walk to the leftmost leaf of a subtree to find the callee token.
 static const char *get_first_leaf_text(ncc_parse_tree_t *node) {
-  if (!node) {
-    return nullptr;
-  }
-  if (ncc_tree_is_leaf(node)) {
-    return ncc_xform_leaf_text(node);
-  }
-  size_t nc = ncc_tree_num_children(node);
-  for (size_t i = 0; i < nc; i++) {
-    const char *t = get_first_leaf_text(ncc_tree_child(node, i));
-    if (t) {
-      return t;
-    }
-  }
-  return nullptr;
+  return ncc_xform_get_first_leaf_text(node);
 }
 
 // ============================================================================
@@ -594,12 +575,7 @@ static ncc_parse_tree_t *xform_constexpr(ncc_xform_ctx_t *ctx,
   ncc_xform_first_leaf_pos(node, &line, &col);
 
   // Extract compiler path and constexpr headers from user_data.
-  typedef struct {
-    const char *compiler;
-    const char *constexpr_headers;
-  } ncc_xform_data_t;
-
-  ncc_xform_data_t *xdata = (ncc_xform_data_t *)ctx->user_data;
+  ncc_xform_data_t *xdata = ncc_xform_get_data(ctx);
   const char *compiler = xdata ? xdata->compiler : nullptr;
   if (!compiler) {
     fprintf(stderr, "ncc: %u:%u: constexpr: no compiler available\n", line,

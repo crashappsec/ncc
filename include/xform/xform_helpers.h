@@ -33,3 +33,38 @@ void ncc_xform_first_leaf_pos(ncc_parse_tree_t *node,
 // Walk all leaves of a subtree and concatenate their text with spaces.
 // Returns an ncc_string_t.
 ncc_string_t ncc_xform_node_to_text(ncc_parse_tree_t *node);
+
+// Parse a source string into a subtree (wraps ncc_xform_parse_template
+// with error reporting).  Returns nullptr on failure.
+ncc_parse_tree_t *ncc_xform_parse_source(ncc_grammar_t *g, const char *nt_name,
+                                          const char *src, const char *xform_name);
+
+// Find the rightmost leaf token in a subtree.
+ncc_token_info_t *ncc_xform_find_last_leaf_token(ncc_parse_tree_t *node);
+
+// Walk to the leftmost leaf and return its text.
+const char *ncc_xform_get_first_leaf_text(ncc_parse_tree_t *node);
+
+// Check if declaration_specifiers contain a void type
+// (skipping storage_class_specifier and function_specifier).
+bool ncc_xform_has_void_type(ncc_parse_tree_t *decl_specs);
+
+// Collect base type text from declaration_specifiers (type specifiers only,
+// skip storage-class and function specifiers).
+// Returns heap-allocated string. Caller frees.
+char *ncc_xform_collect_base_type(ncc_parse_tree_t *decl_specs);
+
+// Collect qualifiers from declaration_specifiers (storage-class +
+// function specifiers, optionally skipping a named specifier like "_Once").
+// Pass skip=nullptr to include all. Returns heap-allocated string.
+char *ncc_xform_collect_qualifiers(ncc_parse_tree_t *decl_specs,
+                                    const char *skip);
+
+// Shared helpers from xform_constexpr.c (non-static, used by constexpr_paste
+// and option transforms).
+char *compile_and_run(const char *compiler, const char *source,
+                      char **err_out);
+ncc_string_t pprint_subtree(ncc_grammar_t *g, ncc_parse_tree_t *node);
+ncc_parse_tree_t **collect_arguments(ncc_parse_tree_t *arglist, int *nargs);
+char *collect_file_scope_declarations(ncc_xform_ctx_t *ctx,
+                                      ncc_parse_tree_t *call_node);

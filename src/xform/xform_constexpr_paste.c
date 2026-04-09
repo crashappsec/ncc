@@ -9,6 +9,7 @@
 // Registered as pre-order on "synthetic_identifier" and "postfix_expression".
 
 #include "lib/alloc.h"
+#include "xform/xform_data.h"
 #include "xform/xform_helpers.h"
 
 #include <ctype.h>
@@ -16,13 +17,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-// Shared functions from xform_constexpr.c.
-extern char *compile_and_run(const char *compiler, const char *source,
-                             char **err_out);
-extern ncc_string_t pprint_subtree(ncc_grammar_t *g, ncc_parse_tree_t *node);
-extern ncc_parse_tree_t **collect_arguments(ncc_parse_tree_t *arglist,
-                                            int *nargs);
 
 // ============================================================================
 // Helpers
@@ -139,25 +133,9 @@ static bool try_eval_integer(const char *compiler, const char *expr,
   return ok;
 }
 
-// ============================================================================
-// get_first_leaf_text — walk to leftmost leaf of a subtree
-// ============================================================================
-
+// get_first_leaf_text — uses shared helper.
 static const char *get_first_leaf_text(ncc_parse_tree_t *node) {
-  if (!node) {
-    return nullptr;
-  }
-  if (ncc_tree_is_leaf(node)) {
-    return ncc_xform_leaf_text(node);
-  }
-  size_t nc = ncc_tree_num_children(node);
-  for (size_t i = 0; i < nc; i++) {
-    const char *t = get_first_leaf_text(ncc_tree_child(node, i));
-    if (t) {
-      return t;
-    }
-  }
-  return nullptr;
+  return ncc_xform_get_first_leaf_text(node);
 }
 
 // ============================================================================
@@ -203,12 +181,7 @@ static ncc_parse_tree_t *xform_constexpr_paste(ncc_xform_ctx_t *ctx,
   uint32_t line, col_pos;
   ncc_xform_first_leaf_pos(node, &line, &col_pos);
 
-  typedef struct {
-    const char *compiler;
-    const char *constexpr_headers;
-  } ncc_xform_data_t;
-
-  ncc_xform_data_t *xdata = (ncc_xform_data_t *)ctx->user_data;
+  ncc_xform_data_t *xdata = ncc_xform_get_data(ctx);
   const char *compiler = xdata ? xdata->compiler : nullptr;
 
   // Find argument_expression_list child (may be wrapped in group node).

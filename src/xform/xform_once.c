@@ -1,76 +1,32 @@
-// xform_once.c — Transform: `once` function specifier.
+// xform_once.c — Transform: `_Once` function specifier.
 //
-// `once` makes a function execute its body at most once (thread-safe).
+// `_Once` makes a function execute its body at most once (thread-safe).
 // Subsequent calls return the cached result (or nothing, for void fns).
+//
+// Uses C23 stdatomic: _Atomic int flag, atomic_load/atomic_fetch_or/atomic_store.
+// The original function body is moved to a static __internal_<name> helper;
+// the public wrapper uses a three-state flag (0=uncalled, 1=running, 2=done).
+//
+// Two templates ("once" and "once_void") are registered in ncc.c and
+// instantiated here with $0..$7 substitutions.
 //
 // Registered as pre-order on "translation_unit" with SKIP_CHILDREN.
 // We walk external_declaration children ourselves to insert siblings.
-//
-// For void functions:
-//   static int <pfx><name>_once_flag;
-//   static void <pfx>once_impl_<name>(void) { <original body> }
-//   void <name>(void) {
-//       if (__atomic_exchange_n(&<pfx><name>_once_flag,1,__ATOMIC_ACQ_REL)==0){
-//           <pfx>once_impl_<name>();
-//           __atomic_store_n(&<pfx><name>_once_flag,2,__ATOMIC_RELEASE);
-//       } else {
-//           while(__atomic_load_n(&<pfx><name>_once_flag,__ATOMIC_ACQUIRE)!=2){}
-//       }
-//   }
-//
-// For non-void functions, additionally:
-//   static long long <pfx><name>_cached;
-//   ... and the wrapper returns (ReturnType)<pfx><name>_cached.
-//
-// Where <pfx> defaults to "__ncc_" (overridable via once_prefix config).
 
 #include "lib/alloc.h"
+#include "lib/buffer.h"
+#include "xform/xform_data.h"
 #include "xform/xform_helpers.h"
+#include "xform/xform_template.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 // ============================================================================
-// Layout-compatible accessor for ncc_xform_data_t.once_prefix
+// Helpers: find the declaration_specifier containing "_Once"
 // ============================================================================
 
-#define _NCC_META_TABLE_SIZE 256
-
-typedef struct {
-  char *key;
-  void *value;
-} _once_meta_entry_t;
-
-typedef struct {
-  _once_meta_entry_t entries[_NCC_META_TABLE_SIZE];
-} _once_meta_table_t;
-
-typedef struct {
-  const char *compiler;
-  const char *constexpr_headers;
-  _once_meta_table_t func_meta;
-  ncc_dict_t option_meta;
-  ncc_dict_t option_decls;
-  ncc_dict_t generic_struct_decls;
-  void *template_reg;
-  const char *vargs_type;
-  const char *once_prefix;
-} _once_xform_data_t;
-
-static const char *get_once_prefix(ncc_xform_ctx_t *ctx) {
-  _once_xform_data_t *d = ctx->user_data;
-  return d->once_prefix;
-}
-
-// ============================================================================
-// Helpers: find the declaration_specifier containing "once"
-// ============================================================================
-
-// DFS through a subtree looking for a leaf whose text is "once".
-// Returns the declaration_specifier ancestor that wraps it, or nullptr.
-// We look for: declaration_specifiers -> declaration_specifier ->
-//              function_specifier -> "once" leaf
 static ncc_parse_tree_t *find_once_leaf(ncc_parse_tree_t *node) {
   if (!node) {
     return nullptr;
@@ -88,7 +44,6 @@ static ncc_parse_tree_t *find_once_leaf(ncc_parse_tree_t *node) {
   return nullptr;
 }
 
-// Find the declaration_specifier child of decl_specs that contains "once".
 static ncc_parse_tree_t *find_once_decl_spec(ncc_parse_tree_t *decl_specs) {
   if (!decl_specs) {
     return nullptr;
@@ -99,8 +54,6 @@ static ncc_parse_tree_t *find_once_decl_spec(ncc_parse_tree_t *decl_specs) {
     if (!ds || ncc_tree_is_leaf(ds)) {
       continue;
     }
-    // Each ds is a declaration_specifier.
-    // Check if it contains a function_specifier with "once".
     if (find_once_leaf(ds)) {
       return ds;
     }
@@ -109,7 +62,7 @@ static ncc_parse_tree_t *find_once_decl_spec(ncc_parse_tree_t *decl_specs) {
 }
 
 // ============================================================================
-// Helpers: remove once from declaration_specifiers
+// Helpers: remove _Once from declaration_specifiers
 // ============================================================================
 
 static void remove_once(ncc_parse_tree_t *decl_specs,
@@ -132,7 +85,6 @@ static const char *extract_func_name(ncc_parse_tree_t *node) {
     return nullptr;
   }
   if (ncc_tree_is_leaf(node)) {
-    // Check if this is an IDENTIFIER token.
     ncc_token_info_t *tok = ncc_tree_leaf_value(node);
     if (tok && tok->tid == (int32_t)NCC_TOK_IDENTIFIER) {
       return ncc_xform_leaf_text(node);
@@ -149,316 +101,146 @@ static const char *extract_func_name(ncc_parse_tree_t *node) {
   return nullptr;
 }
 
-// ============================================================================
-// Helpers: check if return type is void
-// ============================================================================
+// Get parameter list text from the declarator subtree.
+static char *collect_param_list_text(ncc_parse_tree_t *declarator) {
+  ncc_parse_tree_t *dd = ncc_xform_find_child_nt(declarator, "direct_declarator");
+  if (!dd) {
+    dd = declarator;
+  }
 
-// Walk declaration_specifiers looking for a "void" leaf that's inside
-// a type_specifier (not a storage_class or function_specifier).
-static bool has_void_type(ncc_parse_tree_t *node) {
-  if (!node) {
-    return false;
-  }
-  if (ncc_tree_is_leaf(node)) {
-    return ncc_xform_leaf_text_eq(node, "void");
-  }
-  // Skip storage_class_specifier and function_specifier subtrees.
-  if (ncc_xform_nt_name_is(node, "storage_class_specifier") ||
-      ncc_xform_nt_name_is(node, "function_specifier")) {
-    return false;
-  }
-  size_t nc = ncc_tree_num_children(node);
-  for (size_t i = 0; i < nc; i++) {
-    if (has_void_type(ncc_tree_child(node, i))) {
-      return true;
-    }
-  }
-  return false;
-}
-
-// ============================================================================
-// Helpers: collect return type text from declaration_specifiers
-// ============================================================================
-
-// Collect leaf text from declaration_specifiers, skipping storage_class
-// and function_specifier NTs. This gives us the return type text for
-// casting in the wrapper.
-static void collect_type_text(ncc_parse_tree_t *node, char *buf, size_t cap,
-                              size_t *pos) {
-  if (!node) {
-    return;
-  }
-  if (ncc_tree_is_leaf(node)) {
-    const char *text = ncc_xform_leaf_text(node);
-    if (text) {
-      size_t tlen = strlen(text);
-      if (*pos + tlen + 2 < cap) {
-        if (*pos > 0) {
-          buf[(*pos)++] = ' ';
+  // Search for parameter_type_list at this level and one level deeper.
+  ncc_parse_tree_t *ptl = ncc_xform_find_child_nt(dd, "parameter_type_list");
+  if (!ptl) {
+    size_t nc = ncc_tree_num_children(dd);
+    for (size_t i = 0; i < nc; i++) {
+      ncc_parse_tree_t *c = ncc_tree_child(dd, i);
+      if (c && !ncc_tree_is_leaf(c)) {
+        ptl = ncc_xform_find_child_nt(c, "parameter_type_list");
+        if (ptl) {
+          break;
         }
-        memcpy(buf + *pos, text, tlen);
-        *pos += tlen;
-        buf[*pos] = '\0';
       }
     }
-    return;
   }
-  // Skip storage_class and function_specifier subtrees.
-  if (ncc_xform_nt_name_is(node, "storage_class_specifier") ||
-      ncc_xform_nt_name_is(node, "function_specifier")) {
-    return;
-  }
-  size_t nc = ncc_tree_num_children(node);
-  for (size_t i = 0; i < nc; i++) {
-    collect_type_text(ncc_tree_child(node, i), buf, cap, pos);
-  }
-}
 
-// ============================================================================
-// Helpers: find child index
-// ============================================================================
-
-static int find_child_index(ncc_parse_tree_t *parent, ncc_parse_tree_t *child) {
-  size_t nc = ncc_tree_num_children(parent);
-  for (size_t i = 0; i < nc; i++) {
-    if (ncc_tree_child(parent, i) == child) {
-      return (int)i;
+  if (ptl) {
+    ncc_string_t text = ncc_xform_node_to_text(ptl);
+    if (text.data) {
+      char *result = ncc_alloc_size(1, text.u8_bytes + 1);
+      memcpy(result, text.data, text.u8_bytes);
+      result[text.u8_bytes] = '\0';
+      ncc_free(text.data);
+      return result;
     }
   }
-  return -1;
+
+  char *result = ncc_alloc_size(1, 5);
+  memcpy(result, "void", 5);
+  return result;
 }
 
-// ============================================================================
-// Helpers: check if decl_specs already has "static"
-// ============================================================================
+// Extract just the parameter names, joined with ", ".
+static char *collect_param_names(ncc_parse_tree_t *declarator) {
+  ncc_parse_tree_t *dd = ncc_xform_find_child_nt(declarator, "direct_declarator");
+  if (!dd) {
+    dd = declarator;
+  }
 
-static bool has_static(ncc_parse_tree_t *decl_specs) {
-  if (!decl_specs) {
-    return false;
-  }
-  if (ncc_tree_is_leaf(decl_specs)) {
-    return ncc_xform_leaf_text_eq(decl_specs, "static");
-  }
-  size_t nc = ncc_tree_num_children(decl_specs);
-  for (size_t i = 0; i < nc; i++) {
-    if (has_static(ncc_tree_child(decl_specs, i))) {
-      return true;
+  ncc_parse_tree_t *ptl = nullptr;
+  ptl = ncc_xform_find_child_nt(dd, "parameter_type_list");
+  if (!ptl) {
+    size_t nc = ncc_tree_num_children(dd);
+    for (size_t i = 0; i < nc; i++) {
+      ncc_parse_tree_t *c = ncc_tree_child(dd, i);
+      if (c && !ncc_tree_is_leaf(c)) {
+        ptl = ncc_xform_find_child_nt(c, "parameter_type_list");
+        if (ptl) {
+          break;
+        }
+      }
     }
   }
-  return false;
-}
 
-// ============================================================================
-// Template parsing helper
-// ============================================================================
-
-static ncc_parse_tree_t *parse_template(ncc_grammar_t *g, const char *nt_name,
-                                        const char *src) {
-  ncc_result_t(ncc_parse_tree_ptr_t) r =
-      ncc_xform_parse_template(g, nt_name, src, nullptr);
-  if (ncc_result_is_err(r)) {
-    fprintf(stderr, "xform_once: template parse failed for '%s': %s\n", nt_name,
-            src);
-    return nullptr;
+  if (!ptl) {
+    char *result = ncc_alloc_size(1, 1);
+    result[0] = '\0';
+    return result;
   }
-  return ncc_result_get(r);
-}
 
-// ============================================================================
-// Helpers: rename identifier in a declarator subtree (DFS)
-// ============================================================================
-
-// Rename the first IDENTIFIER leaf found in a subtree.
-// Walks depth-first. When a parent NT contains an IDENTIFIER leaf,
-// replaces that leaf with a new token node bearing new_name.
-static bool rename_identifier(ncc_parse_tree_t *node, const char *new_name,
-                              uint32_t line, uint32_t col) {
-  if (!node || ncc_tree_is_leaf(node)) {
-    return false;
+  // Check for (void).
+  ncc_string_t ptl_text = ncc_xform_node_to_text(ptl);
+  if (ptl_text.data && strcmp(ptl_text.data, "void") == 0) {
+    ncc_free(ptl_text.data);
+    char *result = ncc_alloc_size(1, 1);
+    result[0] = '\0';
+    return result;
   }
-  size_t nc = ncc_tree_num_children(node);
-  for (size_t i = 0; i < nc; i++) {
-    ncc_parse_tree_t *child = ncc_tree_child(node, i);
-    if (!child) {
+  ncc_free(ptl_text.data);
+
+  // DFS to find parameter_declaration nodes and extract identifiers.
+  ncc_buffer_t *buf = ncc_buffer_empty();
+  bool first = true;
+
+  struct { ncc_parse_tree_t *node; } stack[64];
+  int sp = 0;
+  stack[sp++].node = ptl;
+
+  while (sp > 0) {
+    ncc_parse_tree_t *n = stack[--sp].node;
+    if (!n || ncc_tree_is_leaf(n)) {
       continue;
     }
-    if (ncc_tree_is_leaf(child)) {
-      ncc_token_info_t *tok = ncc_tree_leaf_value(child);
-      if (tok && tok->tid == (int32_t)NCC_TOK_IDENTIFIER) {
-        ncc_parse_tree_t *new_leaf =
-            ncc_xform_make_token_node(NCC_TOK_IDENTIFIER, new_name, line, col);
-        ncc_xform_set_child(node, i, new_leaf);
-        return true;
+
+    if (ncc_xform_nt_name_is(n, "parameter_declaration")) {
+      ncc_parse_tree_t *pd_decl = ncc_xform_find_child_nt(n, "declarator");
+      if (pd_decl) {
+        const char *name = extract_func_name(pd_decl);
+        if (name) {
+          if (!first) {
+            ncc_buffer_puts(buf, ", ");
+          }
+          ncc_buffer_puts(buf, name);
+          first = false;
+        }
       }
-    } else {
-      if (rename_identifier(child, new_name, line, col)) {
-        return true;
+      continue;
+    }
+
+    size_t nc = ncc_tree_num_children(n);
+    for (size_t i = nc; i > 0; i--) {
+      if (sp < 64) {
+        stack[sp++].node = ncc_tree_child(n, i - 1);
       }
     }
   }
-  return false;
+
+  return ncc_buffer_take(buf);
 }
 
-// ============================================================================
-// Helpers: add "static" to declaration_specifiers
-// ============================================================================
-
-// Parses "static int x;" as external_declaration, then extracts the
-// "declaration_specifier" node wrapping "static" and inserts it at
-// position 0 in the target decl_specs.
-static void add_static_to_decl_specs(ncc_grammar_t *g,
-                                     ncc_parse_tree_t *decl_specs) {
-  if (has_static(decl_specs)) {
-    return;
-  }
-
-  // Parse a minimal declaration to get a well-formed static decl_spec.
-  ncc_parse_tree_t *tmp =
-      parse_template(g, "external_declaration", "static int __tmp;");
-  if (!tmp) {
-    return;
-  }
-
-  // Navigate: external_declaration -> declaration -> declaration_specifiers
-  //           -> first declaration_specifier (the "static" one)
-  ncc_parse_tree_t *decl = ncc_xform_find_child_nt(tmp, "declaration");
-  if (!decl) {
-    return;
-  }
-  ncc_parse_tree_t *tmp_specs =
-      ncc_xform_find_child_nt(decl, "declaration_specifiers");
-  if (!tmp_specs || ncc_tree_num_children(tmp_specs) < 1) {
-    return;
-  }
-
-  // The first declaration_specifier should be the "static" one.
-  ncc_parse_tree_t *static_ds = ncc_tree_child(tmp_specs, 0);
-  if (!static_ds) {
-    return;
-  }
-
-  // Clone and insert at position 0.
-  ncc_parse_tree_t *cloned = ncc_xform_clone(static_ds);
-  ncc_xform_insert_child(decl_specs, 0, cloned);
-}
-
-// ============================================================================
-// Build impl function from clone of original
-// ============================================================================
-
-static ncc_parse_tree_t *build_impl_function(ncc_xform_ctx_t *ctx,
-                                             ncc_parse_tree_t *ext_decl,
-                                             const char *func_name,
-                                             uint32_t line, uint32_t col) {
-  // Clone the entire external_declaration.
-  ncc_parse_tree_t *impl_ext = ncc_xform_clone(ext_decl);
-
-  // Get the function_definition inside.
-  ncc_parse_tree_t *impl_fd = nullptr;
-  size_t nc = ncc_tree_num_children(impl_ext);
-  for (size_t i = 0; i < nc; i++) {
-    ncc_parse_tree_t *c = ncc_tree_child(impl_ext, i);
-    if (ncc_xform_nt_name_is(c, "function_definition")) {
-      impl_fd = c;
-      break;
-    }
-  }
-  if (!impl_fd) {
-    return impl_ext;
-  }
-
-  // Add "static" to declaration_specifiers.
-  ncc_parse_tree_t *impl_specs =
-      ncc_xform_find_child_nt(impl_fd, "declaration_specifiers");
-  if (impl_specs) {
-    add_static_to_decl_specs(ctx->grammar, impl_specs);
-  }
-
-  // Rename: function name -> <once_prefix>once_impl_<name>
-  const char *pfx = get_once_prefix(ctx);
-  char impl_name[256];
-  snprintf(impl_name, sizeof(impl_name), "%sonce_impl_%s", pfx, func_name);
-
-  ncc_parse_tree_t *impl_decl = ncc_xform_find_child_nt(impl_fd, "declarator");
-  if (impl_decl) {
-    rename_identifier(impl_decl, impl_name, line, col);
-  }
-
-  // For non-void: we need to wrap the body so it stores the return value
-  // into <pfx><name>_cached. But this is complex (need to find/modify
-  // return statements deep in the body). Instead, the wrapper calls the
-  // impl (which keeps its original return type) and stores the result.
-  // So impl keeps its original body and return type unchanged.
-
-  return impl_ext;
-}
-
-// ============================================================================
-// Build wrapper body using template parsing
-// ============================================================================
-
-static ncc_parse_tree_t *build_wrapper_body(ncc_xform_ctx_t *ctx,
-                                            const char *func_name,
-                                            bool void_ret,
-                                            const char *ret_type_text) {
-  const char *pfx = get_once_prefix(ctx);
-  char src[2048];
-
-  // Fast path: if flag==2 (done), skip the exchange entirely.
-  // Without this, exchange(flag,1) clobbers the "done" state and
-  // causes subsequent callers to spin forever.
-  if (void_ret) {
-    snprintf(src, sizeof(src),
-             "{ if (__atomic_load_n("
-             "&%s%s_once_flag, __ATOMIC_ACQUIRE) == 2) { }"
-             " else if (__atomic_exchange_n("
-             "&%s%s_once_flag, 1, __ATOMIC_ACQ_REL) == 0) {"
-             " %sonce_impl_%s();"
-             " __atomic_store_n("
-             "&%s%s_once_flag, 2, __ATOMIC_RELEASE);"
-             "} else {"
-             " while (__atomic_load_n("
-             "&%s%s_once_flag, __ATOMIC_ACQUIRE) != 2) {}"
-             "} }",
-             pfx, func_name, pfx, func_name, pfx, func_name, pfx, func_name,
-             pfx, func_name);
-  } else {
-    snprintf(src, sizeof(src),
-             "{ if (__atomic_load_n("
-             "&%s%s_once_flag, __ATOMIC_ACQUIRE) == 2) { }"
-             " else if (__atomic_exchange_n("
-             "&%s%s_once_flag, 1, __ATOMIC_ACQ_REL) == 0) {"
-             " %s%s_cached = (long long)%sonce_impl_%s();"
-             " __atomic_store_n("
-             "&%s%s_once_flag, 2, __ATOMIC_RELEASE);"
-             "} else {"
-             " while (__atomic_load_n("
-             "&%s%s_once_flag, __ATOMIC_ACQUIRE) != 2) {}"
-             "}"
-             " return (%s)%s%s_cached; }",
-             pfx, func_name, pfx, func_name, pfx, func_name, pfx, func_name,
-             pfx, func_name, pfx, func_name, ret_type_text, pfx, func_name);
-  }
-
-  // Parse as compound_statement.
+// Get the function body text (compound_statement including braces).
+static char *collect_body_text(ncc_parse_tree_t *func_body) {
   ncc_parse_tree_t *compound =
-      parse_template(ctx->grammar, "compound_statement", src);
+      ncc_xform_find_child_nt(func_body, "compound_statement");
   if (!compound) {
-    return nullptr;
+    compound = func_body;
   }
-
-  // Wrap in function_body NT.
-  ncc_parse_tree_t *children[] = {compound};
-  ncc_parse_tree_t *fb = ncc_xform_make_node_with_children(
-      ctx->grammar, "function_body", 0, children, 1);
-  return fb;
+  ncc_string_t text = ncc_xform_node_to_text(compound);
+  if (text.data) {
+    char *result = ncc_alloc_size(1, text.u8_bytes + 1);
+    memcpy(result, text.data, text.u8_bytes);
+    result[text.u8_bytes] = '\0';
+    ncc_free(text.data);
+    return result;
+  }
+  char *result = ncc_alloc_size(1, 4);
+  memcpy(result, "{ }", 4);
+  return result;
 }
 
 // ============================================================================
-// Main pre-order transform on translation_unit
+// Flattening infrastructure
 // ============================================================================
 
-// Check if a node is a group wrapper (from BNF +, *, ?).
 static bool is_group_node(ncc_parse_tree_t *node) {
   if (!node || ncc_tree_is_leaf(node)) {
     return false;
@@ -467,7 +249,6 @@ static bool is_group_node(ncc_parse_tree_t *node) {
   return pn.group_top;
 }
 
-// Growable array of parse tree pointers.
 typedef struct {
   ncc_parse_tree_t **items;
   size_t len;
@@ -488,8 +269,6 @@ static void ptrvec_push(ptrvec_t *v, ncc_parse_tree_t *p) {
   v->items[v->len++] = p;
 }
 
-// Recursively collect all non-group children from a (possibly nested)
-// group tree into a flat array.
 static void flatten_group(ncc_parse_tree_t *node, ptrvec_t *out) {
   if (!node) {
     return;
@@ -508,12 +287,20 @@ static void flatten_group(ncc_parse_tree_t *node, ptrvec_t *out) {
   }
 }
 
+static void flatten_tu(ncc_parse_tree_t *tu, ptrvec_t *out) {
+  size_t nc = ncc_tree_num_children(tu);
+  for (size_t i = 0; i < nc; i++) {
+    flatten_group(ncc_tree_child(tu, i), out);
+  }
+}
+
+// ============================================================================
+// Main pre-order transform on translation_unit
+// ============================================================================
+
 static ncc_parse_tree_t *
 xform_once_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
               [[maybe_unused]] ncc_xform_control_t *control) {
-  // The BNF `<translation_unit> ::= <external_declaration>+` creates a
-  // right-recursive chain of group wrapper nodes. Flatten them into a
-  // single array so we can scan and insert siblings easily.
   ptrvec_t flat;
   ptrvec_init(&flat, 256);
 
@@ -524,14 +311,12 @@ xform_once_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
 
   bool changed = false;
 
-  // Process the flat list, possibly inserting new nodes.
   for (size_t i = 0; i < flat.len; i++) {
     ncc_parse_tree_t *ext_decl = flat.items[i];
     if (!ext_decl || ncc_tree_is_leaf(ext_decl)) {
       continue;
     }
 
-    // external_declaration wraps function_definition or declaration.
     ncc_parse_tree_t *inner = nullptr;
     size_t inner_nc = ncc_tree_num_children(ext_decl);
     for (size_t j = 0; j < inner_nc; j++) {
@@ -557,7 +342,7 @@ xform_once_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
         continue;
       }
 
-      // --- Found a once function definition ---
+      // --- Found a _Once function definition ---
       ncc_parse_tree_t *declarator =
           ncc_xform_find_child_nt(inner, "declarator");
       ncc_parse_tree_t *func_body =
@@ -571,73 +356,104 @@ xform_once_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
         continue;
       }
 
-      bool void_ret = has_void_type(decl_specs);
+      bool void_ret = ncc_xform_has_void_type(decl_specs);
+      ncc_xform_data_t *xdata = ncc_xform_get_data(ctx);
+      const char *pfx = xdata->once_prefix;
 
-      uint32_t line, col;
-      ncc_xform_first_leaf_pos(inner, &line, &col);
+      // Build template arguments.
+      char *base_type = ncc_xform_collect_base_type(decl_specs);
+      char *quals = ncc_xform_collect_qualifiers(decl_specs, "_Once");
+      char *params = collect_param_list_text(declarator);
+      char *param_names = collect_param_names(declarator);
+      char *body = collect_body_text(func_body);
 
-      // 1. Remove 'once' from declaration_specifiers.
-      remove_once(decl_specs, once_ds);
+      // Build prefixed flag/cache names.
+      ncc_buffer_t *flag_buf = ncc_buffer_empty();
+      ncc_buffer_puts(flag_buf, pfx);
+      ncc_buffer_puts(flag_buf, fname);
+      ncc_buffer_puts(flag_buf, "_once_flag");
+      char *flag_name = ncc_buffer_take(flag_buf);
 
-      // 2. Insert static flag declaration before this function.
-      const char *pfx = get_once_prefix(ctx);
-      char buf[512];
-      snprintf(buf, sizeof(buf), "static int %s%s_once_flag;", pfx, fname);
-      ncc_parse_tree_t *flag_node =
-          parse_template(ctx->grammar, "external_declaration", buf);
-      if (flag_node) {
-        ptrvec_push(&flat, nullptr); // grow
-        memmove(&flat.items[i + 1], &flat.items[i],
-                (flat.len - 1 - i) * sizeof(ncc_parse_tree_t *));
-        flat.items[i] = flag_node;
-        i++;
-      }
-
-      // 3. If non-void: insert cached result declaration.
+      char *cache_name = nullptr;
       if (!void_ret) {
-        snprintf(buf, sizeof(buf), "static long long %s%s_cached;", pfx, fname);
-        ncc_parse_tree_t *cached_node =
-            parse_template(ctx->grammar, "external_declaration", buf);
-        if (cached_node) {
-          ptrvec_push(&flat, nullptr);
-          memmove(&flat.items[i + 1], &flat.items[i],
-                  (flat.len - 1 - i) * sizeof(ncc_parse_tree_t *));
-          flat.items[i] = cached_node;
-          i++;
+        ncc_buffer_t *cache_buf = ncc_buffer_empty();
+        ncc_buffer_puts(cache_buf, pfx);
+        ncc_buffer_puts(cache_buf, fname);
+        ncc_buffer_puts(cache_buf, "_once_cache");
+        cache_name = ncc_buffer_take(cache_buf);
+      }
+
+      // Template slots:
+      //   $0 = func name
+      //   $1 = base return type
+      //   $2 = qualifiers (may be empty — but template handles it)
+      //   $3 = param list text
+      //   $4 = param names
+      //   $5 = body text { ... }
+      //   $6 = flag variable name
+      //   $7 = cache variable name (non-void only)
+      ncc_template_registry_t *tmpl_reg = xdata->template_reg;
+      ncc_result_t(ncc_parse_tree_ptr_t) r;
+
+      if (void_ret) {
+        const char *args[] = {fname, base_type, quals, params,
+                              param_names, body, flag_name};
+        r = ncc_template_instantiate(tmpl_reg, "once_void", args, 7);
+      } else {
+        const char *args[] = {fname, base_type, quals, params,
+                              param_names, body, flag_name, cache_name};
+        r = ncc_template_instantiate(tmpl_reg, "once", args, 8);
+      }
+
+      ncc_free(base_type);
+      ncc_free(quals);
+      ncc_free(params);
+      ncc_free(param_names);
+      ncc_free(body);
+      ncc_free(flag_name);
+      ncc_free(cache_name);
+
+      if (ncc_result_is_err(r)) {
+        fprintf(stderr, "xform_once: template instantiation failed for '%s'\n",
+                fname);
+        continue;
+      }
+
+      ncc_parse_tree_t *new_tu = ncc_result_get(r);
+
+      // Flatten the new TU and splice into the flat list.
+      ptrvec_t new_items;
+      ptrvec_init(&new_items, 16);
+      flatten_tu(new_tu, &new_items);
+
+      if (new_items.len > 0) {
+        size_t new_total = flat.len - 1 + new_items.len;
+        ncc_parse_tree_t **new_arr =
+            ncc_alloc_array(ncc_parse_tree_t *, new_total);
+
+        if (i > 0) {
+          memcpy(new_arr, flat.items, i * sizeof(ncc_parse_tree_t *));
         }
-      }
-
-      // 4. Build impl function (clone of original, add static, rename).
-      ncc_parse_tree_t *impl_ext =
-          build_impl_function(ctx, ext_decl, fname, line, col);
-      if (impl_ext) {
-        ptrvec_push(&flat, nullptr);
-        memmove(&flat.items[i + 1], &flat.items[i],
-                (flat.len - 1 - i) * sizeof(ncc_parse_tree_t *));
-        flat.items[i] = impl_ext;
-        i++;
-      }
-
-      // 5. Extract return type text for cast in wrapper.
-      char ret_type[256] = {0};
-      size_t rpos = 0;
-      collect_type_text(decl_specs, ret_type, sizeof(ret_type), &rpos);
-      if (rpos == 0) {
-        strcpy(ret_type, "int");
-      }
-
-      // 6. Replace original function body with wrapper body.
-      ncc_parse_tree_t *wrapper_fb =
-          build_wrapper_body(ctx, fname, void_ret, ret_type);
-      if (wrapper_fb) {
-        int body_idx = find_child_index(inner, func_body);
-        if (body_idx >= 0) {
-          ncc_xform_set_child(inner, (size_t)body_idx, wrapper_fb);
+        memcpy(new_arr + i, new_items.items,
+               new_items.len * sizeof(ncc_parse_tree_t *));
+        size_t after = flat.len - i - 1;
+        if (after > 0) {
+          memcpy(new_arr + i + new_items.len, flat.items + i + 1,
+                 after * sizeof(ncc_parse_tree_t *));
         }
+
+        ncc_free(flat.items);
+        flat.items = new_arr;
+        flat.len = new_total;
+        flat.cap = new_total;
+
+        i += new_items.len - 1;
       }
 
+      ncc_free(new_items.items);
       changed = true;
       ctx->nodes_replaced++;
+
     } else if (ncc_xform_nt_name_is(inner, "declaration")) {
       ncc_parse_tree_t *decl_specs =
           ncc_xform_find_child_nt(inner, "declaration_specifiers");
@@ -650,9 +466,6 @@ xform_once_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
         continue;
       }
 
-      // Check if this is a function prototype (has a function
-      // declarator) or a variable declaration. _Once on a
-      // variable is an error.
       ncc_parse_tree_t *declarator =
           ncc_xform_find_child_nt(inner, "declarator");
       if (!declarator) {
@@ -660,8 +473,6 @@ xform_once_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
       }
       bool is_func_proto = false;
       if (declarator) {
-        // A function prototype has a direct_declarator with
-        // "(parameter_type_list)" — check for "(" leaf.
         ncc_string_t text = ncc_xform_node_to_text(declarator);
         if (text.data && strchr(text.data, '(')) {
           is_func_proto = true;
@@ -680,7 +491,6 @@ xform_once_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
         exit(1);
       }
 
-      // Function prototype: just strip 'once'.
       remove_once(decl_specs, once_ds);
       changed = true;
       ctx->nodes_replaced++;
@@ -692,12 +502,9 @@ xform_once_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
     return nullptr;
   }
 
-  // Rebuild: replace tu's children with a single flat group node
-  // containing all the external_declarations (including new ones).
-  // Create a new group node with group_top=true.
   ncc_nt_node_t gpn = {0};
   gpn.name = ncc_string_from_cstr("$$group_once");
-  gpn.id = (1 << 28); // NCC_GROUP_ID
+  gpn.id = (1 << 28);
   gpn.group_top = true;
 
   ncc_parse_tree_t *new_group =
@@ -711,7 +518,6 @@ xform_once_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
 
   ncc_free(flat.items);
 
-  // Replace tu's children with the single new group node.
   ncc_tree_replace_children(tu, ncc_alloc_array(ncc_parse_tree_t *, 1), 1);
   ncc_tree_set_child(tu, 0, new_group);
 

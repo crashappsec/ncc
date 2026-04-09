@@ -1,0 +1,37 @@
+// _Once template (void)
+// $0 = function name
+// $1 = "void" (base return type)
+// $2 = qualifiers (e.g. "static inline", may be empty)
+// $3 = parameter list text
+// $4 = parameter names only
+// $5 = original function body { ... }
+// $6 = flag variable name (prefixed)
+
+#include <stdatomic.h>
+
+_Atomic int $6 = 0;
+static void __internal_$0($3);
+
+$2 void $0($3) {
+   int expected = atomic_load(&$6);
+   switch (expected) {
+   case 2:
+      return;
+   case 1:
+   wait_for_first_in:
+      while (atomic_load(&$6) != 2) { }
+      return;
+   case 0:
+      if (atomic_fetch_or(&$6, 1)) {
+          goto wait_for_first_in;
+      }
+      __internal_$0($4);
+      atomic_store(&$6, 2);
+      return;
+   default:
+      unreachable();
+   }
+}
+
+static void __internal_$0($3)
+$5

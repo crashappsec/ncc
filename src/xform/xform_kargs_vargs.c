@@ -10,6 +10,7 @@
 
 #include "lib/alloc.h"
 #include "lib/string.h"
+#include "xform/xform_data.h"
 #include "xform/xform_helpers.h"
 
 #include <inttypes.h>
@@ -18,34 +19,11 @@
 #include <string.h>
 
 // ============================================================================
-// Layout-compatible accessor for ncc_xform_data_t.vargs_type
+// Accessor for ncc_xform_data_t.vargs_type
 // ============================================================================
 
-#define _NCC_META_TABLE_SIZE 256
-
-typedef struct {
-  char *key;
-  void *value;
-} _kv_meta_entry_t;
-
-typedef struct {
-  _kv_meta_entry_t entries[_NCC_META_TABLE_SIZE];
-} _kv_meta_table_t;
-
-typedef struct {
-  const char *compiler;
-  const char *constexpr_headers;
-  _kv_meta_table_t func_meta;
-  ncc_dict_t option_meta;
-  ncc_dict_t option_decls;
-  ncc_dict_t generic_struct_decls;
-  void *template_reg;
-  const char *vargs_type;
-  const char *once_prefix;
-} _kv_xform_data_t;
-
 static const char *get_vargs_type(ncc_xform_ctx_t *ctx) {
-  _kv_xform_data_t *d = ctx->user_data;
+  ncc_xform_data_t *d = ncc_xform_get_data(ctx);
   return d->vargs_type;
 }
 
@@ -101,20 +79,10 @@ typedef struct {
 } meta_table_t;
 
 // Access the meta_table from ctx->user_data.
-// ncc_xform_data_t has: compiler, constexpr_headers, func_meta.
-// We store a pointer to meta_table_t at offset after the two const char*.
-
-typedef struct {
-  const char *compiler;
-  const char *constexpr_headers;
-  meta_table_t func_meta;
-} ncc_kv_xform_data_t;
-
 static meta_table_t *get_meta_table(ncc_xform_ctx_t *ctx) {
-  // The user_data is ncc_xform_data_t which we've extended.
-  // We access the func_meta field.
-  ncc_kv_xform_data_t *d = (ncc_kv_xform_data_t *)ctx->user_data;
-  return &d->func_meta;
+  ncc_xform_data_t *d = ncc_xform_get_data(ctx);
+  // meta_table_t and ncc_meta_table_t have identical layout.
+  return (meta_table_t *)&d->func_meta;
 }
 
 // ============================================================================
@@ -325,15 +293,7 @@ static ncc_string_t resolve_ncc_type_calls(const char *text) {
 
 static ncc_parse_tree_t *parse_template(ncc_grammar_t *g, const char *nt_name,
                                         const char *src) {
-  ncc_result_t(ncc_parse_tree_ptr_t) r =
-      ncc_xform_parse_template(g, nt_name, src, nullptr);
-  if (ncc_result_is_err(r)) {
-    fprintf(stderr,
-            "xform_kargs_vargs: template parse failed for '%s':\n  %s\n",
-            nt_name, src);
-    return nullptr;
-  }
-  return ncc_result_get(r);
+  return ncc_xform_parse_source(g, nt_name, src, "xform_kargs_vargs");
 }
 
 // ============================================================================

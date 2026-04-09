@@ -166,7 +166,7 @@ libncc_internal_dep = declare_dependency(
 
 ncc_exe = executable('ncc',
   'src/ncc.c',
-  c_args : c_args + coverage_args,
+  c_args : c_args + coverage_args + ['--embed-dir=' + meson.current_source_dir()],
   link_args : coverage_link_args,
   dependencies : libncc_internal_dep,
   install : true,

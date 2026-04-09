@@ -47,6 +47,12 @@
 #include "lib/buffer.h"
 #include "lib/dict.h"
 
+static const char embedded_grammar[] = {
+#embed "c_ncc.bnf"
+, '\0'
+};
+static const size_t embedded_grammar_len = sizeof(embedded_grammar) - 1;
+
 // Transform registration prototypes.
 extern void ncc_register_generic_struct_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_typeid_xform(ncc_xform_registry_t *reg);
@@ -141,36 +147,16 @@ typedef struct {
     const char  *once_prefix;
     const char  *rstr_string_type;
 
+    // Grammar file override (CLI > env > embedded).
+    const char  *grammar_file;
+
     // Flags to pass through to clang.
     const char **clang_args;
     int          n_clang_args;
     int          clang_args_cap;
 } ncc_opts_t;
 
-// Function metadata table for kargs/vargs transform.
-// Defined in xform_kargs_vargs.c — duplicated layout here for allocation.
-#define NCC_META_TABLE_SIZE 256
-typedef struct {
-    char *key;
-    void *value;
-} ncc_meta_entry_t;
-typedef struct {
-    ncc_meta_entry_t entries[NCC_META_TABLE_SIZE];
-} ncc_meta_table_t;
-
-// Passed to transforms via ctx->user_data.
-typedef struct {
-    const char                *compiler;
-    const char                *constexpr_headers; // nullptr or comma-separated header list
-    ncc_meta_table_t           func_meta;         // kargs/vargs metadata
-    ncc_dict_t                option_meta;       // _option var metadata
-    ncc_dict_t                option_decls;      // emitted option struct decls
-    ncc_dict_t                generic_struct_decls; // emitted _generic_struct tags
-    ncc_template_registry_t  *template_reg;      // template engine registry
-    const char                *vargs_type;        // vargs struct type name
-    const char                *once_prefix;       // once-guard identifier prefix
-    const char                *rstr_string_type;  // rstr string type name for typehash
-} ncc_xform_data_t;
+#include "xform/xform_data.h"
 
 static void
 add_clang_arg(ncc_opts_t *opts, const char *arg)
@@ -183,7 +169,7 @@ add_clang_arg(ncc_opts_t *opts, const char *arg)
     opts->clang_args[opts->n_clang_args++] = arg;
 }
 
-// Forward declaration — defined below after get_exe_dir().
+// Forward declaration — defined below.
 static char *get_exe_path(void);
 
 // ============================================================================
@@ -245,6 +231,12 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
         opts->constexpr_headers = ce_env;
     }
 
+    // Init grammar file from env var (flag overrides later).
+    const char *grammar_env = getenv("NCC_GRAMMAR");
+    if (grammar_env && grammar_env[0]) {
+        opts->grammar_file = grammar_env;
+    }
+
     if (getenv("NCC_VERBOSE")) {
         verbose = true;
     }
@@ -298,6 +290,16 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
         }
         if (strncmp(arg, "--ncc-constexpr-include=", 23) == 0) {
             opts->constexpr_headers = arg + 23;
+            continue;
+        }
+        if (strcmp(arg, "--ncc-grammar") == 0) {
+            if (i + 1 < argc) {
+                opts->grammar_file = argv[++i];
+            }
+            continue;
+        }
+        if (strncmp(arg, "--ncc-grammar=", 14) == 0) {
+            opts->grammar_file = arg + 14;
             continue;
         }
         if (strncmp(arg, "--ncc-rstr-template-styled=", 27) == 0) {
@@ -444,6 +446,8 @@ print_help(void)
         "                       Comma-separated headers for constexpr eval\n"
         "                       (e.g. '<myheader.h>,\"local.h\"')\n"
         "                       Overrides NCC_CONSTEXPR_HEADERS env var\n"
+        "  --ncc-grammar FILE   Use external grammar file instead of built-in\n"
+        "                       Overrides NCC_GRAMMAR env var\n"
         "\n"
         "Standard flags:\n"
         "  -E                   Preprocess + transform, emit C to stdout\n"
@@ -457,6 +461,8 @@ print_help(void)
         "  NCC_CONSTEXPR_HEADERS\n"
         "                       Comma-separated headers for constexpr eval\n"
         "                       (overridden by --ncc-constexpr-include)\n"
+        "  NCC_GRAMMAR          External grammar file path\n"
+        "                       (overridden by --ncc-grammar)\n"
     );
 }
 
@@ -488,76 +494,6 @@ get_exe_path(void)
 #endif
 }
 
-// ============================================================================
-// Get the directory containing the ncc executable
-// ============================================================================
-
-static char *
-get_exe_dir(void)
-{
-    char *exe_path = get_exe_path();
-    if (!exe_path) {
-        return nullptr;
-    }
-
-    char *last_slash = strrchr(exe_path, '/');
-    if (last_slash) {
-        *last_slash = '\0';
-    }
-    return exe_path;
-}
-
-// ============================================================================
-// Find grammar file relative to the executable
-// ============================================================================
-
-static char *
-find_grammar_path(void)
-{
-    char *exe_dir = get_exe_dir();
-
-    if (exe_dir) {
-        size_t dir_len = strlen(exe_dir);
-
-        static const char *suffixes[] = {
-            "/../c_ncc.bnf",
-            "/c_ncc.bnf",
-            nullptr,
-        };
-
-        for (const char **sfx = suffixes; *sfx; sfx++) {
-            size_t path_len = dir_len + strlen(*sfx);
-            char  *path     = ncc_alloc_size(1, path_len + 1);
-            snprintf(path, path_len + 1, "%s%s", exe_dir, *sfx);
-
-            FILE *f = fopen(path, "r");
-            if (f) {
-                fclose(f);
-                ncc_free(exe_dir);
-                return path;
-            }
-            ncc_free(path);
-        }
-
-        ncc_free(exe_dir);
-    }
-
-    static const char *fallbacks[] = {
-        "c_ncc.bnf",
-        "../c_ncc.bnf",
-        nullptr,
-    };
-
-    for (const char **p = fallbacks; *p; p++) {
-        FILE *f = fopen(*p, "r");
-        if (f) {
-            fclose(f);
-            return strdup(*p);
-        }
-    }
-
-    return nullptr;
-}
 
 // ============================================================================
 // Read a file into a string
@@ -1162,25 +1098,29 @@ compiler_passthrough(const ncc_opts_t *opts, int argc, const char **argv)
 // ============================================================================
 
 static ncc_grammar_t *
-load_c_grammar(void)
+load_c_grammar(const ncc_opts_t *opts)
 {
-    char *grammar_path = find_grammar_path();
-    if (!grammar_path) {
-        fprintf(stderr, "ncc: cannot find c_ncc.bnf\n");
-        return nullptr;
+    const char *bnf_data;
+    size_t      bnf_len;
+    char       *file_buf = nullptr;
+
+    if (opts->grammar_file) {
+        file_buf = read_file(opts->grammar_file, &bnf_len);
+        if (!file_buf) {
+            fprintf(stderr, "ncc: cannot read grammar file: %s\n",
+                    opts->grammar_file);
+            return nullptr;
+        }
+        bnf_data = file_buf;
+        ncc_verbose("grammar from file: %s", opts->grammar_file);
+    } else {
+        bnf_data = embedded_grammar;
+        bnf_len  = embedded_grammar_len;
+        ncc_verbose("using embedded grammar");
     }
 
-    size_t len = 0;
-    char  *buf = read_file(grammar_path, &len);
-    ncc_free(grammar_path);
-
-    if (!buf) {
-        fprintf(stderr, "ncc: cannot read grammar file\n");
-        return nullptr;
-    }
-
-    ncc_string_t bnf_text = ncc_string_from_raw(buf, (int64_t)len);
-    ncc_free(buf);
+    ncc_string_t bnf_text = ncc_string_from_raw(bnf_data, (int64_t)bnf_len);
+    if (file_buf) ncc_free(file_buf);
 
     ncc_grammar_t *g = ncc_grammar_new();
     ncc_grammar_set_error_recovery(g, false);
@@ -1441,7 +1381,7 @@ static int
 compile_file(ncc_opts_t *opts)
 {
     // Stage 1: Load grammar.
-    ncc_grammar_t *g = load_c_grammar();
+    ncc_grammar_t *g = load_c_grammar(opts);
     if (!g) {
         return 1;
     }
@@ -1614,6 +1554,26 @@ compile_file(ncc_opts_t *opts)
                            "primary_expression", rstr_styled);
     ncc_template_register(&tmpl_reg, "rstr_plain",
                            "primary_expression", rstr_plain);
+
+    // _Once templates (see templates/*.c.tmpl for slot documentation).
+    static const char once_tmpl[] = {
+#embed "templates/once.c.tmpl"
+        , '\0'
+    };
+    static const char once_void_tmpl[] = {
+#embed "templates/once_void.c.tmpl"
+        , '\0'
+    };
+    ncc_template_register(&tmpl_reg, "once", "translation_unit", once_tmpl);
+    ncc_template_register(&tmpl_reg, "once_void", "translation_unit",
+                           once_void_tmpl);
+
+    // Bang (!) error propagation template.
+    static const char bang_tmpl[] = {
+#embed "templates/bang.c.tmpl"
+        , '\0'
+    };
+    ncc_template_register(&tmpl_reg, "bang", "primary_expression", bang_tmpl);
 
     // Resolve vargs_type, once_prefix, rstr_string_type: CLI > meson define > default.
     const char *vargs_type      = "ncc_vargs_t";

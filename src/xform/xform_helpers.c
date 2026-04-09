@@ -1,10 +1,12 @@
 // xform_helpers.c — Shared utilities for type-introspection transforms.
 
 #include "xform/xform_helpers.h"
+#include "xform/xform_template.h"
 #include "lib/alloc.h"
 #include "lib/buffer.h"
 #include "lib/string.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -106,6 +108,189 @@ ncc_parse_tree_t *ncc_xform_find_child_nt(ncc_parse_tree_t *node,
     }
   }
   return nullptr;
+}
+
+// ============================================================================
+// Shared parse helper
+// ============================================================================
+
+ncc_parse_tree_t *ncc_xform_parse_source(ncc_grammar_t *g, const char *nt_name,
+                                          const char *src,
+                                          const char *xform_name) {
+  ncc_result_t(ncc_parse_tree_ptr_t) r =
+      ncc_xform_parse_template(g, nt_name, src, nullptr);
+  if (ncc_result_is_err(r)) {
+    fprintf(stderr, "%s: template parse failed for '%s':\n  %s\n",
+            xform_name ? xform_name : "xform", nt_name, src);
+    return nullptr;
+  }
+  return ncc_result_get(r);
+}
+
+// ============================================================================
+// Last leaf token
+// ============================================================================
+
+ncc_token_info_t *ncc_xform_find_last_leaf_token(ncc_parse_tree_t *node) {
+  if (!node) {
+    return nullptr;
+  }
+  if (ncc_tree_is_leaf(node)) {
+    return ncc_tree_leaf_value(node);
+  }
+  size_t nc = ncc_tree_num_children(node);
+  for (size_t i = nc; i > 0; i--) {
+    ncc_token_info_t *tok =
+        ncc_xform_find_last_leaf_token(ncc_tree_child(node, i - 1));
+    if (tok) {
+      return tok;
+    }
+  }
+  return nullptr;
+}
+
+// ============================================================================
+// First leaf text
+// ============================================================================
+
+const char *ncc_xform_get_first_leaf_text(ncc_parse_tree_t *node) {
+  if (!node) {
+    return nullptr;
+  }
+  if (ncc_tree_is_leaf(node)) {
+    return ncc_xform_leaf_text(node);
+  }
+  size_t nc = ncc_tree_num_children(node);
+  for (size_t i = 0; i < nc; i++) {
+    const char *t = ncc_xform_get_first_leaf_text(ncc_tree_child(node, i));
+    if (t) {
+      return t;
+    }
+  }
+  return nullptr;
+}
+
+// ============================================================================
+// Void type check
+// ============================================================================
+
+bool ncc_xform_has_void_type(ncc_parse_tree_t *node) {
+  if (!node) {
+    return false;
+  }
+  if (ncc_tree_is_leaf(node)) {
+    return ncc_xform_leaf_text_eq(node, "void");
+  }
+  if (ncc_xform_nt_name_is(node, "storage_class_specifier") ||
+      ncc_xform_nt_name_is(node, "function_specifier")) {
+    return false;
+  }
+  size_t nc = ncc_tree_num_children(node);
+  for (size_t i = 0; i < nc; i++) {
+    if (ncc_xform_has_void_type(ncc_tree_child(node, i))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// ============================================================================
+// Collect base type from declaration_specifiers
+// ============================================================================
+
+char *ncc_xform_collect_base_type(ncc_parse_tree_t *decl_specs) {
+  ncc_buffer_t *buf = ncc_buffer_empty();
+  size_t nc = ncc_tree_num_children(decl_specs);
+
+  for (size_t i = 0; i < nc; i++) {
+    ncc_parse_tree_t *ds = ncc_tree_child(decl_specs, i);
+    if (!ds || ncc_tree_is_leaf(ds)) {
+      continue;
+    }
+    if (ncc_xform_find_child_nt(ds, "storage_class_specifier") ||
+        ncc_xform_find_child_nt(ds, "function_specifier")) {
+      continue;
+    }
+    ncc_string_t text = ncc_xform_node_to_text(ds);
+    if (text.data) {
+      if (buf->byte_len > 0) {
+        ncc_buffer_putc(buf, ' ');
+      }
+      ncc_buffer_append(buf, text.data, text.u8_bytes);
+      ncc_free(text.data);
+    }
+  }
+
+  char *result = ncc_buffer_take(buf);
+  if (!result || result[0] == '\0') {
+    ncc_free(result);
+    result = ncc_alloc_size(1, 4);
+    memcpy(result, "int", 4);
+  }
+  return result;
+}
+
+// ============================================================================
+// Collect qualifiers from declaration_specifiers
+// ============================================================================
+
+// Helper: check if a subtree contains a leaf matching `text`.
+static bool contains_leaf_text(ncc_parse_tree_t *node, const char *text) {
+  if (!node) {
+    return false;
+  }
+  if (ncc_tree_is_leaf(node)) {
+    return ncc_xform_leaf_text_eq(node, text);
+  }
+  size_t nc = ncc_tree_num_children(node);
+  for (size_t i = 0; i < nc; i++) {
+    if (contains_leaf_text(ncc_tree_child(node, i), text)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+char *ncc_xform_collect_qualifiers(ncc_parse_tree_t *decl_specs,
+                                    const char *skip) {
+  ncc_buffer_t *buf = ncc_buffer_empty();
+  size_t nc = ncc_tree_num_children(decl_specs);
+
+  for (size_t i = 0; i < nc; i++) {
+    ncc_parse_tree_t *ds = ncc_tree_child(decl_specs, i);
+    if (!ds || ncc_tree_is_leaf(ds)) {
+      continue;
+    }
+    ncc_parse_tree_t *scs =
+        ncc_xform_find_child_nt(ds, "storage_class_specifier");
+    ncc_parse_tree_t *fs =
+        ncc_xform_find_child_nt(ds, "function_specifier");
+
+    if (scs) {
+      ncc_string_t text = ncc_xform_node_to_text(scs);
+      if (text.data) {
+        if (buf->byte_len > 0) {
+          ncc_buffer_putc(buf, ' ');
+        }
+        ncc_buffer_append(buf, text.data, text.u8_bytes);
+        ncc_free(text.data);
+      }
+    } else if (fs) {
+      if (skip && contains_leaf_text(fs, skip)) {
+        continue;
+      }
+      ncc_string_t text = ncc_xform_node_to_text(fs);
+      if (text.data) {
+        if (buf->byte_len > 0) {
+          ncc_buffer_putc(buf, ' ');
+        }
+        ncc_buffer_append(buf, text.data, text.u8_bytes);
+        ncc_free(text.data);
+      }
+    }
+  }
+
+  return ncc_buffer_take(buf);
 }
 
 // ============================================================================

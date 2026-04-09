@@ -14,6 +14,7 @@
 
 #include "lib/alloc.h"
 #include "lib/dict.h"
+#include "xform/xform_data.h"
 #include "xform/xform_helpers.h"
 
 #include <stdio.h>
@@ -24,44 +25,13 @@
 // Access to shared user_data dictionaries
 // ============================================================================
 
-// Layout-compatible with ncc_xform_data_t in ncc.c.
-// Fields before our dicts: compiler, constexpr_headers, func_meta (opaque).
-// We only access option_meta and option_decls by their actual struct offsets.
-// ncc_xform_data_t layout:
-//   const char              *compiler;
-//   const char              *constexpr_headers;
-//   ncc_meta_table_t         func_meta;          // opaque to us
-//   ncc_dict_t      option_meta;
-//   ncc_dict_t      option_decls;
-//
-// We replicate the func_meta layout to skip over it correctly.
-
-#define _NCC_META_TABLE_SIZE 256
-
-typedef struct {
-  char *key;
-  void *value;
-} _ncc_meta_entry_t;
-
-typedef struct {
-  _ncc_meta_entry_t entries[_NCC_META_TABLE_SIZE];
-} _ncc_meta_table_t;
-
-typedef struct {
-  const char *compiler;
-  const char *constexpr_headers;
-  _ncc_meta_table_t func_meta;
-  ncc_dict_t option_meta;
-  ncc_dict_t option_decls;
-} ncc_opt_xform_data_t;
-
 static ncc_dict_t *get_option_meta(ncc_xform_ctx_t *ctx) {
-  ncc_opt_xform_data_t *d = (ncc_opt_xform_data_t *)ctx->user_data;
+  ncc_xform_data_t *d = ncc_xform_get_data(ctx);
   return &d->option_meta;
 }
 
 static ncc_dict_t *get_option_decls(ncc_xform_ctx_t *ctx) {
-  ncc_opt_xform_data_t *d = (ncc_opt_xform_data_t *)ctx->user_data;
+  ncc_xform_data_t *d = ncc_xform_get_data(ctx);
   return &d->option_decls;
 }
 
@@ -77,14 +47,7 @@ static bool type_string_is_pointer(const char *type_str) {
 // Template parsing helper.
 static ncc_parse_tree_t *parse_template(ncc_grammar_t *g, const char *nt_name,
                                         const char *src) {
-  ncc_result_t(ncc_parse_tree_ptr_t) r =
-      ncc_xform_parse_template(g, nt_name, src, nullptr);
-  if (ncc_result_is_err(r)) {
-    fprintf(stderr, "xform_option: template parse failed for '%s':\n  %s\n",
-            nt_name, src);
-    return nullptr;
-  }
-  return ncc_result_get(r);
+  return ncc_xform_parse_source(g, nt_name, src, "xform_option");
 }
 
 // Walk up to find the variable name being declared.
@@ -173,22 +136,9 @@ static char *option_type_string(const char *type_str) {
   return buf;
 }
 
-// Find the last leaf token in a subtree.
+// Find the last leaf token in a subtree — uses shared helper.
 static ncc_token_info_t *find_last_leaf_token(ncc_parse_tree_t *node) {
-  if (!node) {
-    return nullptr;
-  }
-  if (ncc_tree_is_leaf(node)) {
-    return ncc_tree_leaf_value(node);
-  }
-  size_t nc = ncc_tree_num_children(node);
-  for (size_t i = nc; i > 0; i--) {
-    ncc_token_info_t *tok = find_last_leaf_token(ncc_tree_child(node, i - 1));
-    if (tok) {
-      return tok;
-    }
-  }
-  return nullptr;
+  return ncc_xform_find_last_leaf_token(node);
 }
 
 // Emit a struct declaration at the translation_unit level.
@@ -423,11 +373,7 @@ static bool resolve_is_pointer(ncc_xform_ctx_t *ctx,
   }
 
   // Fallback: compile-time check using _Generic.
-  extern char *compile_and_run(const char *, const char *, char **);
-  extern char *collect_file_scope_declarations(ncc_xform_ctx_t *,
-                                               ncc_parse_tree_t *);
-
-  ncc_opt_xform_data_t *xdata = (ncc_opt_xform_data_t *)ctx->user_data;
+  ncc_xform_data_t *xdata = ncc_xform_get_data(ctx);
   const char *compiler = xdata ? xdata->compiler : nullptr;
   if (!compiler) {
     compiler = "cc";

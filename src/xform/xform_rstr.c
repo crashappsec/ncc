@@ -9,6 +9,7 @@
 #include "lib/alloc.h"
 #include "lib/buffer.h"
 #include "util/type_normalize.h"
+#include "xform/xform_data.h"
 #include "xform/xform_helpers.h"
 #include "xform/xform_template.h"
 
@@ -18,43 +19,15 @@
 #include <string.h>
 
 // =========================================================================
-// Layout-compatible access to ncc_xform_data_t.template_reg
+// Access to ncc_xform_data_t fields
 // =========================================================================
-// Must match the struct layout in ncc.c (same pattern as
-// xform_generic_struct.c).
-
-#define _NCC_META_TABLE_SIZE 256
-
-typedef struct {
-  char *key;
-  void *value;
-} _rstr_meta_entry_t;
-
-typedef struct {
-  _rstr_meta_entry_t entries[_NCC_META_TABLE_SIZE];
-} _rstr_meta_table_t;
-
-typedef struct {
-  const char *compiler;
-  const char *constexpr_headers;
-  _rstr_meta_table_t func_meta;
-  ncc_dict_t option_meta;
-  ncc_dict_t option_decls;
-  ncc_dict_t generic_struct_decls;
-  ncc_template_registry_t *template_reg;
-  const char *vargs_type;
-  const char *once_prefix;
-  const char *rstr_string_type;
-} _rstr_xform_data_t;
 
 static ncc_template_registry_t *get_template_reg(ncc_xform_ctx_t *ctx) {
-  _rstr_xform_data_t *d = ctx->user_data;
-  return d->template_reg;
+  return ncc_xform_get_data(ctx)->template_reg;
 }
 
 static const char *get_rstr_string_type(ncc_xform_ctx_t *ctx) {
-  _rstr_xform_data_t *d = ctx->user_data;
-  return d->rstr_string_type;
+  return ncc_xform_get_data(ctx)->rstr_string_type;
 }
 
 // =========================================================================

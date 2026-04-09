@@ -20,7 +20,9 @@
 //
 // Registered as post-order on "postfix_expression".
 
+#include "xform/xform_data.h"
 #include "xform/xform_helpers.h"
+#include "xform/xform_template.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -70,44 +72,6 @@ collect_type_text(ncc_parse_tree_t *node, char *buf, size_t cap, size_t *pos)
     for (size_t i = 0; i < nc; i++) {
         collect_type_text(ncc_tree_child(node, i), buf, cap, pos);
     }
-}
-
-// Check if declaration_specifiers has void type (excluding storage/function).
-static bool
-has_void_type(ncc_parse_tree_t *node)
-{
-    if (!node) {
-        return false;
-    }
-    if (ncc_tree_is_leaf(node)) {
-        return ncc_xform_leaf_text_eq(node, "void");
-    }
-    if (ncc_xform_nt_name_is(node, "storage_class_specifier")
-        || ncc_xform_nt_name_is(node, "function_specifier")) {
-        return false;
-    }
-    size_t nc = ncc_tree_num_children(node);
-    for (size_t i = 0; i < nc; i++) {
-        if (has_void_type(ncc_tree_child(node, i))) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// Template parsing helper.
-static ncc_parse_tree_t *
-parse_template(ncc_grammar_t *g, const char *nt_name, const char *src)
-{
-    ncc_result_t(ncc_parse_tree_ptr_t) r =
-        ncc_xform_parse_template(g, nt_name, src, nullptr);
-    if (ncc_result_is_err(r)) {
-        fprintf(stderr,
-                "xform_bang: template parse failed for '%s':\n  %s\n",
-                nt_name, src);
-        return nullptr;
-    }
-    return ncc_result_get(r);
 }
 
 // ============================================================================
@@ -160,7 +124,7 @@ xform_bang(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *node)
         exit(1);
     }
 
-    if (has_void_type(decl_specs)) {
+    if (ncc_xform_has_void_type(decl_specs)) {
         uint32_t line, col;
         ncc_xform_first_leaf_pos(node, &line, &col);
         fprintf(stderr,
@@ -178,9 +142,6 @@ xform_bang(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *node)
     }
 
     // Get the operand text (everything before the !).
-    // The operand is child[0] through child[nc-2]. For most cases it's
-    // just child[0], but for chained postfix like foo()! we still want
-    // the entire prefix. Collect text from all children except the last.
     char operand_buf[4096] = {0};
     size_t opos = 0;
 
@@ -205,30 +166,22 @@ xform_bang(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *node)
     char var_name[64];
     snprintf(var_name, sizeof(var_name), "_ncc_try_%d", id);
 
-    // Build the statement expression template.
-    char src[8192];
-    snprintf(src, sizeof(src),
-        "({ __auto_type %s = (%s);"
-        " if (!%s.is_ok) {"
-        " return (%s){ .is_ok = 0, .err = %s.err };"
-        " }"
-        " %s.ok; })",
-        var_name, operand_buf,
-        var_name,
-        ret_type, var_name,
-        var_name);
+    // Instantiate the bang template.
+    // $0 = var_name, $1 = operand, $2 = return type
+    ncc_xform_data_t *xdata = ncc_xform_get_data(ctx);
+    ncc_template_registry_t *tmpl_reg = xdata->template_reg;
 
-    // Parse as primary_expression (statement expression is a primary expr).
-    ncc_parse_tree_t *replacement = parse_template(
-        ctx->grammar, "primary_expression", src);
+    const char *args[] = { var_name, operand_buf, ret_type };
+    ncc_result_t(ncc_parse_tree_ptr_t) r =
+        ncc_template_instantiate(tmpl_reg, "bang", args, 3);
 
-    if (!replacement) {
+    if (ncc_result_is_err(r)) {
         fprintf(stderr,
-                "ncc: error: failed to parse bang expansion template\n");
+                "ncc: error: failed to instantiate bang template\n");
         exit(1);
     }
 
-    return replacement;
+    return ncc_result_get(r);
 }
 
 // ============================================================================
