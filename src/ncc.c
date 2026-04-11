@@ -183,6 +183,13 @@ is_ncc_path(const char *path)
         return false;
     }
 
+    // Quick basename check: if the bare name is "ncc", it's us.
+    const char *slash = strrchr(path, '/');
+    const char *base  = slash ? slash + 1 : path;
+    if (strcmp(base, "ncc") == 0) {
+        return true;
+    }
+
     char *our_exe = get_exe_path();
     if (!our_exe) {
         return false;
