@@ -102,7 +102,6 @@ free_trivia_chain(ncc_trivia_t *t)
 {
     while (t) {
         ncc_trivia_t *next = t->next;
-        // t->text.data is GC-managed; just free the node.
         ncc_free(t);
         t = next;
     }
@@ -172,11 +171,10 @@ ncc_scanner_free(ncc_scanner_t *s)
         return;
     }
 
-    // Free pending trivia nodes (text data is GC-managed).
+    // Free pending trivia nodes.
     free_trivia_chain(s->pending_leading);
     free_trivia_chain(s->pending_trailing);
 
-    // The terminal_ids dict is GC-managed (ncc_alloc); no explicit free needed.
 
     ncc_free(s);
 }

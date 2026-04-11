@@ -18,7 +18,6 @@ free_trivia_chain(ncc_trivia_t *t)
 {
     while (t) {
         ncc_trivia_t *next = t->next;
-        // t->text.data is GC-managed; just free the node.
         ncc_free(t);
         t = next;
     }

@@ -55,8 +55,6 @@ typedef struct ncc_token_stream_t ncc_token_stream_t;
 /** @brief The needle string was not found before EOF. */
 #define NCC_ERR_SCAN_NOT_FOUND  (-10)
 
-// (Owned string list removed — ncc_string_t data is GC-managed.)
-
 // ============================================================================
 // Callback typedef
 // ============================================================================
@@ -272,7 +270,7 @@ extern void ncc_scan_mark(ncc_scanner_t *s);
 /**
  * @brief Extract text from mark to cursor as an `ncc_string_t`.
  *
- * The backing data is GC-managed.
+ * The returned string's data is allocated; caller is responsible for lifetime.
  */
 extern ncc_string_t ncc_scan_extract(ncc_scanner_t *s);
 

@@ -1442,6 +1442,10 @@ compile_file(ncc_opts_t *opts)
         return 1;
     }
 
+#ifdef NCC_MEM_DEBUG
+    ncc_mem_report("after grammar");
+#endif
+
     // Stage 2: Preprocess with clang -E.
     size_t pp_len  = 0;
     char  *pp_text = run_preprocessor(opts, &pp_len);
@@ -1451,6 +1455,10 @@ compile_file(ncc_opts_t *opts)
     }
 
     ncc_verbose("preprocessed %zu bytes", pp_len);
+
+#ifdef NCC_MEM_DEBUG
+    ncc_mem_report("after preprocess");
+#endif
 
     // Stage 3: Tokenize.
     ncc_buffer_t              *buf      = ncc_buffer_from_bytes(pp_text,
@@ -1467,6 +1475,10 @@ compile_file(ncc_opts_t *opts)
     g->tokenize_cb = (void *)ncc_c_tokenize;
 
     ncc_free(pp_text);
+
+#ifdef NCC_MEM_DEBUG
+    ncc_mem_report("after tokenize");
+#endif
 
     // Stage 3.5: Token dump (before parsing).
     if (opts->dump_tokens) {
@@ -1547,6 +1559,20 @@ compile_file(ncc_opts_t *opts)
     }
 
     ncc_verbose("parse OK (%d tokens)", ts->token_count);
+
+#ifdef NCC_MEM_DEBUG
+    ncc_mem_report("after parse");
+    ncc_pwz_report_stats();
+#endif
+
+    // Release PWZ per-parse intermediate state (arena, worklists) now that
+    // the tree has been extracted.  This drops peak live memory before the
+    // transform and emit stages run.
+    ncc_pwz_release_parse_state(parser);
+
+#ifdef NCC_MEM_DEBUG
+    ncc_mem_report("after arena release");
+#endif
 
     // Stage 5: Reclassify walk (typedef tracking).
     int32_t reclassified = ncc_typedef_walk(
@@ -1680,6 +1706,10 @@ compile_file(ncc_opts_t *opts)
         ncc_verbose("transforms: %d nodes replaced", xctx.nodes_replaced);
     }
 
+#ifdef NCC_MEM_DEBUG
+    ncc_mem_report("after transform");
+#endif
+
     ncc_dict_free(&xdata.option_meta);
     ncc_dict_free(&xdata.option_decls);
     ncc_dict_free(&xdata.generic_struct_decls);
@@ -1711,6 +1741,10 @@ compile_file(ncc_opts_t *opts)
     size_t emit_len = emitted.u8_bytes;
 
     ncc_verbose("emitted %zu bytes", emit_len);
+
+#ifdef NCC_MEM_DEBUG
+    ncc_mem_report("after emit");
+#endif
 
     if (opts->dump_output) {
         fprintf(stderr, "=== NCC EMITTED OUTPUT ===\n");

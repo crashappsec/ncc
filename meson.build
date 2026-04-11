@@ -65,6 +65,12 @@ if rstr_string_type_opt != ''
   c_args += ['-DNCC_RSTR_STRING_TYPE="' + rstr_string_type_opt + '"']
 endif
 
+# Memory debug tracking
+mem_debug_enabled = get_option('mem_debug')
+if mem_debug_enabled
+  c_args += ['-DNCC_MEM_DEBUG']
+endif
+
 # Clang source-based code coverage
 coverage_enabled = get_option('coverage')
 coverage_args = []
@@ -83,6 +89,7 @@ inc = include_directories('include')
 
 src_lib = files(
   'src/lib/string.c',
+  'src/lib/alloc.c',
 )
 
 src_parse = files(

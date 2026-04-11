@@ -92,7 +92,7 @@ _ncc_dict_resize(ncc_dict_t *d, size_t new_cap)
     ncc_dict_bucket_t *old_buckets = d->buckets;
     size_t              old_cap     = d->capacity;
 
-    d->buckets    = (ncc_dict_bucket_t *)calloc(new_cap, sizeof(ncc_dict_bucket_t));
+    d->buckets    = (ncc_dict_bucket_t *)ncc_alloc_array(ncc_dict_bucket_t, new_cap);
     d->capacity   = new_cap;
     d->count      = 0;
     d->tombstones = 0;
@@ -163,8 +163,8 @@ ncc_dict_init(ncc_dict_t *dict,
     dict->capacity   = NCC_DICT_MIN_SIZE;
     dict->count      = 0;
     dict->tombstones = 0;
-    dict->buckets    = (ncc_dict_bucket_t *)calloc(
-        NCC_DICT_MIN_SIZE, sizeof(ncc_dict_bucket_t));
+    dict->buckets    = (ncc_dict_bucket_t *)ncc_alloc_array(
+        ncc_dict_bucket_t, NCC_DICT_MIN_SIZE);
 }
 
 /**

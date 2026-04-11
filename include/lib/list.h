@@ -60,7 +60,7 @@ ncc_list_decl(ncc_string_t);
         if (_bl_need > (xptr)->cap) {                                          \
             size_t _bl_nc = ncc_align_closest_pow2_ceil(_bl_need);            \
             typeof((xptr)->data) _bl_nd =                                      \
-                (typeof((xptr)->data))calloc(_bl_nc, sizeof(*(xptr)->data));   \
+                (typeof((xptr)->data))ncc_alloc_size(_bl_nc, sizeof(*(xptr)->data)); \
             if ((xptr)->len > 0) {                                             \
                 memcpy(_bl_nd, (xptr)->data,                                   \
                        (xptr)->len * sizeof(*(xptr)->data));                   \
@@ -285,7 +285,7 @@ ncc_list_decl(ncc_string_t);
         size_t    _bl_tc  = ncc_align_closest_pow2_ceil(                      \
                                 ncc_max(_bl_tl, (size_t)1));                  \
         typeof(a) _bl_new = {                                                  \
-            .data      = (typeof(_bl_ap->data))calloc(                         \
+            .data      = (typeof(_bl_ap->data))ncc_alloc_size(                   \
                              _bl_tc, sizeof(*_bl_ap->data)),                   \
             .len       = _bl_tl,                                               \
             .cap       = _bl_tc,                                               \
@@ -361,7 +361,7 @@ ncc_list_decl(ncc_string_t);
         auto      _bl_sp  = &(x);                                              \
         size_t    _bl_nc  = ncc_max(_bl_sp->cap, (size_t)1);                  \
         typeof(x) _bl_new = {                                                  \
-            .data      = (typeof(_bl_sp->data))calloc(                         \
+            .data      = (typeof(_bl_sp->data))ncc_alloc_size(                   \
                              _bl_nc, sizeof(*_bl_sp->data)),                   \
             .len       = _bl_sp->len,                                          \
             .cap       = _bl_nc,                                               \

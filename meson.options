@@ -26,3 +26,7 @@ option('rstr_string_type',
        type: 'string',
        value: '',
        description: 'Override the rstr string type name for typehash (default: ncc_string_t*)')
+option('mem_debug',
+       type: 'boolean',
+       value: false,
+       description: 'Enable memory allocation tracking and per-stage reporting')

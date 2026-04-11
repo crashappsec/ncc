@@ -51,6 +51,17 @@ void ncc_pwz_free(ncc_pwz_parser_t *p);
  */
 void ncc_pwz_reset(ncc_pwz_parser_t *p);
 
+/**
+ * @brief Release per-parse intermediate state (arena, worklists).
+ *
+ * Call after extracting the parse tree to reduce peak live memory.
+ * The parser remains valid but cannot produce new trees until the
+ * next ncc_pwz_parse() call.
+ *
+ * @param p  PWZ parser (nullptr is a no-op).
+ */
+void ncc_pwz_release_parse_state(ncc_pwz_parser_t *p);
+
 // ============================================================================
 // Parsing
 // ============================================================================
@@ -112,3 +123,14 @@ ncc_parse_forest_t ncc_pwz_get_forest(ncc_pwz_parser_t *p);
  */
 ncc_parse_forest_t ncc_pwz_parse_grammar(ncc_grammar_t      *g,
                                              ncc_token_stream_t *ts);
+
+// ============================================================================
+// Debug statistics
+// ============================================================================
+
+#ifdef NCC_MEM_DEBUG
+/**
+ * @brief Print per-type allocation stats for the last parse, then reset.
+ */
+void ncc_pwz_report_stats(void);
+#endif
