@@ -1174,13 +1174,32 @@ dump_tokens(ncc_token_stream_t *ts, FILE *out)
 // Pipe transformed C to compiler
 // ============================================================================
 
+static bool
+is_linker_input(const char *arg)
+{
+    size_t len = strlen(arg);
+
+    if (len >= 2 && arg[0] != '-') {
+        const char *dot = strrchr(arg, '.');
+        if (dot) {
+            if (strcmp(dot, ".a") == 0 || strcmp(dot, ".o") == 0
+                || strcmp(dot, ".so") == 0 || strcmp(dot, ".dylib") == 0) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 static int
 pipe_to_compiler(const ncc_opts_t *opts, const char *c_source, size_t c_len)
 {
-    // Build argv: compiler [-std=gnu23] [clang_args...] -x c -
+    // Build argv: compiler [-std=gnu23] [flags...] -x c - [-x none linker-inputs...]
     // clang_args already includes -c, -o, and all passthrough flags.
-    // We add -std=gnu23, -Wno-odr, and "-x c -" for stdin input.
-    int          max_args = 8 + opts->n_clang_args;
+    // Linker inputs (.a, .o, .so) must come after "-x c -" with a
+    // "-x none" reset so clang treats them correctly on all platforms.
+    int          max_args = 10 + opts->n_clang_args * 2;
     const char **argv     = ncc_alloc_array(const char *, (size_t)(max_args + 1));
     int          ai       = 0;
 
@@ -1193,14 +1212,44 @@ pipe_to_compiler(const ncc_opts_t *opts, const char *c_source, size_t c_len)
     // Suppress ODR warnings from alignas attributes in transformed code.
     argv[ai++] = "-Wno-odr";
 
+    // Pass compiler flags (non-linker-input args) before -x c -.
+    // Track -o so its argument (often ending in .o) isn't mistaken
+    // for a linker input and moved after "-x c -".
     for (int i = 0; i < opts->n_clang_args; i++) {
-        argv[ai++] = opts->clang_args[i];
+        if (strcmp(opts->clang_args[i], "-o") == 0) {
+            argv[ai++] = opts->clang_args[i];
+            if (i + 1 < opts->n_clang_args) {
+                argv[ai++] = opts->clang_args[++i];
+            }
+        }
+        else if (!is_linker_input(opts->clang_args[i])) {
+            argv[ai++] = opts->clang_args[i];
+        }
     }
 
     argv[ai++] = "-x";
     argv[ai++] = "c";
     argv[ai++] = "-";
-    argv[ai]   = nullptr;
+
+    // Append linker inputs (.a, .o, etc.) after "-x c -", resetting
+    // the language so clang doesn't misinterpret them as C source.
+    bool need_reset = true;
+    for (int i = 0; i < opts->n_clang_args; i++) {
+        if (strcmp(opts->clang_args[i], "-o") == 0) {
+            i++; // skip -o and its argument
+            continue;
+        }
+        if (is_linker_input(opts->clang_args[i])) {
+            if (need_reset) {
+                argv[ai++] = "-x";
+                argv[ai++] = "none";
+                need_reset  = false;
+            }
+            argv[ai++] = opts->clang_args[i];
+        }
+    }
+
+    argv[ai] = nullptr;
 
     if (verbose) {
         fprintf(stderr, "ncc: compiling:");
