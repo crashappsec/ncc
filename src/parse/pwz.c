@@ -402,30 +402,6 @@ expand_group_nt(ncc_pwz_parser_t *p, ncc_grammar_t *g, int64_t nt_id)
 
         pwz_exp_t *seq = make_seq_exp(p, nt->name.data, nt_id, (int32_t)i,
                                       children, nchildren);
-        // Reset is below; we accumulate body rules temporarily.
-        (void)seq;
-    }
-
-    // Simpler approach: rebuild using the group's min/max directly.
-    // Reset the body_alt we made above — we'll build directly into `alt`.
-    ncc_list_clear(body_alt->alt.alts);
-
-    // Build body rules into body_alt.
-    for (size_t i = 0; i < ncc_list_len(nt->rule_ids); i++) {
-        int32_t            rule_ix = nt->rule_ids.data[i];
-        ncc_parse_rule_t *rule    = ncc_get_rule(g, rule_ix);
-
-        if (rule->penalty_rule) {
-            continue;
-        }
-
-        pwz_exp_ptr_t *children;
-        int32_t        nchildren;
-
-        build_seq_children(p, rule, &children, &nchildren);
-
-        pwz_exp_t *seq = make_seq_exp(p, nt->name.data, nt_id, (int32_t)i,
-                                      children, nchildren);
         alt_add(body_alt, seq);
     }
 
@@ -975,8 +951,6 @@ run_parse(ncc_pwz_parser_t *p)
             return ncc_list_len(p->tops) > 0;
         }
     }
-
-    return ncc_list_len(p->tops) > 0;
 }
 
 // ============================================================================
