@@ -13,18 +13,17 @@
 // Registered as pre-order on "postfix_expression".
 
 #include "lib/alloc.h"
+#include "lib/buffer.h"
 #include "parse/emit.h"
+#include "util/platform.h"
 #include "xform/xform_data.h"
 #include "xform/xform_helpers.h"
 
 #include <ctype.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
 // ============================================================================
 // Helpers: parse template (wrapper around shared helper)
@@ -39,154 +38,139 @@ static ncc_parse_tree_t *parse_template(ncc_grammar_t *g, const char *nt_name,
 // compile_and_run — compile a C program, run it, return stdout
 // ============================================================================
 
+static void set_helper_launch_error(char **err_out, const char *phase,
+                                    const char *detail) {
+  if (!err_out) {
+    return;
+  }
+
+  ncc_buffer_t *buf = ncc_buffer_empty();
+  ncc_buffer_printf(buf, "helper %s launch failed", phase);
+  if (detail && detail[0]) {
+    ncc_buffer_puts(buf, ": ");
+    ncc_buffer_puts(buf, detail);
+    if (detail[strlen(detail) - 1] != '\n') {
+      ncc_buffer_putc(buf, '\n');
+    }
+  } else {
+    ncc_buffer_putc(buf, '\n');
+  }
+  *err_out = ncc_buffer_take(buf);
+}
+
+static void set_helper_exit_error(char **err_out, const char *phase,
+                                  int exit_status, const char *stderr_data,
+                                  size_t stderr_len) {
+  if (!err_out) {
+    return;
+  }
+
+  ncc_buffer_t *buf = ncc_buffer_empty();
+  ncc_buffer_printf(buf, "helper %s failed with exit status %d",
+                    phase, exit_status);
+  if (stderr_data && stderr_len > 0) {
+    ncc_buffer_puts(buf, ":\n");
+    ncc_buffer_append(buf, stderr_data, stderr_len);
+    if (stderr_data[stderr_len - 1] != '\n') {
+      ncc_buffer_putc(buf, '\n');
+    }
+  } else {
+    ncc_buffer_putc(buf, '\n');
+  }
+  *err_out = ncc_buffer_take(buf);
+}
+
 char *compile_and_run(const char *compiler, const char *source,
                       char **err_out) {
   if (err_out) {
     *err_out = nullptr;
   }
 
-  // Create a private temp directory (0700) to prevent symlink attacks.
-  char dir_template[] = "/tmp/ncc_ce_XXXXXX";
-  if (!mkdtemp(dir_template)) {
-    return nullptr;
-  }
-
-  char src_path[sizeof(dir_template) + 16];
-  char bin_path[sizeof(dir_template) + 16];
-  snprintf(src_path, sizeof(src_path), "%s/src.c", dir_template);
-  snprintf(bin_path, sizeof(bin_path), "%s/bin", dir_template);
-
-  int src_fd = open(src_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
-  if (src_fd < 0) {
-    rmdir(dir_template);
-    return nullptr;
-  }
-
-  size_t src_len = strlen(source);
-  size_t src_written = 0;
-
-  while (src_written < src_len) {
-    ssize_t n = write(src_fd, source + src_written, src_len - src_written);
-    if (n < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      close(src_fd);
-      unlink(src_path);
-      rmdir(dir_template);
-      return nullptr;
-    }
-    src_written += (size_t)n;
-  }
-  close(src_fd);
-
-  // Pipe to capture compiler stderr.
-  int err_pipe[2];
-  if (pipe(err_pipe) < 0) {
-    unlink(src_path);
-    rmdir(dir_template);
-    return nullptr;
-  }
-
-  pid_t pid = fork();
-  if (pid < 0) {
-    close(err_pipe[0]);
-    close(err_pipe[1]);
-    unlink(src_path);
-    rmdir(dir_template);
-    return nullptr;
-  }
-
-  if (pid == 0) {
-    // Child: compile.
-    close(err_pipe[0]);
-    dup2(err_pipe[1], STDERR_FILENO);
-    close(err_pipe[1]);
-    execlp(compiler, compiler, "-x", "c", "-std=gnu23", "-w", "-o", bin_path,
-           src_path, (char *)nullptr);
-    _exit(127);
-  }
-
-  close(err_pipe[1]);
-
-  // Read compiler stderr.
-  char *compile_err = nullptr;
-  size_t err_size;
-  FILE *ef = open_memstream(&compile_err, &err_size);
-
-  char ebuf[256];
-  ssize_t en;
-  while ((en = read(err_pipe[0], ebuf, sizeof(ebuf))) > 0) {
-    fwrite(ebuf, 1, (size_t)en, ef);
-  }
-  close(err_pipe[0]);
-  fclose(ef);
-
-  int status;
-  waitpid(pid, &status, 0);
-  unlink(src_path);
-
-  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-    unlink(bin_path);
-    rmdir(dir_template);
-    if (err_out && compile_err && *compile_err) {
-      *err_out = compile_err;
-    } else {
-      ncc_free(compile_err);
-    }
-    return nullptr;
-  }
-  ncc_free(compile_err);
-
-  // Run the compiled binary, capture stdout.
-  int pipe_fd[2];
-  if (pipe(pipe_fd) < 0) {
-    unlink(bin_path);
-    rmdir(dir_template);
-    return nullptr;
-  }
-
-  pid = fork();
-  if (pid < 0) {
-    close(pipe_fd[0]);
-    close(pipe_fd[1]);
-    unlink(bin_path);
-    rmdir(dir_template);
-    return nullptr;
-  }
-
-  if (pid == 0) {
-    // Child: run binary.
-    close(pipe_fd[0]);
-    dup2(pipe_fd[1], STDOUT_FILENO);
-    close(pipe_fd[1]);
-    execl(bin_path, bin_path, (char *)nullptr);
-    _exit(127);
-  }
-
-  close(pipe_fd[1]);
-
+  ncc_temp_workspace_t tmp = {0};
+  char *src_path = nullptr;
+  char *bin_path = nullptr;
   char *result = nullptr;
-  size_t result_size;
-  FILE *f = open_memstream(&result, &result_size);
+  ncc_process_result_t compile_proc = {0};
+  ncc_process_result_t run_proc = {0};
 
-  char buf[256];
-  ssize_t n;
-  while ((n = read(pipe_fd[0], buf, sizeof(buf))) > 0) {
-    fwrite(buf, 1, (size_t)n, f);
-  }
-  close(pipe_fd[0]);
-  fclose(f);
-
-  waitpid(pid, &status, 0);
-  unlink(bin_path);
-  rmdir(dir_template);
-
-  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-    ncc_free(result);
+  if (!ncc_temp_workspace_create(&tmp, "ncc_ce_", err_out)) {
     return nullptr;
   }
 
+  src_path = ncc_temp_workspace_join(&tmp, "src.c");
+#ifdef _WIN32
+  bin_path = ncc_temp_workspace_join(&tmp, "bin.exe");
+#else
+  bin_path = ncc_temp_workspace_join(&tmp, "bin");
+#endif
+
+  if (!src_path || !bin_path) {
+    goto cleanup;
+  }
+
+  char *write_err = nullptr;
+  if (!ncc_platform_write_file(src_path, source, strlen(source), &write_err)) {
+    if (err_out) {
+      *err_out = write_err;
+    } else {
+      ncc_free(write_err);
+    }
+    goto cleanup;
+  }
+
+  const char *compile_argv[] = {
+      compiler, "-x", "c", "-std=gnu23", "-w", "-o", bin_path, src_path,
+      nullptr,
+  };
+  ncc_process_spec_t compile_spec = {
+      .program = compiler,
+      .argv = compile_argv,
+      .capture_stderr = true,
+  };
+
+  if (!ncc_process_run(&compile_spec, &compile_proc)) {
+    set_helper_launch_error(err_out, "compile", compile_proc.stderr_data);
+    goto cleanup;
+  }
+
+  if (compile_proc.exit_code != 0) {
+    set_helper_exit_error(err_out, "compile", compile_proc.exit_code,
+                          compile_proc.stderr_data,
+                          compile_proc.stderr_len);
+    goto cleanup;
+  }
+
+  ncc_process_result_free(&compile_proc);
+
+  const char *run_argv[] = {bin_path, nullptr};
+  ncc_process_spec_t run_spec = {
+      .program = bin_path,
+      .argv = run_argv,
+      .capture_stdout = true,
+      .capture_stderr = true,
+  };
+
+  if (!ncc_process_run(&run_spec, &run_proc)) {
+    set_helper_launch_error(err_out, "execution", run_proc.stderr_data);
+    goto cleanup;
+  }
+
+  if (run_proc.exit_code != 0) {
+    set_helper_exit_error(err_out, "execution", run_proc.exit_code,
+                          run_proc.stderr_data, run_proc.stderr_len);
+    goto cleanup;
+  }
+
+  result = run_proc.stdout_data;
+  run_proc.stdout_data = nullptr;
+  run_proc.stdout_len = 0;
+
+cleanup:
+  ncc_process_result_free(&compile_proc);
+  ncc_process_result_free(&run_proc);
+  ncc_free(src_path);
+  ncc_free(bin_path);
+  ncc_temp_workspace_cleanup(&tmp);
   return result;
 }
 
@@ -399,7 +383,7 @@ static bool is_group_wrapper(ncc_parse_tree_t *node) {
 // and collect type declarations (typedefs, struct/union/enum defs).
 static void collect_decls_recursive(ncc_parse_tree_t *node,
                                     ncc_parse_tree_t *call_node,
-                                    ncc_grammar_t *grammar, FILE *f) {
+                                    ncc_grammar_t *grammar, ncc_buffer_t *buf) {
   if (!node || ncc_tree_is_leaf(node)) {
     return;
   }
@@ -408,7 +392,7 @@ static void collect_decls_recursive(ncc_parse_tree_t *node,
   if (is_group_wrapper(node)) {
     size_t nc = ncc_tree_num_children(node);
     for (size_t i = 0; i < nc; i++) {
-      collect_decls_recursive(ncc_tree_child(node, i), call_node, grammar, f);
+      collect_decls_recursive(ncc_tree_child(node, i), call_node, grammar, buf);
     }
     return;
   }
@@ -436,8 +420,8 @@ static void collect_decls_recursive(ncc_parse_tree_t *node,
 
   ncc_string_t text = pprint_subtree(grammar, node);
   if (text.data) {
-    fputs(text.data, f);
-    fputc('\n', f);
+    ncc_buffer_puts(buf, text.data);
+    ncc_buffer_putc(buf, '\n');
     ncc_free(text.data);
   }
 }
@@ -449,18 +433,15 @@ char *collect_file_scope_declarations(ncc_xform_ctx_t *ctx,
     return strdup("");
   }
 
-  char *output = nullptr;
-  size_t output_size;
-  FILE *f = open_memstream(&output, &output_size);
+  ncc_buffer_t *buf = ncc_buffer_empty();
 
   size_t nc = ncc_tree_num_children(root);
   for (size_t i = 0; i < nc; i++) {
     collect_decls_recursive(ncc_tree_child(root, i), call_node, ctx->grammar,
-                            f);
+                            buf);
   }
 
-  fclose(f);
-  return output ? output : strdup("");
+  return ncc_buffer_take(buf);
 }
 
 // ============================================================================
@@ -472,9 +453,7 @@ static char *strip_line_directives(const char *src) {
     return strdup("");
   }
 
-  char *out = nullptr;
-  size_t out_size;
-  FILE *f = open_memstream(&out, &out_size);
+  ncc_buffer_t *buf = ncc_buffer_empty();
 
   const char *p = src;
   while (*p) {
@@ -494,12 +473,11 @@ static char *strip_line_directives(const char *src) {
         continue;
       }
     }
-    fputc(*p, f);
+    ncc_buffer_putc(buf, *p);
     p++;
   }
 
-  fclose(f);
-  return out ? out : strdup("");
+  return ncc_buffer_take(buf);
 }
 
 // ============================================================================
@@ -625,22 +603,22 @@ static ncc_parse_tree_t *xform_constexpr(ncc_xform_ctx_t *ctx,
   }
 
   // Build the program body.
-  char *body = nullptr;
-  size_t body_size;
-  FILE *body_f = open_memstream(&body, &body_size);
-  fprintf(body_f, "int main(void) {\n");
+  ncc_buffer_t *body_buf = ncc_buffer_empty();
+  ncc_buffer_puts(body_buf, "int main(void) {\n");
 
   if (mode == CE_EVAL) {
     ncc_string_t expr_str = pprint_subtree(ctx->grammar, args[0]);
     char *clean = strip_line_directives(expr_str.data);
-    fprintf(body_f, "    printf(\"%%lld\\n\", (long long)(%s));\n", clean);
+    ncc_buffer_printf(body_buf,
+                      "    printf(\"%%lld\\n\", (long long)(%s));\n", clean);
     ncc_free(expr_str.data);
     ncc_free(clean);
   } else if (mode == CE_STRLEN) {
     ncc_string_t expr_str = pprint_subtree(ctx->grammar, args[0]);
     char *clean = strip_line_directives(expr_str.data);
-    fprintf(body_f, "    printf(\"%%lld\\n\", (long long)strlen(%s));\n",
-            clean);
+    ncc_buffer_printf(body_buf,
+                      "    printf(\"%%lld\\n\", (long long)strlen(%s));\n",
+                      clean);
     ncc_free(expr_str.data);
     ncc_free(clean);
   } else if (mode == CE_STRCMP) {
@@ -648,8 +626,9 @@ static ncc_parse_tree_t *xform_constexpr(ncc_xform_ctx_t *ctx,
     char *c0 = strip_line_directives(e0.data);
     ncc_string_t e1 = pprint_subtree(ctx->grammar, args[1]);
     char *c1 = strip_line_directives(e1.data);
-    fprintf(body_f, "    printf(\"%%lld\\n\", (long long)strcmp(%s, %s));\n",
-            c0, c1);
+    ncc_buffer_printf(body_buf,
+                      "    printf(\"%%lld\\n\", (long long)strcmp(%s, %s));\n",
+                      c0, c1);
     ncc_free(e0.data);
     ncc_free(c0);
     ncc_free(e1.data);
@@ -659,33 +638,36 @@ static ncc_parse_tree_t *xform_constexpr(ncc_xform_ctx_t *ctx,
     for (int i = 0; i < nargs; i++) {
       ncc_string_t expr_str = pprint_subtree(ctx->grammar, args[i]);
       char *clean = strip_line_directives(expr_str.data);
-      fprintf(body_f, "    long long _v%d = (long long)(%s);\n", i, clean);
+      ncc_buffer_printf(body_buf, "    long long _v%d = (long long)(%s);\n", i,
+                        clean);
       ncc_free(expr_str.data);
       ncc_free(clean);
     }
-    fprintf(body_f, "    long long _result = _v0;\n");
+    ncc_buffer_puts(body_buf, "    long long _result = _v0;\n");
     const char *cmp = (mode == CE_MAX) ? ">" : "<";
     for (int i = 1; i < nargs; i++) {
-      fprintf(body_f, "    if (_v%d %s _result) _result = _v%d;\n", i, cmp, i);
+      ncc_buffer_printf(body_buf,
+                        "    if (_v%d %s _result) _result = _v%d;\n", i, cmp,
+                        i);
     }
-    fprintf(body_f, "    printf(\"%%lld\\n\", _result);\n");
+    ncc_buffer_puts(body_buf, "    printf(\"%lld\\n\", _result);\n");
   }
 
-  fprintf(body_f, "    return 0;\n}\n");
-  fclose(body_f);
+  ncc_buffer_puts(body_buf, "    return 0;\n}\n");
+  char *body = ncc_buffer_take(body_buf);
 
   // Build headers preamble.
-  char *headers = nullptr;
-  size_t headers_size;
-  FILE *hdr_f = open_memstream(&headers, &headers_size);
+  ncc_buffer_t *hdr_buf = ncc_buffer_empty();
 
-  fprintf(hdr_f, "#include <stdio.h>\n");
-  fprintf(hdr_f, "#include <stdint.h>\n");
-  fprintf(hdr_f, "#include <stddef.h>\n");
-  fprintf(hdr_f, "#include <limits.h>\n");
-  fprintf(hdr_f, "#include <stdalign.h>\n");
-  fprintf(hdr_f, "#include <string.h>\n");
-  fprintf(hdr_f, "#include <pthread.h>\n");
+  ncc_buffer_puts(hdr_buf, "#include <stdio.h>\n");
+  ncc_buffer_puts(hdr_buf, "#include <stdint.h>\n");
+  ncc_buffer_puts(hdr_buf, "#include <stddef.h>\n");
+  ncc_buffer_puts(hdr_buf, "#include <limits.h>\n");
+  ncc_buffer_puts(hdr_buf, "#include <stdalign.h>\n");
+  ncc_buffer_puts(hdr_buf, "#include <string.h>\n");
+  ncc_buffer_puts(hdr_buf, "#ifndef _WIN32\n");
+  ncc_buffer_puts(hdr_buf, "#include <pthread.h>\n");
+  ncc_buffer_puts(hdr_buf, "#endif\n");
 
   // --ncc-constexpr-include flag takes precedence over env var.
   const char *extra = (xdata && xdata->constexpr_headers)
@@ -718,7 +700,7 @@ static ncc_parse_tree_t *xform_constexpr(ncc_xform_ctx_t *ctx,
           }
         }
         if (valid) {
-          fprintf(hdr_f, "#include %s\n", tok);
+          ncc_buffer_printf(hdr_buf, "#include %s\n", tok);
         } else {
           fprintf(stderr,
                   "ncc: constexpr: invalid NCC_CONSTEXPR_HEADERS "
@@ -732,19 +714,19 @@ static ncc_parse_tree_t *xform_constexpr(ncc_xform_ctx_t *ctx,
     ncc_free(copy);
   }
 
-  fclose(hdr_f);
+  char *headers = ncc_buffer_take(hdr_buf);
 
   // Two-try strategy: first without declarations, then with.
-  char *program = nullptr;
-  size_t prog_size;
-  FILE *prog_f = open_memstream(&program, &prog_size);
-  fprintf(prog_f, "%s%s", headers, body);
-  fclose(prog_f);
+  ncc_buffer_t *prog_buf = ncc_buffer_empty();
+  ncc_buffer_puts(prog_buf, headers);
+  ncc_buffer_puts(prog_buf, body);
+  char *program = ncc_buffer_take(prog_buf);
 
   char *compile_err = nullptr;
   char *output = compile_and_run(compiler, program, &compile_err);
 
-  if (!output) {
+  if (!output && (!compile_err ||
+                  strstr(compile_err, "helper execution") == nullptr)) {
     // Retry with file-scope declarations.
     ncc_free(program);
     ncc_free(compile_err);
@@ -755,9 +737,12 @@ static ncc_parse_tree_t *xform_constexpr(ncc_xform_ctx_t *ctx,
     ncc_free(raw_decls);
 
     if (decls && *decls) {
-      prog_f = open_memstream(&program, &prog_size);
-      fprintf(prog_f, "%s%s\n%s", headers, decls, body);
-      fclose(prog_f);
+      prog_buf = ncc_buffer_empty();
+      ncc_buffer_puts(prog_buf, headers);
+      ncc_buffer_puts(prog_buf, decls);
+      ncc_buffer_putc(prog_buf, '\n');
+      ncc_buffer_puts(prog_buf, body);
+      program = ncc_buffer_take(prog_buf);
 
       output = compile_and_run(compiler, program, &compile_err);
       ncc_free(program);
@@ -772,8 +757,7 @@ static ncc_parse_tree_t *xform_constexpr(ncc_xform_ctx_t *ctx,
 
   if (!output) {
     if (compile_err) {
-      fprintf(stderr, "ncc: %u:%u: constexpr: compilation failed:\n%s", line,
-              col, compile_err);
+      fprintf(stderr, "ncc: %u:%u: constexpr: %s", line, col, compile_err);
       ncc_free(compile_err);
     } else {
       fprintf(stderr, "ncc: %u:%u: constexpr: compilation/execution failed\n",

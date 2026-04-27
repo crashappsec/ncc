@@ -70,6 +70,50 @@ If you decide to do your own transforms, you'll need to register them;
 for now, see the examples in `src/xform/`. I'm happy to incorporate
 other good transforms into the default set if people want to share!
 
+### Windows Cross-Build
+
+`build-host` is the machine running Meson and `ncc` today. `target` is
+the operating system for the produced compiler binary. For the Windows
+flow below, the build host is Linux or macOS and the target is
+`x86_64-w64-windows-gnu`.
+
+```sh
+CC=clang meson setup build-win \
+  --cross-file toolchains/windows-x86_64-clang.ini
+meson compile -C build-win
+```
+
+That produces `build-win/ncc.exe`. The cross file marks Windows
+executables as non-runnable on the build host, so `meson test -C
+build-win` is not part of the default validation loop. The supported
+loop is:
+
+```sh
+CC=clang meson setup build-host
+meson compile -C build-host
+meson test -C build-host --print-errorlogs
+
+build-host/ncc --target=x86_64-w64-windows-gnu -o /tmp/ncc-win-bang.exe test/test_bang.c
+build-host/ncc --target=x86_64-w64-windows-gnu -o /tmp/ncc-win-option.exe test/test_option.c
+build-host/ncc --target=x86_64-w64-windows-gnu -o /tmp/ncc-win-constexpr.exe test/test_constexpr.c
+
+scripts/package_windows_smoke.sh build-win /tmp/ncc-windows-smoke
+```
+
+Copy the resulting bundle to a Windows machine. From inside that
+directory, run:
+
+```powershell
+$env:NCC_COMPILER='clang'; & .\windows_smoke.ps1 -Ncc .\ncc.exe
+```
+
+If `clang.exe` is not on `PATH`, set `NCC_COMPILER` to its full path
+instead. Cross-built Windows binaries default to invoking `clang` by
+name unless you override that with `-Dcc_path=...`, `NCC_COMPILER`, or
+`CC`. The smoke script enables `NCC_VERBOSE=1` by default unless you
+override it and writes its transcript to
+`windows-smoke-transcript.txt`; return that file after the run.
+
 ## NCC extensions
 
 ### Keyword Arguments (`_kargs`)
@@ -406,7 +450,8 @@ once int get_cpu_count(void) {
 }
 ```
 
-Uses `__atomic_*` builtins for lock-free synchronization.
+Generated wrappers use compiler `__atomic` builtins for lock-free
+synchronization.
 
 This is only transformed / used during definitions. If we see `once`
 as a keyword in a declaration, we currently siliently erase it (we
@@ -446,7 +491,7 @@ Pass these with `meson setup -Doption=value`:
 
 | Option | Default | Purpose |
 |--------|---------|---------|
-| `cc_path` | (system clang) | Path to the underlying C23 compiler |
+| `cc_path` | (Meson compiler path, or `clang` for Windows cross-builds) | Path to the underlying C23 compiler |
 | `vargs_type` | `ncc_vargs_t` | Struct type name for variadic parameters |
 | `once_prefix` | `__ncc_` | Identifier prefix for `once` guard variables |
 | `rstr_string_type` | `ncc_string_t*` | Type name used in `typehash()` for rich strings |

@@ -82,7 +82,7 @@ ncc_string_eq(ncc_string_t a, ncc_string_t b)
 static void
 emit_sgr(ncc_buffer_t *buf, const ncc_text_style_t *style)
 {
-    ncc_buffer_puts(buf, "\e[0");
+    ncc_buffer_puts(buf, "\x1b[0");
 
     if (style->bold == NCC_TRI_YES)             ncc_buffer_puts(buf, ";1");
     if (style->dim == NCC_TRI_YES)              ncc_buffer_puts(buf, ";2");
@@ -171,7 +171,7 @@ ncc_string_to_ansi(const ncc_string_t *s)
                 styled = true;
             }
             else if (styled) {
-                ncc_buffer_puts(buf, "\e[0m");
+                ncc_buffer_puts(buf, "\x1b[0m");
                 styled = false;
             }
         }
@@ -204,7 +204,7 @@ ncc_string_to_ansi(const ncc_string_t *s)
     }
 
     if (styled) {
-        ncc_buffer_puts(buf, "\e[0m");
+        ncc_buffer_puts(buf, "\x1b[0m");
     }
 
     return ncc_buffer_take(buf);

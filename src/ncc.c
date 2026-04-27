@@ -23,15 +23,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/wait.h>
-#include <unistd.h>
+#include <ctype.h>
 
 #ifdef __APPLE__
 #include <execinfo.h>
-#include <mach-o/dyld.h>
 #elif defined(__linux__)
 #include <execinfo.h>
-#include <limits.h>
 #endif
 
 #include "parse/bnf.h"
@@ -46,6 +43,7 @@
 #include "lib/alloc.h"
 #include "lib/buffer.h"
 #include "lib/dict.h"
+#include "util/platform.h"
 
 static const char embedded_grammar[] = {
 #embed "c_ncc.bnf"
@@ -84,14 +82,15 @@ crash_handler(int sig)
 #if defined(__APPLE__) || defined(__linux__)
     void *bt[NCC_BACKTRACE_DEPTH];
     int   n = backtrace(bt, NCC_BACKTRACE_DEPTH);
-    backtrace_symbols_fd(bt, n, STDERR_FILENO);
+    backtrace_symbols_fd(bt, n, fileno(stderr));
 #endif
-    _exit(1);
+    _Exit(1);
 }
 
 static void
 signal_setup(void)
 {
+#if defined(__APPLE__) || defined(__linux__)
     static char     altstack[65536];
     static stack_t  ss = {.ss_sp = altstack, .ss_size = sizeof(altstack)};
     struct sigaction sa = {.sa_handler = crash_handler, .sa_flags = SA_ONSTACK};
@@ -100,6 +99,9 @@ signal_setup(void)
     sigaction(SIGSEGV, &sa, nullptr);
     sigaction(SIGBUS, &sa, nullptr);
     sigaction(SIGABRT, &sa, nullptr);
+#else
+    (void)crash_handler;
+#endif
 }
 
 // ============================================================================
@@ -110,6 +112,43 @@ static bool verbose = false;
 
 #define ncc_verbose(fmt, ...) \
     do { if (verbose) fprintf(stderr, "ncc: " fmt "\n" __VA_OPT__(,) __VA_ARGS__); } while (0)
+
+static bool
+env_var_enabled(const char *name)
+{
+    const char *value = getenv(name);
+
+    return value && value[0] && strcmp(value, "0") != 0;
+}
+
+static void
+ncc_verbose_args(const char *prefix, const char **argv, int argc)
+{
+    if (!verbose || !prefix || !argv || argc <= 0) {
+        return;
+    }
+
+    fprintf(stderr, "ncc: %s:", prefix);
+    for (int i = 0; i < argc; i++) {
+        fprintf(stderr, " %s", argv[i]);
+    }
+    fputc('\n', stderr);
+}
+
+static void
+forward_process_output(const char *label, const char *data, size_t len,
+                       FILE *stream)
+{
+    if (!data || len == 0 || !stream) {
+        return;
+    }
+
+    if (verbose && label && label[0]) {
+        fprintf(stderr, "ncc: %s follows\n", label);
+    }
+
+    fwrite(data, 1, len, stream);
+}
 
 // ============================================================================
 // Parsed command-line state
@@ -172,6 +211,73 @@ add_clang_arg(ncc_opts_t *opts, const char *arg)
 // Forward declaration — defined below.
 static char *get_exe_path(void);
 
+static bool
+path_is_sep(char c)
+{
+    return c == '/' || c == '\\';
+}
+
+static const char *
+path_basename(const char *path)
+{
+    const char *base = path;
+
+    for (const char *p = path; p && *p; p++) {
+        if (path_is_sep(*p)) {
+            base = p + 1;
+        }
+    }
+
+    return base;
+}
+
+#ifdef _WIN32
+static bool
+ascii_streq_ignore_case(const char *lhs, const char *rhs)
+{
+    while (*lhs && *rhs) {
+        if (tolower((unsigned char)*lhs) != tolower((unsigned char)*rhs)) {
+            return false;
+        }
+        lhs++;
+        rhs++;
+    }
+
+    return *lhs == '\0' && *rhs == '\0';
+}
+#endif
+
+static char *
+normalize_cpp_path(const char *path)
+{
+    size_t len = strlen(path);
+    char  *out = ncc_alloc_size(1, len + 1);
+
+    memcpy(out, path, len + 1);
+
+    for (size_t i = 0; i < len; i++) {
+        if (out[i] == '\\') {
+            out[i] = '/';
+        }
+    }
+
+    return out;
+}
+
+static void
+print_process_message(const char *prefix, const char *detail)
+{
+    if (!detail || !detail[0]) {
+        fprintf(stderr, "ncc: %s\n", prefix);
+        return;
+    }
+
+    fprintf(stderr, "ncc: %s: %s", prefix, detail);
+    if (detail[strlen(detail) - 1] != '\n') {
+        fputc('\n', stderr);
+    }
+}
+
 // ============================================================================
 // Self-recursion guard: detect if a path resolves to our own executable
 // ============================================================================
@@ -184,9 +290,13 @@ is_ncc_path(const char *path)
     }
 
     // Quick basename check: if the bare name is "ncc", it's us.
-    const char *slash = strrchr(path, '/');
-    const char *base  = slash ? slash + 1 : path;
-    if (strcmp(base, "ncc") == 0) {
+    const char *base = path_basename(path);
+    if (strcmp(base, "ncc") == 0 || strcmp(base, "ncc.exe") == 0
+#ifdef _WIN32
+        || ascii_streq_ignore_case(base, "ncc")
+        || ascii_streq_ignore_case(base, "ncc.exe")
+#endif
+    ) {
         return true;
     }
 
@@ -195,15 +305,8 @@ is_ncc_path(const char *path)
         return false;
     }
 
-    char *candidate = realpath(path, nullptr);
-    if (!candidate) {
-        ncc_free(our_exe);
-        return false;
-    }
-
-    bool same = (strcmp(our_exe, candidate) == 0);
+    bool same = ncc_platform_path_eq(path, our_exe);
     ncc_free(our_exe);
-    ncc_free(candidate);
     return same;
 }
 
@@ -216,20 +319,31 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
 {
     memset(opts, 0, sizeof(*opts));
 
+    verbose = env_var_enabled("NCC_VERBOSE");
+
     opts->compiler = getenv("NCC_COMPILER");
+    if (opts->compiler) {
+        ncc_verbose("using NCC_COMPILER=%s", opts->compiler);
+    }
     if (!opts->compiler) {
         const char *cc_env = getenv("CC");
         if (cc_env && !is_ncc_path(cc_env)) {
             opts->compiler = cc_env;
+            ncc_verbose("using CC=%s as underlying compiler", cc_env);
+        }
+        else if (cc_env) {
+            ncc_verbose("ignoring CC=%s because it resolves to ncc", cc_env);
         }
     }
 #ifdef NCC_DEFAULT_CC
     if (!opts->compiler) {
         opts->compiler = NCC_DEFAULT_CC;
+        ncc_verbose("using build-time default compiler=%s", opts->compiler);
     }
 #endif
     if (!opts->compiler) {
-        opts->compiler = "/usr/local/bin/clang";
+        opts->compiler = "clang";
+        ncc_verbose("using fallback compiler=%s", opts->compiler);
     }
 
     // Init constexpr headers from env var (flag overrides later).
@@ -242,10 +356,6 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
     const char *grammar_env = getenv("NCC_GRAMMAR");
     if (grammar_env && grammar_env[0]) {
         opts->grammar_file = grammar_env;
-    }
-
-    if (getenv("NCC_VERBOSE")) {
-        verbose = true;
     }
 
     bool after_dashdash = false;
@@ -428,6 +538,28 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
             add_clang_arg(opts, std);
         }
     }
+
+    ncc_verbose("options: input=%s output=%s mode=%s compiler=%s clang_args=%d",
+                opts->input_file ? opts->input_file : "(none)",
+                opts->output_file ? opts->output_file : "(default)",
+                opts->no_ncc ? "passthrough"
+                             : opts->has_E ? "emit-c"
+                                           : opts->has_c ? "compile-only"
+                                                         : "compile-and-link",
+                opts->compiler, opts->n_clang_args);
+    ncc_verbose("flags: -E=%d -c=%d std=%d dep=%d dump_tokens=%d dump_tree=%d dump_output=%d",
+                opts->has_E, opts->has_c, opts->has_std, opts->has_dep_flags,
+                opts->dump_tokens, opts->dump_tree, opts->dump_output);
+    if (opts->constexpr_headers) {
+        ncc_verbose("constexpr headers=%s", opts->constexpr_headers);
+    }
+    if (opts->grammar_file) {
+        ncc_verbose("grammar override=%s", opts->grammar_file);
+    }
+    if (opts->n_clang_args > 0) {
+        ncc_verbose_args("clang passthrough args", opts->clang_args,
+                         opts->n_clang_args);
+    }
 }
 
 // ============================================================================
@@ -480,25 +612,7 @@ print_help(void)
 static char *
 get_exe_path(void)
 {
-#ifdef __APPLE__
-    uint32_t sz = 0;
-    _NSGetExecutablePath(nullptr, &sz);
-
-    char *buf = ncc_alloc_size(1, sz + 1);
-    if (_NSGetExecutablePath(buf, &sz) != 0) {
-        ncc_free(buf);
-        return nullptr;
-    }
-
-    char *resolved = realpath(buf, nullptr);
-    ncc_free(buf);
-    return resolved;
-#elif defined(__linux__)
-    char *resolved = realpath("/proc/self/exe", nullptr);
-    return resolved;
-#else
-    return nullptr;
-#endif
+    return ncc_platform_get_exe_path();
 }
 
 
@@ -865,67 +979,74 @@ run_preprocessor(const ncc_opts_t *opts, size_t *out_len)
         return nullptr;
     }
 
+    ncc_verbose("preprocess: read %zu bytes from %s", raw_len, input_file);
+
     // Prescan: rewrite r"..." → __ncc_rstr("...") before CPP.
     // This must happen on the raw source before preprocessing.
     char  *wrapped     = rstr_prescan(raw_src, raw_len, &raw_len);
     size_t wrapped_len = raw_len;
 
     // Prepend a line marker so CPP attributes output to the original file.
-    // This makes compiler error messages reference the real source.
-    char line_marker[2048];
-    int  marker_len = snprintf(line_marker, sizeof(line_marker),
-                                "# 1 \"%s\"\n", input_file);
+    // Normalize to forward slashes so the preprocessor sees a portable path.
+    char         *marker_path = normalize_cpp_path(input_file);
+    ncc_buffer_t *marker_buf  = ncc_buffer_empty();
+    ncc_buffer_printf(marker_buf, "# 1 \"%s\"\n", marker_path);
+    ncc_buffer_append(marker_buf, wrapped, wrapped_len);
 
-    size_t total_len = (size_t)marker_len + wrapped_len;
-    char  *with_marker = ncc_alloc_size(1, total_len + 1);
-    memcpy(with_marker, line_marker, (size_t)marker_len);
-    memcpy(with_marker + marker_len, wrapped, wrapped_len);
-    with_marker[total_len] = '\0';
+    size_t total_len   = marker_buf->byte_len;
+    char  *with_marker = ncc_buffer_take(marker_buf);
+
+    ncc_free(marker_path);
     ncc_free(wrapped);
     wrapped     = with_marker;
     wrapped_len = total_len;
+    ncc_verbose("preprocess: source after prescan/marker is %zu bytes",
+                wrapped_len);
 
-    // Write wrapped source to a temp file.
-    char tmp_path[] = "/tmp/ncc_XXXXXX.c";
-    int  tmp_fd     = mkstemps(tmp_path, 2);
+    // Write wrapped source into a private temp directory.
+    ncc_temp_workspace_t pp_workspace = {0};
+    char *tmp_err  = nullptr;
+    char *tmp_path = nullptr;
 
-    if (tmp_fd < 0) {
-        fprintf(stderr, "ncc: mkstemps() failed: %s\n", strerror(errno));
+    if (!ncc_temp_workspace_create(&pp_workspace, "ncc_pp_", &tmp_err)) {
+        print_process_message("failed to create preprocessor temp path",
+                              tmp_err);
+        ncc_free(tmp_err);
         ncc_free(wrapped);
         return nullptr;
     }
 
-    size_t  w_written = 0;
-
-    while (w_written < wrapped_len) {
-        ssize_t n = write(tmp_fd, wrapped + w_written,
-                          wrapped_len - w_written);
-
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            fprintf(stderr, "ncc: write to temp file: %s\n", strerror(errno));
-            close(tmp_fd);
-            unlink(tmp_path);
-            ncc_free(wrapped);
-            return nullptr;
-        }
-
-        w_written += (size_t)n;
+    tmp_path = ncc_temp_workspace_join(&pp_workspace, "input.c");
+    if (!tmp_path) {
+        fprintf(stderr, "ncc: failed to create preprocessor input path\n");
+        ncc_free(wrapped);
+        ncc_temp_workspace_cleanup(&pp_workspace);
+        return nullptr;
     }
 
-    close(tmp_fd);
+    ncc_verbose("preprocess temp dir=%s",
+                ncc_temp_workspace_path(&pp_workspace));
+    ncc_verbose("preprocess temp input=%s", tmp_path);
+
+    char *write_err = nullptr;
+    if (!ncc_platform_write_file(tmp_path, wrapped, wrapped_len, &write_err)) {
+        print_process_message("write to preprocessor temp file failed",
+                              write_err);
+        ncc_free(write_err);
+        ncc_free(wrapped);
+        ncc_free(tmp_path);
+        ncc_temp_workspace_cleanup(&pp_workspace);
+        return nullptr;
+    }
+
     ncc_free(wrapped);
+    ncc_verbose("preprocess: wrote %zu bytes to %s", wrapped_len, tmp_path);
 
     // Extract source directory for -I so relative includes still resolve.
-    char       *src_dir     = strdup(input_file);
-    char       *last_slash  = strrchr(src_dir, '/');
-    const char *include_dir = nullptr;
-
-    if (last_slash) {
-        *last_slash = '\0';
-        include_dir = src_dir;
+    char       *src_dir     = ncc_platform_dirname(input_file);
+    const char *include_dir = src_dir;
+    if (include_dir) {
+        ncc_verbose("preprocess include dir=%s", include_dir);
     }
 
     // Build argv: compiler -E -std=gnu23 -fno-blocks [-I src_dir]
@@ -973,86 +1094,51 @@ run_preprocessor(const ncc_opts_t *opts, size_t *out_len)
     argv[ai++] = tmp_path;
     argv[ai]   = nullptr;
 
-    if (verbose) {
-        fprintf(stderr, "ncc: running:");
-        for (int i = 0; argv[i]; i++) {
-            fprintf(stderr, " %s", argv[i]);
-        }
-        fprintf(stderr, "\n");
-    }
+    ncc_verbose_args("preprocessor argv", argv, ai);
 
-    int pipefd[2];
+    ncc_process_spec_t   spec = {
+        .program        = compiler,
+        .argv           = argv,
+        .capture_stdout = true,
+        .capture_stderr = verbose,
+    };
+    ncc_process_result_t proc;
 
-    if (pipe(pipefd) < 0) {
-        fprintf(stderr, "ncc: pipe() failed: %s\n", strerror(errno));
+    if (!ncc_process_run(&spec, &proc)) {
+        print_process_message("failed to launch preprocessor",
+                              proc.stderr_data);
+        ncc_process_result_free(&proc);
         ncc_free(argv);
         ncc_free(src_dir);
-        unlink(tmp_path);
+        ncc_free(tmp_path);
+        ncc_temp_workspace_cleanup(&pp_workspace);
         return nullptr;
     }
 
-    pid_t pid = fork();
+    forward_process_output("preprocessor stderr", proc.stderr_data,
+                           proc.stderr_len, stderr);
 
-    if (pid < 0) {
-        fprintf(stderr, "ncc: fork() failed: %s\n", strerror(errno));
-        close(pipefd[0]);
-        close(pipefd[1]);
-        ncc_free(argv);
-        ncc_free(src_dir);
-        unlink(tmp_path);
-        return nullptr;
-    }
-
-    if (pid == 0) {
-        // Child: redirect stdout to pipe, inherit stderr.
-        close(pipefd[0]);
-        dup2(pipefd[1], STDOUT_FILENO);
-        close(pipefd[1]);
-        execvp(compiler, (char *const *)argv);
-        _exit(127);
-    }
-
-    // Parent: read from pipe.
-    close(pipefd[1]);
     ncc_free(argv);
-
-    ncc_buffer_t *rbuf = ncc_buffer_empty();
-    ncc_buffer_ensure(rbuf, 1 << 16);
-
-    for (;;) {
-        ncc_buffer_ensure(rbuf, 4096);
-
-        ssize_t n = read(pipefd[0], rbuf->data + rbuf->byte_len, 4096);
-
-        if (n <= 0) {
-            break;
-        }
-
-        rbuf->byte_len += (size_t)n;
-    }
-
-    // NUL-terminate for downstream string use.
-    ncc_buffer_putc(rbuf, '\0');
-    rbuf->byte_len--;
-
-    close(pipefd[0]);
-
-    int wstatus;
-    waitpid(pid, &wstatus, 0);
-
-    // Clean up temp file.
-    unlink(tmp_path);
     ncc_free(src_dir);
+    ncc_verbose("preprocessor exit code=%d", proc.exit_code);
 
-    if (!WIFEXITED(wstatus) || WEXITSTATUS(wstatus) != 0) {
-        int code = WIFEXITED(wstatus) ? WEXITSTATUS(wstatus) : 1;
-        fprintf(stderr, "ncc: preprocessor failed (exit %d)\n", code);
-        ncc_buffer_free(rbuf);
+    if (proc.exit_code != 0) {
+        fprintf(stderr, "ncc: preprocessor failed (exit %d)\n", proc.exit_code);
+        ncc_process_result_free(&proc);
+        ncc_free(tmp_path);
+        ncc_temp_workspace_cleanup(&pp_workspace);
         return nullptr;
     }
 
-    size_t len = rbuf->byte_len;
-    char  *buf = ncc_buffer_take(rbuf);
+    size_t len = proc.stdout_len;
+    char  *buf = proc.stdout_data;
+    proc.stdout_data = nullptr;
+    proc.stdout_len  = 0;
+    ncc_process_result_free(&proc);
+
+    ncc_verbose("preprocess: captured %zu bytes from stdout", len);
+    ncc_free(tmp_path);
+    ncc_temp_workspace_cleanup(&pp_workspace);
 
     // Post-process: wrap system header regions with #pragma ncc off/on.
     // CPP line markers with flag 3 indicate system headers.
@@ -1063,6 +1149,8 @@ run_preprocessor(const ncc_opts_t *opts, size_t *out_len)
     if (out_len) {
         *out_len = wrapped_pp_len;
     }
+
+    ncc_verbose("preprocess: final wrapped output is %zu bytes", wrapped_pp_len);
 
     return wrapped_pp;
 }
@@ -1093,11 +1181,34 @@ compiler_passthrough(const ncc_opts_t *opts, int argc, const char **argv)
     }
     new_argv[n] = nullptr;
 
-    execvp(opts->compiler, (char *const *)new_argv);
-    fprintf(stderr, "ncc: failed to exec %s: %s\n", opts->compiler,
-            strerror(errno));
+    ncc_verbose_args("passthrough argv", new_argv, n);
+
+    ncc_process_spec_t   spec = {
+        .program        = opts->compiler,
+        .argv           = new_argv,
+        .capture_stdout = verbose,
+        .capture_stderr = verbose,
+    };
+    ncc_process_result_t proc;
+
+    if (!ncc_process_run(&spec, &proc)) {
+        print_process_message("failed to launch compiler passthrough",
+                              proc.stderr_data);
+        ncc_process_result_free(&proc);
+        ncc_free(new_argv);
+        return 1;
+    }
+
+    forward_process_output("compiler stdout", proc.stdout_data,
+                           proc.stdout_len, stdout);
+    forward_process_output("compiler stderr", proc.stderr_data,
+                           proc.stderr_len, stderr);
+
     ncc_free(new_argv);
-    return 1;
+    int rc = proc.exit_code;
+    ncc_verbose("passthrough exit code=%d", rc);
+    ncc_process_result_free(&proc);
+    return rc;
 }
 
 // ============================================================================
@@ -1258,72 +1369,36 @@ pipe_to_compiler(const ncc_opts_t *opts, const char *c_source, size_t c_len)
 
     argv[ai] = nullptr;
 
-    if (verbose) {
-        fprintf(stderr, "ncc: compiling:");
-        for (int i = 0; argv[i]; i++) {
-            fprintf(stderr, " %s", argv[i]);
-        }
-        fprintf(stderr, "\n");
-    }
+    ncc_verbose("compiler stdin bytes=%zu", c_len);
+    ncc_verbose_args("compiler argv", argv, ai);
 
-    int pipefd[2];
+    ncc_process_spec_t   spec = {
+        .program        = opts->compiler,
+        .argv           = argv,
+        .stdin_data     = c_source,
+        .stdin_len      = c_len,
+        .capture_stdout = verbose,
+        .capture_stderr = verbose,
+    };
+    ncc_process_result_t proc;
 
-    if (pipe(pipefd) < 0) {
-        fprintf(stderr, "ncc: pipe() failed: %s\n", strerror(errno));
+    if (!ncc_process_run(&spec, &proc)) {
+        print_process_message("failed to launch compiler", proc.stderr_data);
+        ncc_process_result_free(&proc);
         ncc_free(argv);
         return 1;
     }
 
-    pid_t pid = fork();
+    forward_process_output("compiler stdout", proc.stdout_data,
+                           proc.stdout_len, stdout);
+    forward_process_output("compiler stderr", proc.stderr_data,
+                           proc.stderr_len, stderr);
 
-    if (pid < 0) {
-        fprintf(stderr, "ncc: fork() failed: %s\n", strerror(errno));
-        close(pipefd[0]);
-        close(pipefd[1]);
-        ncc_free(argv);
-        return 1;
-    }
-
-    if (pid == 0) {
-        // Child: read transformed C from pipe stdin.
-        close(pipefd[1]);
-        dup2(pipefd[0], STDIN_FILENO);
-        close(pipefd[0]);
-        execvp(opts->compiler, (char *const *)argv);
-        _exit(127);
-    }
-
-    // Parent: write transformed C to pipe, then close.
-    close(pipefd[0]);
     ncc_free(argv);
-
-    size_t  written = 0;
-
-    while (written < c_len) {
-        ssize_t n = write(pipefd[1], c_source + written, c_len - written);
-
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            fprintf(stderr, "ncc: write to compiler pipe: %s\n",
-                    strerror(errno));
-            break;
-        }
-
-        written += (size_t)n;
-    }
-
-    close(pipefd[1]);
-
-    int wstatus;
-    waitpid(pid, &wstatus, 0);
-
-    if (WIFEXITED(wstatus)) {
-        return WEXITSTATUS(wstatus);
-    }
-
-    return 1;
+    int rc = proc.exit_code;
+    ncc_verbose("compiler exit code=%d", rc);
+    ncc_process_result_free(&proc);
+    return rc;
 }
 
 // ============================================================================
@@ -1335,11 +1410,58 @@ pipe_to_compiler(const ncc_opts_t *opts, const char *c_source, size_t c_len)
 // use the original source (not our transformed stdin) so the dependency
 // file lists actual header paths.
 
+static char *
+derive_depfile_path(const ncc_opts_t *opts)
+{
+    const char *path = opts->output_file ? opts->output_file : opts->input_file;
+    const char *last_sep = nullptr;
+    const char *last_dot = nullptr;
+
+    for (const char *p = path; p && *p; p++) {
+        if (path_is_sep(*p)) {
+            last_sep = p;
+            last_dot = nullptr;
+        }
+        else if (*p == '.') {
+            last_dot = p;
+        }
+    }
+
+    const char *base = last_sep ? last_sep + 1 : path;
+    size_t prefix_len = last_dot && last_dot >= base
+                            ? (size_t)(last_dot - path)
+                            : strlen(path);
+    char *result = ncc_alloc_size(1, prefix_len + 3);
+    memcpy(result, path, prefix_len);
+    memcpy(result + prefix_len, ".d", 3);
+    return result;
+}
+
+static bool
+depfile_is_nonempty(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return false;
+    }
+
+    int ch = fgetc(f);
+    fclose(f);
+    return ch != EOF;
+}
+
 static int
 generate_depfile(const ncc_opts_t *opts)
 {
     if (!opts->has_dep_flags) {
         return 0;
+    }
+
+    char *derived_depfile = nullptr;
+    const char *depfile_path = opts->dep_mf;
+    if (!depfile_path) {
+        derived_depfile = derive_depfile_path(opts);
+        depfile_path = derived_depfile;
     }
 
     // Build argv: compiler -M [-MM] -MF file [-MQ target] [-MT target]
@@ -1363,10 +1485,9 @@ generate_depfile(const ncc_opts_t *opts)
         argv[ai++] = "-std=gnu23";
     }
 
-    if (opts->dep_mf) {
-        argv[ai++] = "-MF";
-        argv[ai++] = opts->dep_mf;
-    }
+    argv[ai++] = "-MF";
+    argv[ai++] = depfile_path;
+
     if (opts->dep_mq) {
         argv[ai++] = "-MQ";
         argv[ai++] = opts->dep_mq;
@@ -1374,6 +1495,10 @@ generate_depfile(const ncc_opts_t *opts)
     if (opts->dep_mt) {
         argv[ai++] = "-MT";
         argv[ai++] = opts->dep_mt;
+    }
+    else if (!opts->dep_mq && opts->output_file) {
+        argv[ai++] = "-MT";
+        argv[ai++] = opts->output_file;
     }
 
     // Pass through include paths, defines, and other relevant flags.
@@ -1396,37 +1521,41 @@ generate_depfile(const ncc_opts_t *opts)
     argv[ai++] = opts->input_file;
     argv[ai]   = nullptr;
 
-    if (verbose) {
-        fprintf(stderr, "ncc: depfile:");
-        for (int i = 0; argv[i]; i++) {
-            fprintf(stderr, " %s", argv[i]);
-        }
-        fprintf(stderr, "\n");
-    }
+    ncc_verbose_args("depfile argv", argv, ai);
 
-    pid_t pid = fork();
-    if (pid < 0) {
-        fprintf(stderr, "ncc: fork() for depfile failed: %s\n",
-                strerror(errno));
+    ncc_process_spec_t   spec = {
+        .program        = opts->compiler,
+        .argv           = argv,
+        .capture_stdout = verbose,
+        .capture_stderr = verbose,
+    };
+    ncc_process_result_t proc;
+
+    if (!ncc_process_run(&spec, &proc)) {
+        print_process_message("failed to launch depfile compiler",
+                              proc.stderr_data);
+        ncc_process_result_free(&proc);
         ncc_free(argv);
+        ncc_free(derived_depfile);
         return 1;
     }
 
-    if (pid == 0) {
-        execvp(opts->compiler, (char *const *)argv);
-        _exit(127);
-    }
+    forward_process_output("depfile stdout", proc.stdout_data,
+                           proc.stdout_len, stdout);
+    forward_process_output("depfile stderr", proc.stderr_data,
+                           proc.stderr_len, stderr);
 
     ncc_free(argv);
-
-    int wstatus;
-    waitpid(pid, &wstatus, 0);
-
-    if (WIFEXITED(wstatus)) {
-        return WEXITSTATUS(wstatus);
+    int rc = proc.exit_code;
+    ncc_verbose("depfile exit code=%d", rc);
+    ncc_process_result_free(&proc);
+    if (rc == 0 && !depfile_is_nonempty(depfile_path)) {
+        fprintf(stderr, "ncc: depfile was not created or is empty: %s\n",
+                depfile_path);
+        rc = 1;
     }
-
-    return 1;
+    ncc_free(derived_depfile);
+    return rc;
 }
 
 // ============================================================================
@@ -1436,6 +1565,14 @@ generate_depfile(const ncc_opts_t *opts)
 static int
 compile_file(ncc_opts_t *opts)
 {
+    ncc_verbose("compile start: input=%s output=%s compiler=%s mode=%s",
+                opts->input_file,
+                opts->output_file ? opts->output_file : "(default)",
+                opts->compiler,
+                opts->has_E ? "emit-c"
+                            : opts->has_c ? "compile-only"
+                                          : "compile-and-link");
+
     // Stage 1: Load grammar.
     ncc_grammar_t *g = load_c_grammar(opts);
     if (!g) {
@@ -1461,6 +1598,7 @@ compile_file(ncc_opts_t *opts)
 #endif
 
     // Stage 3: Tokenize.
+    ncc_verbose("tokenizing preprocessed source");
     ncc_buffer_t              *buf      = ncc_buffer_from_bytes(pp_text,
                                                                   (int64_t)pp_len);
     ncc_c_tokenizer_state_t   *tok_state = ncc_c_tokenizer_state_new();
@@ -1588,6 +1726,7 @@ compile_file(ncc_opts_t *opts)
     }
 
     // Stage 6: Transform passes (typeid, typestr, typehash).
+    ncc_verbose("registering transforms");
     ncc_xform_registry_t xreg;
     ncc_xform_registry_init(&xreg, g);
     ncc_register_generic_struct_xform(&xreg);
@@ -1636,19 +1775,6 @@ compile_file(ncc_opts_t *opts)
                            "primary_expression", rstr_styled);
     ncc_template_register(&tmpl_reg, "rstr_plain",
                            "primary_expression", rstr_plain);
-
-    // _Once templates (see templates/*.c.tmpl for slot documentation).
-    static const char once_tmpl[] = {
-#embed "templates/once.c.tmpl"
-        , '\0'
-    };
-    static const char once_void_tmpl[] = {
-#embed "templates/once_void.c.tmpl"
-        , '\0'
-    };
-    ncc_template_register(&tmpl_reg, "once", "translation_unit", once_tmpl);
-    ncc_template_register(&tmpl_reg, "once_void", "translation_unit",
-                           once_void_tmpl);
 
     // Bang (!) error propagation template.
     static const char bang_tmpl[] = {
@@ -1700,6 +1826,7 @@ compile_file(ncc_opts_t *opts)
     ncc_dict_init(&xdata.generic_struct_decls,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
     xctx.user_data = &xdata;
+    ncc_verbose("applying transforms");
     tree = ncc_xform_apply(&xreg, &xctx);
 
     if (xctx.nodes_replaced > 0) {
@@ -1756,6 +1883,8 @@ compile_file(ncc_opts_t *opts)
     int rc = 0;
 
     if (opts->has_E) {
+        ncc_verbose("emit mode target=%s",
+                    opts->output_file ? opts->output_file : "stdout");
         // -E mode: emit to stdout or -o file.
         FILE *out = stdout;
         if (opts->output_file) {
@@ -1776,13 +1905,18 @@ compile_file(ncc_opts_t *opts)
         // Generate dependency file if requested (separate process on
         // original source, before compilation).
         if (opts->has_dep_flags) {
+            ncc_verbose("generating depfile");
             int dep_rc = generate_depfile(opts);
             if (dep_rc != 0) {
-                ncc_verbose("depfile generation failed (rc=%d)", dep_rc);
+                fprintf(stderr, "ncc: depfile generation failed (exit %d)\n",
+                        dep_rc);
+                rc = dep_rc;
+                goto cleanup;
             }
         }
 
         // Compile: pipe transformed C to compiler.
+        ncc_verbose("handing transformed source to compiler");
         rc = pipe_to_compiler(opts, emitted.data, emit_len);
     }
 

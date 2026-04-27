@@ -1,7 +1,7 @@
 project('ncc', 'c',
   version : '0.1.0',
   meson_version : '>= 1.1',
-  default_options : ['c_std=gnu23', 'warning_level=3'])
+  default_options : ['c_std=gnu23', 'warning_level=3', 'b_lundef=true'])
 
 cc = meson.get_compiler('c')
 
@@ -29,7 +29,11 @@ using_glibc = cc.compiles(glibc_check, name : 'glibc check')
 # Default compiler path for NCC_DEFAULT_CC
 default_compiler_path = get_option('cc_path')
 if default_compiler_path == ''
-  default_compiler_path = cc.cmd_array()[0]
+  if host_machine.system() == 'windows'
+    default_compiler_path = 'clang'
+  else
+    default_compiler_path = cc.cmd_array()[0]
+  endif
 endif
 
 c_args = [
@@ -109,6 +113,7 @@ src_parse = files(
 )
 
 src_util = files(
+  'src/util/platform.c',
   'src/util/sha256.c',
   'src/util/type_normalize.c',
 )
@@ -209,6 +214,40 @@ test_xform_template = executable('test_xform_template',
 )
 test('xform_template', test_xform_template, suite : 'ncc')
 
+test_c_tokenizer = executable('test_c_tokenizer',
+  'test/test_c_tokenizer.c',
+  c_args : c_args + coverage_args,
+  link_args : coverage_link_args,
+  dependencies : libncc_internal_dep,
+)
+test('c_tokenizer', test_c_tokenizer, suite : 'ncc')
+
+test_process_run = executable('test_process_run',
+  'test/test_process_run.c',
+  c_args : c_args + coverage_args,
+  link_args : coverage_link_args,
+  dependencies : libncc_internal_dep,
+)
+test('process_run', test_process_run, suite : 'ncc', timeout : 10)
+
+test_fake_binary_compiler = executable('test_fake_binary_compiler',
+  'test/fake_binary_compiler.c',
+  c_args : c_args + coverage_args,
+  link_args : coverage_link_args,
+)
+
+test_fake_verbose_compiler = executable('test_fake_verbose_compiler',
+  'test/fake_verbose_compiler.c',
+  c_args : c_args + coverage_args,
+  link_args : coverage_link_args,
+)
+
+test_fake_stdin_close_compiler = executable('test_fake_stdin_close_compiler',
+  'test/fake_stdin_close_compiler.c',
+  c_args : c_args + coverage_args,
+  link_args : coverage_link_args,
+)
+
 # Default ncc type settings for tests.  When the ncc binary is built with
 # overridden type names (e.g. n00b_vargs_t for the n00b project), the test
 # files still use the default ncc_* names.  Pass CLI overrides so the
@@ -232,6 +271,7 @@ ncc_compile_tests = {
   'kargs_vargs':  ['compile_run',  test_dir / 'test_kargs_vargs.c'],
   'rstr':         ['compile_run',  test_dir / 'test_rstr.c'],
   'vargs':        ['compile_run',  test_dir / 'test_vargs.c'],
+  'once':         ['compile_run',  test_dir / 'test_once.c'],
   'option':       ['compile_run',  test_dir / 'test_option.c'],
   'generic_struct': ['compile_run', test_dir / 'test_generic_struct.c'],
   'gs_result':      ['compile_run', test_dir / 'test_gs_result.c'],
@@ -245,12 +285,108 @@ foreach name, params : ncc_compile_tests
   )
 endforeach
 
+if host_machine.system() != 'windows' and cc.has_header('pthread.h')
+  test('ncc_constexpr_pthread', test_runner,
+    args : [ncc_exe, 'compile_run', test_dir / 'test_constexpr_pthread.c']
+           + ncc_test_flags,
+    suite : 'ncc',
+    depends : ncc_exe,
+  )
+endif
+
 # rstr_ansi test links against libncc (ncc_string_to_ansi lives there).
 test('ncc_rstr_ansi', test_runner,
   args : [ncc_exe, 'compile_run', test_dir / 'test_rstr_ansi.c']
          + ncc_test_flags + [libncc.full_path()],
   suite : 'ncc',
   depends : [ncc_exe, libncc],
+)
+
+test('ncc_verbose_binary_output', test_runner,
+  args : [ncc_exe, 'verbose_binary_output', test_dir / 'test_bang.c'],
+  env : {'NCC_COMPILER' : test_fake_binary_compiler.full_path()},
+  suite : 'ncc',
+  depends : [ncc_exe, test_fake_binary_compiler],
+)
+
+test('ncc_cc_fallback_binary_output', test_runner,
+  args : [ncc_exe, 'cc_fallback_binary_output', test_dir / 'test_bang.c'],
+  env : {'NCC_TEST_CC' : test_fake_binary_compiler.full_path()},
+  suite : 'ncc',
+  depends : [ncc_exe, test_fake_binary_compiler],
+)
+
+test('ncc_cc_self_guard', test_runner,
+  args : [ncc_exe, 'cc_self_guard', test_dir / 'test_bang.c']
+         + ncc_test_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_verbose_high_output', test_runner,
+  args : [ncc_exe, 'verbose_high_output', test_dir / 'test_bang.c']
+         + ncc_test_flags,
+  env : {'NCC_COMPILER' : test_fake_verbose_compiler.full_path()},
+  suite : 'ncc',
+  depends : [ncc_exe, test_fake_verbose_compiler],
+  timeout : 10,
+)
+
+test('ncc_compiler_stdin_close', test_runner,
+  args : [ncc_exe, 'compiler_stdin_close', test_dir / 'test_bang.c']
+         + ncc_test_flags,
+  env : {'NCC_COMPILER' : test_fake_stdin_close_compiler.full_path()},
+  suite : 'ncc',
+  depends : [ncc_exe, test_fake_stdin_close_compiler],
+  timeout : 10,
+)
+
+test('ncc_depfile', test_runner,
+  args : [ncc_exe, 'depfile', test_dir / 'test_depfile.c'] + ncc_test_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_depfile_md', test_runner,
+  args : [ncc_exe, 'depfile_md', test_dir / 'test_depfile.c']
+         + ncc_test_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_depfile_default', test_runner,
+  args : [ncc_exe, 'depfile_default', test_dir / 'test_depfile.c']
+         + ncc_test_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_depfile_mt', test_runner,
+  args : [ncc_exe, 'depfile_mt', test_dir / 'test_depfile.c']
+         + ncc_test_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_depfile_mq', test_runner,
+  args : [ncc_exe, 'depfile_mq', test_dir / 'test_depfile.c']
+         + ncc_test_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_depfile_error', test_runner,
+  args : [ncc_exe, 'depfile_expect_error', test_dir / 'test_depfile.c']
+         + ncc_test_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_constexpr_runtime_error', test_runner,
+  args : [ncc_exe, 'constexpr_runtime_error',
+          test_dir / 'err_constexpr_runtime_fail.c'] + ncc_test_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
 )
 
 # Error tests (expect non-zero exit)

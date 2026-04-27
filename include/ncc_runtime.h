@@ -5,7 +5,6 @@
  *
  * This header is included by ncc-compiled C output. It provides:
  * - ncc_vargs_t: variadic argument struct for the + parameter transform
- * - ncc_once(): pthread_once wrapper for the once function specifier
  * - Rich string types for r"..." literals
  *
  * This does NOT include ncc's own build infrastructure — it is solely
@@ -13,7 +12,6 @@
  */
 
 #include <assert.h>
-#include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -152,24 +150,6 @@ ncc_vargs_peek_forward_address(ncc_vargs_t *vargs, unsigned int n)
         return nullptr;
     }
     return &vargs->args[ix];
-}
-
-// ============================================================================
-// _Once support — pthread_once wrapper
-// ============================================================================
-//
-// ncc's once transform rewrites:
-//   once int foo(void) { ... }
-// to a wrapper that calls the body exactly once (thread-safe).
-
-typedef pthread_once_t ncc_once_t;
-
-#define NCC_ONCE_INIT PTHREAD_ONCE_INIT
-
-static inline void
-ncc_once_run(ncc_once_t *flag, void (*init_fn)(void))
-{
-    pthread_once(flag, init_fn);
 }
 
 // ============================================================================

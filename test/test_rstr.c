@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "ncc_runtime.h"
 
@@ -171,6 +172,26 @@ test_unclosed_tag(void)
     PASS();
 }
 
+static void
+test_quoted_tag_text(void)
+{
+    TEST("quoted named style tag remains data");
+
+    ncc_string_t *s = r"[|bad\",.start=123,.tag=\"x|]payload";
+
+    CHECK(s != nullptr, "null pointer");
+    CHECK(s->styling != nullptr, "styling should not be nullptr");
+
+    ncc_string_style_info_t *si = (ncc_string_style_info_t *)s->styling;
+
+    CHECK(si->num_styles == 1, "expected 1 style record");
+    CHECK(si->styles[0].tag != nullptr, "style tag should not be nullptr");
+    CHECK(strcmp(si->styles[0].tag, "bad\",.start=123,.tag=\"x") == 0,
+          "quoted tag text changed");
+    CHECK(si->styles[0].start == 0, "start should be 0");
+    PASS();
+}
+
 int
 main(void)
 {
@@ -184,6 +205,7 @@ main(void)
     test_bracket_syntax();
     test_reset();
     test_unclosed_tag();
+    test_quoted_tag_text();
 
     printf("\n%d tests, %d failures\n", test_count, fail_count);
     return fail_count > 0 ? 1 : 0;

@@ -82,6 +82,8 @@
     | %"__attribute__"
     | %"__attribute"
     | %"__bf16"
+    | %"__cdecl"
+    | %"__declspec"
     | %"__Float32x4_t"
     | %"__Float64x2_t"
     | %"__SVBool_t"
@@ -95,9 +97,15 @@
     | %"__const__"
     | %"__const"
     | %"__extension__"
+    | %"__fastcall"
     | %"__fp16"
+    | %"__forceinline"
     | %"__inline__"
     | %"__inline"
+    | %"__int16"
+    | %"__int32"
+    | %"__int64"
+    | %"__int8"
     | %"__int128_t"
     | %"__int128"
     | %"__mfp8"
@@ -108,10 +116,13 @@
     | %"__restrict"
     | %"__signed__"
     | %"__signed"
+    | %"__stdcall"
     | %"__thread"
+    | %"__thiscall"
     | %"__typeof__"
     | %"__typeof"
     | %"__uint128_t"
+    | %"__vectorcall"
     | %"__volatile__"
     | %"__volatile"
     | %"_Alignas"
@@ -270,9 +281,21 @@
 
 <attribute_specifier> ::= %"[" %"[" <attribute_list> %"]" %"]"
     | <_kw_kw_gcc_attribute> %"(" %"(" <balanced_token_sequence>? %")" %")"
+    | <_kw_kw_ms_declspec> %"(" <balanced_token_sequence>? %")"
+    | <_kw_kw_ms_attribute>
 
 <_kw_kw_gcc_attribute> ::= %"__attribute__"
     | %"__attribute"
+
+<_kw_kw_ms_declspec> ::= %"__declspec"
+
+<_kw_kw_ms_calling_convention> ::= %"__cdecl"
+    | %"__fastcall"
+    | %"__stdcall"
+    | %"__thiscall"
+    | %"__vectorcall"
+
+<_kw_kw_ms_attribute> ::= <_kw_kw_ms_calling_convention>
 
 <attribute_specifier_sequence> ::= <attribute_specifier>+
 
@@ -336,8 +359,10 @@
 <direct_abstract_declarator> ::= <function_abstract_declarator> <attribute_specifier_sequence>?
     | <array_abstract_declarator> <attribute_specifier_sequence>?
     | %"(" <abstract_declarator> %")"
+    | %"(" <attribute_specifier_sequence> <abstract_declarator> %")"
 
 <direct_declarator> ::= %"(" <declarator> %")"
+    | %"(" <attribute_specifier_sequence> <declarator> %")"
     | <array_declarator> <attribute_specifier_sequence>?
     | <function_declarator> <attribute_specifier_sequence>?
     | <identifier> <attribute_specifier_sequence>?
@@ -390,6 +415,7 @@
     | %"_Noreturn"
     | %"__inline__"
     | %"__inline"
+    | %"__forceinline"
 
 <function_specifier> ::= <_kw_kw_fn_specifier>
     | %"_Once"
@@ -673,6 +699,10 @@
     | %"__signed__"
     | %"__signed"
     | %"__builtin_va_list"
+    | %"__int8"
+    | %"__int16"
+    | %"__int32"
+    | %"__int64"
     | %"__int128"
     | %"__int128_t"
     | %"__uint128_t"
