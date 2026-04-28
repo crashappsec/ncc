@@ -1,5 +1,40 @@
 #include <stdio.h>
+#if __has_include(<threads.h>)
 #include <threads.h>
+#else
+/* macOS lacks C11 <threads.h>; map the subset we use onto pthreads. */
+#include <pthread.h>
+#include <sched.h>
+#include <stdlib.h>
+typedef pthread_t thrd_t;
+typedef int (*thrd_start_t)(void *);
+enum { thrd_success = 0 };
+typedef struct {
+    thrd_start_t fn;
+    void        *arg;
+    int          rc;
+} thrd_shim_t;
+static void *thrd_shim_entry(void *p) {
+    thrd_shim_t *s = p;
+    s->rc = s->fn(s->arg);
+    return s;
+}
+static inline int thrd_create(thrd_t *t, thrd_start_t fn, void *arg) {
+    thrd_shim_t *s = malloc(sizeof(*s));
+    if (!s) return 1;
+    s->fn = fn; s->arg = arg; s->rc = 0;
+    return pthread_create(t, NULL, thrd_shim_entry, s) == 0 ? thrd_success : 1;
+}
+static inline int thrd_join(thrd_t t, int *rc) {
+    void *retval = NULL;
+    if (pthread_join(t, &retval) != 0) return 1;
+    thrd_shim_t *s = retval;
+    if (rc && s) *rc = s->rc;
+    free(s);
+    return thrd_success;
+}
+static inline void thrd_yield(void) { sched_yield(); }
+#endif
 
 static int void_hits = 0;
 static int value_hits = 0;
