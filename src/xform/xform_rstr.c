@@ -598,53 +598,54 @@ static void build_style_records(rstr_seg_list_t *sl, out_style_list_t *out) {
 // Code emitter
 // =========================================================================
 
-static void emit_escaped_string(FILE *f, const char *data, int len) {
+static void emit_escaped_string(ncc_buffer_t *buf, const char *data, int len) {
   for (int i = 0; i < len; i++) {
     unsigned char c = (unsigned char)data[i];
 
     switch (c) {
     case '\\':
-      fputs("\\\\", f);
+      ncc_buffer_puts(buf, "\\\\");
       break;
     case '"':
-      fputs("\\\"", f);
+      ncc_buffer_puts(buf, "\\\"");
       break;
     case '\n':
-      fputs("\\n", f);
+      ncc_buffer_puts(buf, "\\n");
       break;
     case '\r':
-      fputs("\\r", f);
+      ncc_buffer_puts(buf, "\\r");
       break;
     case '\t':
-      fputs("\\t", f);
+      ncc_buffer_puts(buf, "\\t");
       break;
     case '\0':
-      fputs("\\0", f);
+      ncc_buffer_puts(buf, "\\0");
       break;
     default:
       if (c < 0x20 || c == 0x7f) {
-        fprintf(f, "\\x%02x", c);
+        ncc_buffer_printf(buf, "\\x%02x", c);
       } else {
-        fputc(c, f);
+        ncc_buffer_putc(buf, (char)c);
       }
       break;
     }
   }
 }
 
-static void emit_style_var(FILE *f, out_style_t *os, int idx, int uid) {
+static void emit_style_var(ncc_buffer_t *buf, out_style_t *os, int idx,
+                           int uid) {
   if (os->kind == PSTYLE_NAMED || os->kind == PSTYLE_ROLE) {
     // Deferred: info = nullptr, tag = "name". No style variable needed.
   } else if (os->kind == PSTYLE_CASE) {
-    fprintf(f,
-            "static ncc_text_style_t _ncc_rs_%d_ts_%d="
-            "{.text_case=%d};",
-            uid, idx, os->case_val);
+    ncc_buffer_printf(buf,
+                      "static ncc_text_style_t _ncc_rs_%d_ts_%d="
+                      "{.text_case=%d};",
+                      uid, idx, os->case_val);
   } else {
-    fprintf(f,
-            "static ncc_text_style_t _ncc_rs_%d_ts_%d="
-            "{.%s=2};",
-            uid, idx, os->field_name);
+    ncc_buffer_printf(buf,
+                      "static ncc_text_style_t _ncc_rs_%d_ts_%d="
+                      "{.%s=2};",
+                      uid, idx, os->field_name);
   }
 }
 
@@ -652,56 +653,55 @@ static void emit_style_var(FILE *f, out_style_t *os, int idx, int uid) {
 // This becomes the $0 argument to the rstr_styled template.
 // Returns an allocated string (caller frees).
 static char *emit_style_declarations(out_style_list_t *out, int uid) {
-  char *result = nullptr;
-  size_t size;
-  FILE *f = open_memstream(&result, &size);
+  ncc_buffer_t *buf = ncc_buffer_empty();
 
   for (int i = 0; i < out->count; i++) {
-    emit_style_var(f, &out->items[i], i, uid);
+    emit_style_var(buf, &out->items[i], i, uid);
   }
 
-  fprintf(f,
-          "static struct{"
-          "int64_t num_styles;"
-          "ncc_text_style_t*base_style;"
-          "ncc_style_record_t styles[%d];"
-          "}_ncc_rs_%d_si={",
-          out->count, uid);
-  fprintf(f, ".num_styles=%d,.base_style=((ncc_text_style_t*)0),", out->count);
-  fprintf(f, ".styles={");
+  ncc_buffer_printf(buf,
+                    "static struct{"
+                    "int64_t num_styles;"
+                    "ncc_text_style_t*base_style;"
+                    "ncc_style_record_t styles[%d];"
+                    "}_ncc_rs_%d_si={",
+                    out->count, uid);
+  ncc_buffer_printf(buf, ".num_styles=%d,.base_style=((ncc_text_style_t*)0),",
+                    out->count);
+  ncc_buffer_puts(buf, ".styles={");
 
   for (int i = 0; i < out->count; i++) {
     if (i > 0) {
-      fputc(',', f);
+      ncc_buffer_putc(buf, ',');
     }
 
     out_style_t *os = &out->items[i];
 
-    fprintf(f, "{");
+    ncc_buffer_putc(buf, '{');
 
     if (os->kind == PSTYLE_NAMED || os->kind == PSTYLE_ROLE) {
-      fprintf(f, ".info=((ncc_text_style_t*)0),.tag=\"");
-      fputs(os->field_name, f);
-      fprintf(f, "\"");
+      ncc_buffer_puts(buf, ".info=((ncc_text_style_t*)0),.tag=\"");
+      emit_escaped_string(buf, os->field_name, (int)strlen(os->field_name));
+      ncc_buffer_putc(buf, '"');
     } else {
-      fprintf(f, ".info=&_ncc_rs_%d_ts_%d,.tag=((void*)0)", uid, i);
+      ncc_buffer_printf(buf, ".info=&_ncc_rs_%d_ts_%d,.tag=((void*)0)", uid,
+                        i);
     }
 
-    fprintf(f, ",.start=%d", os->start);
+    ncc_buffer_printf(buf, ",.start=%d", os->start);
 
     if (os->end >= 0) {
-      fprintf(f, ",.end={.has_value=1,.value=(size_t)%d}", os->end);
+      ncc_buffer_printf(buf, ",.end={.has_value=1,.value=(size_t)%d}",
+                        os->end);
     } else {
-      fprintf(f, ",.end={.has_value=0}");
+      ncc_buffer_puts(buf, ",.end={.has_value=0}");
     }
 
-    fprintf(f, "}");
+    ncc_buffer_putc(buf, '}');
   }
 
-  fprintf(f, "}};");
-
-  fclose(f);
-  return result;
+  ncc_buffer_puts(buf, "}};");
+  return ncc_buffer_take(buf);
 }
 
 // =========================================================================
@@ -709,9 +709,7 @@ static char *emit_style_declarations(out_style_list_t *out, int uid) {
 // =========================================================================
 
 static char *extract_rstr_content(ncc_parse_tree_t *arglist, int *out_len) {
-  char *result = nullptr;
-  size_t size;
-  FILE *f = open_memstream(&result, &size);
+  ncc_buffer_t *buf = ncc_buffer_empty();
 
   // DFS to find all STRING token leaves.
   typedef struct {
@@ -752,43 +750,43 @@ static char *extract_rstr_content(ncc_parse_tree_t *arglist, int *out_len) {
 
             switch (*p) {
             case 'n':
-              fputc('\n', f);
+              ncc_buffer_putc(buf, '\n');
               p++;
               break;
             case 'r':
-              fputc('\r', f);
+              ncc_buffer_putc(buf, '\r');
               p++;
               break;
             case 't':
-              fputc('\t', f);
+              ncc_buffer_putc(buf, '\t');
               p++;
               break;
             case '0':
-              fputc('\0', f);
+              ncc_buffer_putc(buf, '\0');
               p++;
               break;
             case '\\':
-              fputc('\\', f);
+              ncc_buffer_putc(buf, '\\');
               p++;
               break;
             case '"':
-              fputc('"', f);
+              ncc_buffer_putc(buf, '"');
               p++;
               break;
             case 'a':
-              fputc('\a', f);
+              ncc_buffer_putc(buf, '\a');
               p++;
               break;
             case 'b':
-              fputc('\b', f);
+              ncc_buffer_putc(buf, '\b');
               p++;
               break;
             case 'f':
-              fputc('\f', f);
+              ncc_buffer_putc(buf, '\f');
               p++;
               break;
             case 'v':
-              fputc('\v', f);
+              ncc_buffer_putc(buf, '\v');
               p++;
               break;
             case 'x': {
@@ -809,17 +807,17 @@ static char *extract_rstr_content(ncc_parse_tree_t *arglist, int *out_len) {
                 }
               }
 
-              fputc((char)val, f);
+              ncc_buffer_putc(buf, (char)val);
               break;
             }
             default:
-              fputc('\\', f);
-              fputc(*p, f);
+              ncc_buffer_putc(buf, '\\');
+              ncc_buffer_putc(buf, *p);
               p++;
               break;
             }
           } else {
-            fputc(*p, f);
+            ncc_buffer_putc(buf, *p);
             p++;
           }
         }
@@ -847,9 +845,8 @@ static char *extract_rstr_content(ncc_parse_tree_t *arglist, int *out_len) {
   }
 
   ncc_free(stack.items);
-  fclose(f);
-  *out_len = (int)size;
-  return result;
+  *out_len = (int)buf->byte_len;
+  return ncc_buffer_take(buf);
 }
 
 // =========================================================================
@@ -962,13 +959,11 @@ static ncc_parse_tree_t *xform_rstr(ncc_xform_ctx_t *ctx,
   snprintf(cp_str, sizeof(cp_str), "%lld", (long long)cp_count);
 
   // Escaped data literal (with quotes).
-  char *data_str = nullptr;
-  size_t data_size;
-  FILE *df = open_memstream(&data_str, &data_size);
-  fputc('"', df);
-  emit_escaped_string(df, tb->data, (int)tb->byte_len);
-  fputc('"', df);
-  fclose(df);
+  ncc_buffer_t *data_buf = ncc_buffer_empty();
+  ncc_buffer_putc(data_buf, '"');
+  emit_escaped_string(data_buf, tb->data, (int)tb->byte_len);
+  ncc_buffer_putc(data_buf, '"');
+  char *data_str = ncc_buffer_take(data_buf);
 
   // Extra args for n00b build (typehash + wrapper var name).
   // These are ignored by the default template (fewer slots), but

@@ -9,6 +9,7 @@
 // Registered as pre-order on "synthetic_identifier" and "postfix_expression".
 
 #include "lib/alloc.h"
+#include "lib/buffer.h"
 #include "xform/xform_data.h"
 #include "xform/xform_helpers.h"
 
@@ -96,17 +97,16 @@ static bool try_eval_integer(const char *compiler, const char *expr,
   }
 
   // Fallback: compile and run.
-  char *source = nullptr;
-  size_t source_size;
-  FILE *sf = open_memstream(&source, &source_size);
-  fprintf(sf, "#include <stdio.h>\n");
-  fprintf(sf, "#include <stddef.h>\n");
-  fprintf(sf, "#include <stdint.h>\n");
-  fprintf(sf, "int main(void) {\n");
-  fprintf(sf, "    printf(\"%%lld\", (long long)(%s));\n", expr);
-  fprintf(sf, "    return 0;\n");
-  fprintf(sf, "}\n");
-  fclose(sf);
+  ncc_buffer_t *source_buf = ncc_buffer_empty();
+  ncc_buffer_puts(source_buf, "#include <stdio.h>\n");
+  ncc_buffer_puts(source_buf, "#include <stddef.h>\n");
+  ncc_buffer_puts(source_buf, "#include <stdint.h>\n");
+  ncc_buffer_puts(source_buf, "int main(void) {\n");
+  ncc_buffer_printf(source_buf,
+                    "    printf(\"%%lld\", (long long)(%s));\n", expr);
+  ncc_buffer_puts(source_buf, "    return 0;\n");
+  ncc_buffer_puts(source_buf, "}\n");
+  char *source = ncc_buffer_take(source_buf);
 
   char *err_msg = nullptr;
   char *result = compile_and_run(compiler, source, &err_msg);

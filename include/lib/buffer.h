@@ -3,6 +3,9 @@
 #include "ncc.h"
 #include "lib/alloc.h"
 
+#include <stdarg.h>
+#include <stdio.h>
+
 struct ncc_buffer_t {
     char  *data;
     size_t byte_len;
@@ -85,10 +88,50 @@ ncc_buffer_puts(ncc_buffer_t *buf, const char *s)
     ncc_buffer_append(buf, s, strlen(s));
 }
 
+static inline void
+ncc_buffer_vprintf(ncc_buffer_t *buf, const char *fmt, va_list ap)
+{
+    va_list copy;
+    va_copy(copy, ap);
+
+    int needed = vsnprintf(nullptr, 0, fmt, copy);
+    va_end(copy);
+
+    if (needed < 0) {
+        return;
+    }
+
+    ncc_buffer_ensure(buf, (size_t)needed + 1);
+
+    va_copy(copy, ap);
+    int written = vsnprintf(buf->data + buf->byte_len,
+                            buf->alloc_len - buf->byte_len, fmt, copy);
+    va_end(copy);
+
+    if (written > 0) {
+        buf->byte_len += (size_t)written;
+    }
+}
+
+static inline void
+ncc_buffer_printf(ncc_buffer_t *buf, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    ncc_buffer_vprintf(buf, fmt, ap);
+    va_end(ap);
+}
+
 static inline char *
 ncc_buffer_take(ncc_buffer_t *buf)
 {
     char *result = buf->data;
+
+    if (!result) {
+        result    = (char *)ncc_alloc_size(1, 1);
+        result[0] = '\0';
+    }
+
     ncc_free(buf);
     return result;
 }

@@ -198,20 +198,14 @@ bool ncc_xform_has_void_type(ncc_parse_tree_t *node) {
 // Collect base type from declaration_specifiers
 // ============================================================================
 
-char *ncc_xform_collect_base_type(ncc_parse_tree_t *decl_specs) {
-  ncc_buffer_t *buf = ncc_buffer_empty();
-  size_t nc = ncc_tree_num_children(decl_specs);
+static void collect_nt_text(ncc_parse_tree_t *node, const char *nt_name,
+                            ncc_buffer_t *buf) {
+  if (!node || ncc_tree_is_leaf(node)) {
+    return;
+  }
 
-  for (size_t i = 0; i < nc; i++) {
-    ncc_parse_tree_t *ds = ncc_tree_child(decl_specs, i);
-    if (!ds || ncc_tree_is_leaf(ds)) {
-      continue;
-    }
-    if (ncc_xform_find_child_nt(ds, "storage_class_specifier") ||
-        ncc_xform_find_child_nt(ds, "function_specifier")) {
-      continue;
-    }
-    ncc_string_t text = ncc_xform_node_to_text(ds);
+  if (ncc_xform_nt_name_is(node, nt_name)) {
+    ncc_string_t text = ncc_xform_node_to_text(node);
     if (text.data) {
       if (buf->byte_len > 0) {
         ncc_buffer_putc(buf, ' ');
@@ -219,7 +213,23 @@ char *ncc_xform_collect_base_type(ncc_parse_tree_t *decl_specs) {
       ncc_buffer_append(buf, text.data, text.u8_bytes);
       ncc_free(text.data);
     }
+    return;
   }
+
+  if (ncc_xform_nt_name_is(node, "attribute_specifier_sequence")) {
+    return;
+  }
+
+  size_t nc = ncc_tree_num_children(node);
+  for (size_t i = 0; i < nc; i++) {
+    collect_nt_text(ncc_tree_child(node, i), nt_name, buf);
+  }
+}
+
+char *ncc_xform_collect_base_type(ncc_parse_tree_t *decl_specs) {
+  ncc_buffer_t *buf = ncc_buffer_empty();
+
+  collect_nt_text(decl_specs, "type_specifier_qualifier", buf);
 
   char *result = ncc_buffer_take(buf);
   if (!result || result[0] == '\0') {
@@ -254,38 +264,41 @@ static bool contains_leaf_text(ncc_parse_tree_t *node, const char *text) {
 char *ncc_xform_collect_qualifiers(ncc_parse_tree_t *decl_specs,
                                     const char *skip) {
   ncc_buffer_t *buf = ncc_buffer_empty();
-  size_t nc = ncc_tree_num_children(decl_specs);
 
-  for (size_t i = 0; i < nc; i++) {
-    ncc_parse_tree_t *ds = ncc_tree_child(decl_specs, i);
-    if (!ds || ncc_tree_is_leaf(ds)) {
+  struct { ncc_parse_tree_t *node; } stack[128];
+  int sp = 0;
+  stack[sp++].node = decl_specs;
+
+  while (sp > 0) {
+    ncc_parse_tree_t *node = stack[--sp].node;
+    if (!node || ncc_tree_is_leaf(node)) {
       continue;
     }
-    ncc_parse_tree_t *scs =
-        ncc_xform_find_child_nt(ds, "storage_class_specifier");
-    ncc_parse_tree_t *fs =
-        ncc_xform_find_child_nt(ds, "function_specifier");
 
-    if (scs) {
-      ncc_string_t text = ncc_xform_node_to_text(scs);
-      if (text.data) {
-        if (buf->byte_len > 0) {
-          ncc_buffer_putc(buf, ' ');
-        }
-        ncc_buffer_append(buf, text.data, text.u8_bytes);
-        ncc_free(text.data);
-      }
-    } else if (fs) {
-      if (skip && contains_leaf_text(fs, skip)) {
+    if (ncc_xform_nt_name_is(node, "storage_class_specifier") ||
+        ncc_xform_nt_name_is(node, "function_specifier")) {
+      if (skip && contains_leaf_text(node, skip)) {
         continue;
       }
-      ncc_string_t text = ncc_xform_node_to_text(fs);
+      ncc_string_t text = ncc_xform_node_to_text(node);
       if (text.data) {
         if (buf->byte_len > 0) {
           ncc_buffer_putc(buf, ' ');
         }
         ncc_buffer_append(buf, text.data, text.u8_bytes);
         ncc_free(text.data);
+      }
+      continue;
+    }
+
+    if (ncc_xform_nt_name_is(node, "attribute_specifier_sequence")) {
+      continue;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = nc; i > 0; i--) {
+      if (sp < 128) {
+        stack[sp++].node = ncc_tree_child(node, i - 1);
       }
     }
   }

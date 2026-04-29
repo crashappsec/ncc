@@ -3,12 +3,9 @@
 // `_Once` makes a function execute its body at most once (thread-safe).
 // Subsequent calls return the cached result (or nothing, for void fns).
 //
-// Uses C23 stdatomic: _Atomic int flag, atomic_load/atomic_fetch_or/atomic_store.
-// The original function body is moved to a static __internal_<name> helper;
-// the public wrapper uses a three-state flag (0=uncalled, 1=running, 2=done).
-//
-// Two templates ("once" and "once_void") are registered in ncc.c and
-// instantiated here with $0..$7 substitutions.
+// parse_once_replacement() assembles parseable C source for a public wrapper,
+// a static body helper, and optional result cache. The wrapper uses compiler
+// __atomic builtins with a three-state flag (0=uncalled, 1=running, 2=done).
 //
 // Registered as pre-order on "translation_unit" with SKIP_CHILDREN.
 // We walk external_declaration children ourselves to insert siblings.
@@ -17,8 +14,8 @@
 #include "lib/buffer.h"
 #include "xform/xform_data.h"
 #include "xform/xform_helpers.h"
-#include "xform/xform_template.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -77,28 +74,238 @@ static void remove_once(ncc_parse_tree_t *decl_specs,
 }
 
 // ============================================================================
-// Helpers: extract function name from declarator
+// Helpers: extract declaration metadata from declarators
 // ============================================================================
 
-static const char *extract_func_name(ncc_parse_tree_t *node) {
-  if (!node) {
-    return nullptr;
+static bool is_ident_start_char(char c) {
+  unsigned char uc = (unsigned char)c;
+  return isalpha(uc) || c == '_';
+}
+
+static bool is_ident_char(char c) {
+  unsigned char uc = (unsigned char)c;
+  return isalnum(uc) || c == '_';
+}
+
+static const char *skip_spaces(const char *p) {
+  while (*p && isspace((unsigned char)*p)) {
+    p++;
   }
-  if (ncc_tree_is_leaf(node)) {
-    ncc_token_info_t *tok = ncc_tree_leaf_value(node);
-    if (tok && tok->tid == (int32_t)NCC_TOK_IDENTIFIER) {
-      return ncc_xform_leaf_text(node);
+  return p;
+}
+
+static bool word_eq(const char *start, size_t len, const char *word) {
+  return strlen(word) == len && memcmp(start, word, len) == 0;
+}
+
+static bool is_ms_calling_convention(const char *start, size_t len) {
+  return word_eq(start, len, "__cdecl") ||
+         word_eq(start, len, "__fastcall") ||
+         word_eq(start, len, "__stdcall") ||
+         word_eq(start, len, "__thiscall") ||
+         word_eq(start, len, "__vectorcall");
+}
+
+static const char *skip_quoted(const char *p) {
+  char quote = *p++;
+
+  while (*p) {
+    if (*p == '\\' && p[1]) {
+      p += 2;
+      continue;
     }
-    return nullptr;
+    if (*p == quote) {
+      return p + 1;
+    }
+    p++;
   }
-  size_t nc = ncc_tree_num_children(node);
-  for (size_t i = 0; i < nc; i++) {
-    const char *name = extract_func_name(ncc_tree_child(node, i));
-    if (name) {
+
+  return p;
+}
+
+static const char *skip_balanced_text(const char *p) {
+  int depth = 0;
+
+  while (*p) {
+    if (*p == '"' || *p == '\'') {
+      p = skip_quoted(p);
+      continue;
+    }
+    if (*p == '(') {
+      depth++;
+    } else if (*p == ')') {
+      depth--;
+      p++;
+      if (depth <= 0) {
+        return p;
+      }
+      continue;
+    }
+    p++;
+  }
+
+  return p;
+}
+
+static char *strip_declarator_attributes(const char *text) {
+  ncc_buffer_t *buf = ncc_buffer_empty();
+  const char *p = text;
+
+  while (*p) {
+    if (is_ident_start_char(*p)) {
+      const char *start = p++;
+      while (is_ident_char(*p)) {
+        p++;
+      }
+      size_t len = (size_t)(p - start);
+
+      if (word_eq(start, len, "__attribute__") ||
+          word_eq(start, len, "__attribute") ||
+          word_eq(start, len, "__declspec")) {
+        p = skip_spaces(p);
+        if (*p == '(') {
+          p = skip_balanced_text(p);
+        }
+        continue;
+      }
+      if (is_ms_calling_convention(start, len)) {
+        continue;
+      }
+
+      ncc_buffer_append(buf, start, len);
+      continue;
+    }
+
+    if (p[0] == '[' && p[1] == '[') {
+      p += 2;
+      while (*p && !(p[0] == ']' && p[1] == ']')) {
+        p++;
+      }
+      if (*p) {
+        p += 2;
+      }
+      continue;
+    }
+
+    ncc_buffer_putc(buf, *p++);
+  }
+
+  return ncc_buffer_take(buf);
+}
+
+static size_t find_last_top_level_param_open(const char *text) {
+  int depth = 0;
+  size_t last = (size_t)-1;
+
+  for (size_t i = 0; text[i]; i++) {
+    if (text[i] == '"' || text[i] == '\'') {
+      const char *next = skip_quoted(text + i);
+      i = (size_t)(next - text);
+      if (i > 0) {
+        i--;
+      }
+      continue;
+    }
+    if (text[i] == '(') {
+      if (depth == 0) {
+        last = i;
+      }
+      depth++;
+    } else if (text[i] == ')' && depth > 0) {
+      depth--;
+    }
+  }
+
+  return last;
+}
+
+static char *copy_last_identifier_before(const char *text, size_t end) {
+  size_t i = end;
+
+  while (i > 0) {
+    while (i > 0 && !is_ident_char(text[i - 1])) {
+      i--;
+    }
+    size_t ident_end = i;
+    while (i > 0 && is_ident_char(text[i - 1])) {
+      i--;
+    }
+    if (ident_end > i && is_ident_start_char(text[i])) {
+      size_t len = ident_end - i;
+      char *name = ncc_alloc_size(1, len + 1);
+      memcpy(name, text + i, len);
+      name[len] = '\0';
       return name;
     }
   }
+
   return nullptr;
+}
+
+static bool is_type_keyword(const char *name) {
+  static const char *keywords[] = {
+      "void", "char", "short", "int", "long", "float", "double",
+      "signed", "unsigned", "const", "volatile", "restrict", "static",
+      "struct", "union", "enum", "_Atomic", "_Bool", "bool", "c_va",
+      nullptr,
+  };
+
+  for (int i = 0; keywords[i]; i++) {
+    if (strcmp(name, keywords[i]) == 0) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static char *extract_func_name(ncc_parse_tree_t *declarator) {
+  ncc_string_t text = ncc_xform_node_to_text(declarator);
+  if (!text.data) {
+    return nullptr;
+  }
+
+  char *clean = strip_declarator_attributes(text.data);
+  ncc_free(text.data);
+
+  size_t param_open = find_last_top_level_param_open(clean);
+  size_t name_end = param_open == (size_t)-1 ? strlen(clean) : param_open;
+  char *name = copy_last_identifier_before(clean, name_end);
+
+  ncc_free(clean);
+  return name;
+}
+
+static char *collect_return_modifier_text(ncc_parse_tree_t *declarator) {
+  ncc_parse_tree_t *ptr = ncc_xform_find_child_nt(declarator, "pointer");
+  if (!ptr) {
+    char *result = ncc_alloc_size(1, 1);
+    result[0] = '\0';
+    return result;
+  }
+
+  ncc_string_t text = ncc_xform_node_to_text(ptr);
+  if (!text.data) {
+    char *result = ncc_alloc_size(1, 1);
+    result[0] = '\0';
+    return result;
+  }
+
+  char *clean = strip_declarator_attributes(text.data);
+  ncc_free(text.data);
+  return clean;
+}
+
+static char *join_return_type(const char *base_type, const char *modifier) {
+  ncc_buffer_t *buf = ncc_buffer_empty();
+
+  ncc_buffer_puts(buf, base_type);
+  if (modifier && modifier[0]) {
+    ncc_buffer_putc(buf, ' ');
+    ncc_buffer_puts(buf, modifier);
+  }
+
+  return ncc_buffer_take(buf);
 }
 
 // Get parameter list text from the declarator subtree.
@@ -140,80 +347,58 @@ static char *collect_param_list_text(ncc_parse_tree_t *declarator) {
 }
 
 // Extract just the parameter names, joined with ", ".
-static char *collect_param_names(ncc_parse_tree_t *declarator) {
-  ncc_parse_tree_t *dd = ncc_xform_find_child_nt(declarator, "direct_declarator");
-  if (!dd) {
-    dd = declarator;
-  }
+static void append_param_name(ncc_buffer_t *buf, bool *first,
+                              const char *param, size_t len) {
+  char *part = ncc_alloc_size(1, len + 1);
+  memcpy(part, param, len);
+  part[len] = '\0';
 
-  ncc_parse_tree_t *ptl = nullptr;
-  ptl = ncc_xform_find_child_nt(dd, "parameter_type_list");
-  if (!ptl) {
-    size_t nc = ncc_tree_num_children(dd);
-    for (size_t i = 0; i < nc; i++) {
-      ncc_parse_tree_t *c = ncc_tree_child(dd, i);
-      if (c && !ncc_tree_is_leaf(c)) {
-        ptl = ncc_xform_find_child_nt(c, "parameter_type_list");
-        if (ptl) {
-          break;
-        }
-      }
+  char *clean = strip_declarator_attributes(part);
+  ncc_free(part);
+
+  char *name = copy_last_identifier_before(clean, strlen(clean));
+  if (name && !is_type_keyword(name)) {
+    if (!*first) {
+      ncc_buffer_puts(buf, ", ");
     }
+    ncc_buffer_puts(buf, name);
+    *first = false;
   }
 
-  if (!ptl) {
-    char *result = ncc_alloc_size(1, 1);
-    result[0] = '\0';
-    return result;
-  }
+  ncc_free(name);
+  ncc_free(clean);
+}
 
-  // Check for (void).
-  ncc_string_t ptl_text = ncc_xform_node_to_text(ptl);
-  if (ptl_text.data && strcmp(ptl_text.data, "void") == 0) {
-    ncc_free(ptl_text.data);
-    char *result = ncc_alloc_size(1, 1);
-    result[0] = '\0';
-    return result;
-  }
-  ncc_free(ptl_text.data);
-
-  // DFS to find parameter_declaration nodes and extract identifiers.
+static char *collect_param_names(ncc_parse_tree_t *declarator) {
+  char *params = collect_param_list_text(declarator);
   ncc_buffer_t *buf = ncc_buffer_empty();
   bool first = true;
+  int depth = 0;
+  size_t start = 0;
+  size_t len = strlen(params);
 
-  struct { ncc_parse_tree_t *node; } stack[64];
-  int sp = 0;
-  stack[sp++].node = ptl;
+  if (strcmp(params, "void") == 0) {
+    ncc_free(params);
+    return ncc_buffer_take(buf);
+  }
 
-  while (sp > 0) {
-    ncc_parse_tree_t *n = stack[--sp].node;
-    if (!n || ncc_tree_is_leaf(n)) {
+  for (size_t i = 0; i <= len; i++) {
+    char c = params[i];
+    if (c == '(' || c == '[' || c == '{') {
+      depth++;
       continue;
     }
-
-    if (ncc_xform_nt_name_is(n, "parameter_declaration")) {
-      ncc_parse_tree_t *pd_decl = ncc_xform_find_child_nt(n, "declarator");
-      if (pd_decl) {
-        const char *name = extract_func_name(pd_decl);
-        if (name) {
-          if (!first) {
-            ncc_buffer_puts(buf, ", ");
-          }
-          ncc_buffer_puts(buf, name);
-          first = false;
-        }
-      }
+    if ((c == ')' || c == ']' || c == '}') && depth > 0) {
+      depth--;
       continue;
     }
-
-    size_t nc = ncc_tree_num_children(n);
-    for (size_t i = nc; i > 0; i--) {
-      if (sp < 64) {
-        stack[sp++].node = ncc_tree_child(n, i - 1);
-      }
+    if ((c == ',' && depth == 0) || c == '\0') {
+      append_param_name(buf, &first, params + start, i - start);
+      start = i + 1;
     }
   }
 
+  ncc_free(params);
   return ncc_buffer_take(buf);
 }
 
@@ -235,6 +420,143 @@ static char *collect_body_text(ncc_parse_tree_t *func_body) {
   char *result = ncc_alloc_size(1, 4);
   memcpy(result, "{ }", 4);
   return result;
+}
+
+enum {
+  ONCE_GENERATED_STATE_UNCALLED = 0,
+  ONCE_GENERATED_STATE_RUNNING = 1,
+  ONCE_GENERATED_STATE_DONE = 2,
+};
+
+static void emit_once_declarations(ncc_buffer_t *src, bool void_ret,
+                                   const char *return_type, const char *params,
+                                   const char *flag_name,
+                                   const char *cache_name,
+                                   const char *internal_name) {
+  ncc_buffer_printf(src, "static int %s = %d;\n", flag_name,
+                    ONCE_GENERATED_STATE_UNCALLED);
+  if (!void_ret) {
+    ncc_buffer_printf(src, "static %s %s;\n", return_type, cache_name);
+  }
+  ncc_buffer_printf(src, "static %s %s(%s);\n",
+                    void_ret ? "void" : return_type, internal_name, params);
+}
+
+static void emit_once_wrapper_header(ncc_buffer_t *src, bool void_ret,
+                                     const char *fname,
+                                     const char *return_type,
+                                     const char *quals,
+                                     const char *params) {
+  if (quals && quals[0]) {
+    ncc_buffer_printf(src, "%s ", quals);
+  }
+  ncc_buffer_printf(src, "%s %s(%s) {\n",
+                    void_ret ? "void" : return_type, fname, params);
+}
+
+static void emit_once_state_switch(ncc_buffer_t *src,
+                                   const char *flag_name) {
+  ncc_buffer_printf(src,
+                    "int expected = __atomic_load_n(&%s, "
+                    "__ATOMIC_ACQUIRE);\n",
+                    flag_name);
+  ncc_buffer_puts(src, "switch (expected) {\n");
+}
+
+static void emit_once_done_path(ncc_buffer_t *src, bool void_ret,
+                                const char *cache_name) {
+  ncc_buffer_printf(src, "case %d:\n", ONCE_GENERATED_STATE_DONE);
+  if (void_ret) {
+    ncc_buffer_puts(src, "return;\n");
+  } else {
+    ncc_buffer_printf(src, "return %s;\n", cache_name);
+  }
+}
+
+static void emit_once_wait_path(ncc_buffer_t *src, bool void_ret,
+                                const char *flag_name,
+                                const char *cache_name) {
+  ncc_buffer_printf(src, "case %d:\nwait_for_first_in:\n",
+                    ONCE_GENERATED_STATE_RUNNING);
+  ncc_buffer_printf(src,
+                    "while (__atomic_load_n(&%s, __ATOMIC_ACQUIRE) != %d) "
+                    "{ }\n",
+                    flag_name, ONCE_GENERATED_STATE_DONE);
+  if (void_ret) {
+    ncc_buffer_puts(src, "return;\n");
+  } else {
+    ncc_buffer_printf(src, "return %s;\n", cache_name);
+  }
+}
+
+static void emit_once_first_run_path(ncc_buffer_t *src, bool void_ret,
+                                     const char *flag_name,
+                                     const char *cache_name,
+                                     const char *internal_name,
+                                     const char *param_names) {
+  ncc_buffer_printf(src, "case %d:\n", ONCE_GENERATED_STATE_UNCALLED);
+  ncc_buffer_printf(src,
+                    "if (!__atomic_compare_exchange_n(&%s, &expected, %d, 0, "
+                    "__ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {\n"
+                    "goto wait_for_first_in;\n}\n",
+                    flag_name, ONCE_GENERATED_STATE_RUNNING);
+  if (void_ret) {
+    ncc_buffer_printf(src, "%s(%s);\n", internal_name, param_names);
+  } else {
+    ncc_buffer_printf(src, "%s = %s(%s);\n", cache_name, internal_name,
+                      param_names);
+  }
+  ncc_buffer_printf(src, "__atomic_store_n(&%s, %d, __ATOMIC_RELEASE);\n",
+                    flag_name, ONCE_GENERATED_STATE_DONE);
+}
+
+static void emit_once_default_path_and_wrapper_close(ncc_buffer_t *src,
+                                                     bool void_ret,
+                                                     const char *cache_name) {
+  if (void_ret) {
+    ncc_buffer_puts(src, "return;\ndefault:\nreturn;\n}\n}\n");
+  } else {
+    ncc_buffer_printf(src, "return %s;\ndefault:\nreturn %s;\n}\n}\n",
+                      cache_name, cache_name);
+  }
+}
+
+static void emit_once_helper_definition(ncc_buffer_t *src, bool void_ret,
+                                        const char *return_type,
+                                        const char *params,
+                                        const char *body,
+                                        const char *internal_name) {
+  ncc_buffer_printf(src, "static %s %s(%s)\n%s\n",
+                    void_ret ? "void" : return_type, internal_name, params,
+                    body);
+}
+
+static ncc_parse_tree_t *
+parse_once_replacement(ncc_xform_ctx_t *ctx, bool void_ret, const char *fname,
+                       const char *return_type, const char *quals,
+                       const char *params, const char *param_names,
+                       const char *body, const char *flag_name,
+                       const char *cache_name, const char *internal_name) {
+  ncc_buffer_t *src = ncc_buffer_empty();
+
+  emit_once_declarations(src, void_ret, return_type, params, flag_name,
+                         cache_name, internal_name);
+  emit_once_wrapper_header(src, void_ret, fname, return_type, quals, params);
+  emit_once_state_switch(src, flag_name);
+  emit_once_done_path(src, void_ret, cache_name);
+  emit_once_wait_path(src, void_ret, flag_name, cache_name);
+  emit_once_first_run_path(src, void_ret, flag_name, cache_name,
+                           internal_name, param_names);
+  emit_once_default_path_and_wrapper_close(src, void_ret, cache_name);
+  emit_once_helper_definition(src, void_ret, return_type, params, body,
+                              internal_name);
+
+  char *text = ncc_buffer_take(src);
+  ncc_parse_tree_t *tree =
+      ncc_xform_parse_source(ctx->grammar, "translation_unit", text,
+                             "xform_once");
+  ncc_free(text);
+  return tree;
 }
 
 // ============================================================================
@@ -351,7 +673,7 @@ xform_once_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
         continue;
       }
 
-      const char *fname = extract_func_name(declarator);
+      char *fname = extract_func_name(declarator);
       if (!fname) {
         continue;
       }
@@ -362,6 +684,8 @@ xform_once_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
 
       // Build template arguments.
       char *base_type = ncc_xform_collect_base_type(decl_specs);
+      char *return_modifier = collect_return_modifier_text(declarator);
+      char *return_type = join_return_type(base_type, return_modifier);
       char *quals = ncc_xform_collect_qualifiers(decl_specs, "_Once");
       char *params = collect_param_list_text(declarator);
       char *param_names = collect_param_names(declarator);
@@ -374,6 +698,12 @@ xform_once_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
       ncc_buffer_puts(flag_buf, "_once_flag");
       char *flag_name = ncc_buffer_take(flag_buf);
 
+      ncc_buffer_t *internal_buf = ncc_buffer_empty();
+      ncc_buffer_puts(internal_buf, pfx);
+      ncc_buffer_puts(internal_buf, fname);
+      ncc_buffer_puts(internal_buf, "_once_body");
+      char *internal_name = ncc_buffer_take(internal_buf);
+
       char *cache_name = nullptr;
       if (!void_ret) {
         ncc_buffer_t *cache_buf = ncc_buffer_empty();
@@ -383,43 +713,39 @@ xform_once_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
         cache_name = ncc_buffer_take(cache_buf);
       }
 
-      // Template slots:
-      //   $0 = func name
-      //   $1 = base return type
-      //   $2 = qualifiers (may be empty — but template handles it)
-      //   $3 = param list text
-      //   $4 = param names
-      //   $5 = body text { ... }
-      //   $6 = flag variable name
-      //   $7 = cache variable name (non-void only)
-      ncc_template_registry_t *tmpl_reg = xdata->template_reg;
-      ncc_result_t(ncc_parse_tree_ptr_t) r;
+      ncc_parse_tree_t *new_tu =
+          parse_once_replacement(ctx, void_ret, fname, return_type, quals,
+                                 params, param_names, body, flag_name,
+                                 cache_name, internal_name);
 
-      if (void_ret) {
-        const char *args[] = {fname, base_type, quals, params,
-                              param_names, body, flag_name};
-        r = ncc_template_instantiate(tmpl_reg, "once_void", args, 7);
-      } else {
-        const char *args[] = {fname, base_type, quals, params,
-                              param_names, body, flag_name, cache_name};
-        r = ncc_template_instantiate(tmpl_reg, "once", args, 8);
+      if (!new_tu) {
+        fprintf(stderr, "xform_once: replacement parse failed for '%s'\n",
+                fname);
+        ncc_free(fname);
+        ncc_free(base_type);
+        ncc_free(return_modifier);
+        ncc_free(return_type);
+        ncc_free(quals);
+        ncc_free(params);
+        ncc_free(param_names);
+        ncc_free(body);
+        ncc_free(flag_name);
+        ncc_free(cache_name);
+        ncc_free(internal_name);
+        continue;
       }
 
+      ncc_free(fname);
       ncc_free(base_type);
+      ncc_free(return_modifier);
+      ncc_free(return_type);
       ncc_free(quals);
       ncc_free(params);
       ncc_free(param_names);
       ncc_free(body);
       ncc_free(flag_name);
       ncc_free(cache_name);
-
-      if (ncc_result_is_err(r)) {
-        fprintf(stderr, "xform_once: template instantiation failed for '%s'\n",
-                fname);
-        continue;
-      }
-
-      ncc_parse_tree_t *new_tu = ncc_result_get(r);
+      ncc_free(internal_name);
 
       // Flatten the new TU and splice into the flat list.
       ptrvec_t new_items;
