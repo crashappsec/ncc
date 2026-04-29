@@ -13,8 +13,10 @@ Most flags are proxied directly to your C compiler, unless they need
 to be re-written or are specific to ncc. There's an unfortunate bit of
 gymnastics to keep auto-dependency tracking sane.
 
-NCC is written in C23, and thus requires a compiler that's recent
-enough to accept the full, final C23 standard.
+NCC is written in C23 and embeds its grammar/templates with C23
+`#embed`, using Clang's `--embed-dir` search path. Building ncc
+therefore requires Clang 22.1.0 or newer; GCC 14 is not sufficient for
+the compiler binary.
 
 We provide a set of language extensions out of the box, focused mostly
 on adding strong static typing capabilities through minimal language
@@ -42,15 +44,16 @@ scripts to generate pages of gross node building code.
 
 ## Getting started
 
-Building requires both meson and a C23 compiler. Clang 18+, or gcc 14+
-should both work.
-
+Building requires Meson 1.1+, Ninja, and Clang 22.1.0 or newer. Put
+the Clang 22.1.0+ `bin` directory ahead of older compiler
+installations in `PATH` so Meson sees the Clang that supports both
+`#embed` and `--embed-dir`.
 
 ```sh
-C23CC=/path/to/cc/with/c23/support
-CC=${C23CC} meson setup build
-CC=${C23CC} meson compile -C build
-CC=${C23CC} meson install -C build
+LLVM_BIN=/path/to/clang-22.1.0-or-newer/bin
+PATH="${LLVM_BIN}:${PATH}" CC=clang meson setup build
+PATH="${LLVM_BIN}:${PATH}" meson compile -C build
+PATH="${LLVM_BIN}:${PATH}" meson install -C build
 ```
 
 You can then use `ncc` as if it were any other C compiler; generally
@@ -75,12 +78,17 @@ other good transforms into the default set if people want to share!
 `build-host` is the machine running Meson and `ncc` today. `target` is
 the operating system for the produced compiler binary. For the Windows
 flow below, the build host is Linux or macOS and the target is
-`x86_64-w64-windows-gnu`.
+`x86_64-w64-windows-gnu`. The local Windows cross-build uses the same
+llvm-mingw Clang 22.1.0+ toolchain; keep its `bin` directory ahead of
+older compiler installations in `PATH` for both setup and compile.
+The cross file also expects `llvm-ar` and `llvm-strip` from that same
+toolchain directory.
 
 ```sh
-CC=clang meson setup build-win \
+LLVM_MINGW=/path/to/llvm-mingw
+PATH="${LLVM_MINGW}/bin:${PATH}" CC=clang meson setup build-win \
   --cross-file toolchains/windows-x86_64-clang.ini
-meson compile -C build-win
+PATH="${LLVM_MINGW}/bin:${PATH}" meson compile -C build-win
 ```
 
 That produces `build-win/ncc.exe`. The cross file marks Windows
@@ -89,13 +97,14 @@ build-win` is not part of the default validation loop. The supported
 loop is:
 
 ```sh
-CC=clang meson setup build-host
-meson compile -C build-host
-meson test -C build-host --print-errorlogs
+LLVM_MINGW=/path/to/llvm-mingw
+PATH="${LLVM_MINGW}/bin:${PATH}" CC=clang meson setup build-host
+PATH="${LLVM_MINGW}/bin:${PATH}" meson compile -C build-host
+PATH="${LLVM_MINGW}/bin:${PATH}" meson test -C build-host --print-errorlogs
 
-build-host/ncc --target=x86_64-w64-windows-gnu -o /tmp/ncc-win-bang.exe test/test_bang.c
-build-host/ncc --target=x86_64-w64-windows-gnu -o /tmp/ncc-win-option.exe test/test_option.c
-build-host/ncc --target=x86_64-w64-windows-gnu -o /tmp/ncc-win-constexpr.exe test/test_constexpr.c
+PATH="${LLVM_MINGW}/bin:${PATH}" build-host/ncc --target=x86_64-w64-windows-gnu -o /tmp/ncc-win-bang.exe test/test_bang.c
+PATH="${LLVM_MINGW}/bin:${PATH}" build-host/ncc --target=x86_64-w64-windows-gnu -o /tmp/ncc-win-option.exe test/test_option.c
+PATH="${LLVM_MINGW}/bin:${PATH}" build-host/ncc --target=x86_64-w64-windows-gnu -o /tmp/ncc-win-constexpr.exe test/test_constexpr.c
 
 scripts/package_windows_smoke.sh build-win /tmp/ncc-windows-smoke
 ```
@@ -104,7 +113,7 @@ Copy the resulting bundle to a Windows machine. From inside that
 directory, run:
 
 ```powershell
-$env:NCC_COMPILER='clang'; & .\windows_smoke.ps1 -Ncc .\ncc.exe
+$env:NCC_COMPILER='clang'; .\windows_smoke.ps1 -Ncc .\ncc.exe -Transcript .\windows-smoke-transcript.txt
 ```
 
 If `clang.exe` is not on `PATH`, set `NCC_COMPILER` to its full path

@@ -5,9 +5,20 @@ project('ncc', 'c',
 
 cc = meson.get_compiler('c')
 
-if not cc.compiles('int main(void) { return 0; }', args: ['-std=c23'],
-                    name: 'C23 support check')
-  error('Compiler does not support -std=c23. Use clang 22+ (/usr/local/bin/clang).')
+if cc.get_id() != 'clang' or not cc.version().version_compare('>=22.1.0')
+  error('ncc requires Clang 22.1.0+ because the compiler embeds assets with C23 #embed and Clang --embed-dir.')
+endif
+
+embed_check = '''
+static const unsigned char ncc_embed_check[] = {
+#embed "c_ncc.bnf"
+};
+int main(void) { return ncc_embed_check[0] == 0; }
+'''
+if not cc.compiles(embed_check,
+                   args: ['-std=c23', '--embed-dir=' + meson.current_source_dir()],
+                   name: 'C23 #embed support check')
+  error('Compiler does not support C23 #embed with --embed-dir. Use Clang 22.1.0+ and put its bin directory ahead of older compilers in PATH.')
 endif
 
 add_project_arguments(
