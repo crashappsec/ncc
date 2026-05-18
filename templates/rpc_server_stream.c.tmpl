@@ -1,0 +1,57 @@
+// Generated from @rpc($3) on $0 (server-stream).
+//
+// Slot layout matches rpc_unary.c.tmpl. $5 is the *element type* of
+// the returned stream (T from `n00b_result_t(n00b_rpc_stream_t(T) *)`).
+//
+// The runtime's stream-of-buffers is structurally identical to a
+// `n00b_rpc_stream_t(T)` (handler responsibility: encode each item
+// before send, decode on recv). Cast at the dispatcher boundary.
+
+static n00b_result_t(n00b_rpc_stream_t(n00b_buffer_t *) *)
+_n00b_rpc_dispatch__$1__$2(n00b_buffer_t *req_cbor, n00b_rpc_ctx_t *ctx)
+{
+    n00b_result_t($4 *) decoded = _n00b_cbor_decode($4, req_cbor);
+    if (n00b_result_is_err(decoded)) {
+        return n00b_result_err(n00b_rpc_stream_t(n00b_buffer_t *) *,
+                               n00b_result_get_err(decoded));
+    }
+
+    n00b_result_t(n00b_rpc_stream_t($5) *) resp =
+        $0(n00b_result_get(decoded), ctx);
+
+    if (n00b_result_is_err(resp)) {
+        return n00b_result_err(n00b_rpc_stream_t(n00b_buffer_t *) *,
+                               n00b_result_get_err(resp));
+    }
+
+    return n00b_result_ok(
+        n00b_rpc_stream_t(n00b_buffer_t *) *,
+        (n00b_rpc_stream_t(n00b_buffer_t *) *)n00b_result_get(resp));
+}
+
+__attribute__((constructor))
+static void
+_n00b_rpc_register__$1__$2(void)
+{
+    n00b_rpc_register_server_stream($3, &_n00b_rpc_dispatch__$1__$2);
+}
+
+extern n00b_result_t(n00b_rpc_stream_t($5) *)
+n00b_rpc_call_$1__$2(n00b_rpc_ctx_t     *ctx,
+                     n00b_rpc_channel_t *chan,
+                     $4                 *req)
+{
+    n00b_buffer_t *req_buf = n00b_cbor_encode(req);
+
+    n00b_result_t(n00b_rpc_stream_t(n00b_buffer_t *) *) wire =
+        n00b_rpc_call_server_stream(ctx, chan, $3, req_buf);
+
+    if (n00b_result_is_err(wire)) {
+        return n00b_result_err(n00b_rpc_stream_t($5) *,
+                               n00b_result_get_err(wire));
+    }
+
+    return n00b_result_ok(
+        n00b_rpc_stream_t($5) *,
+        (n00b_rpc_stream_t($5) *)n00b_result_get(wire));
+}

@@ -1789,6 +1789,37 @@ compile_file(ncc_opts_t *opts)
     };
     ncc_template_register(&tmpl_reg, "bang", "primary_expression", bang_tmpl);
 
+    // @rpc(...) templates — one per stream shape. Parsed as
+    // translation_unit because each expands to multiple external
+    // declarations (dispatcher, constructor, client stub).
+    static const char rpc_unary_tmpl[] = {
+#embed "templates/rpc_unary.c.tmpl"
+        , '\0'
+    };
+    ncc_template_register(&tmpl_reg, "rpc_unary", "translation_unit",
+                          rpc_unary_tmpl);
+
+    static const char rpc_server_stream_tmpl[] = {
+#embed "templates/rpc_server_stream.c.tmpl"
+        , '\0'
+    };
+    ncc_template_register(&tmpl_reg, "rpc_server_stream",
+                          "translation_unit", rpc_server_stream_tmpl);
+
+    static const char rpc_client_stream_tmpl[] = {
+#embed "templates/rpc_client_stream.c.tmpl"
+        , '\0'
+    };
+    ncc_template_register(&tmpl_reg, "rpc_client_stream",
+                          "translation_unit", rpc_client_stream_tmpl);
+
+    static const char rpc_bidi_tmpl[] = {
+#embed "templates/rpc_bidi.c.tmpl"
+        , '\0'
+    };
+    ncc_template_register(&tmpl_reg, "rpc_bidi", "translation_unit",
+                          rpc_bidi_tmpl);
+
     // Resolve vargs_type, once_prefix, rstr_string_type: CLI > meson define > default.
     const char *vargs_type      = "ncc_vargs_t";
     const char *once_prefix     = "__ncc_";
