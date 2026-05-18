@@ -336,7 +336,7 @@
     | <declaration_specifiers> <init_declarator_list>? %";"
 <declaration> ::= <static_assert_declaration>
     | <attribute_declaration>
-    | <declaration_specifiers> <declarator> <keyword_clause> %";"
+    | <attribute_specifier_sequence>? <declaration_specifiers> <declarator> <keyword_clause> %";"
     | <declaration_specifiers> <attribute_specifier_sequence> %";"
     | %"__extension__" <declaration>
 
