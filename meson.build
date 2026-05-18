@@ -426,6 +426,11 @@ ncc_error_tests = {
   'err_once_non_function':       test_dir / 'err_once_non_function.c',
   'err_rstr_bad_tag':            test_dir / 'err_rstr_bad_tag.c',
   'err_typeid_no_args':          test_dir / 'err_typeid_no_args.c',
+  'err_rpc_void_return':         test_dir / 'err_rpc_void_return.c',
+  'err_rpc_no_ctx':              test_dir / 'err_rpc_no_ctx.c',
+  'err_rpc_bad_method':          test_dir / 'err_rpc_bad_method.c',
+  'err_rpc_with_kargs':          test_dir / 'err_rpc_with_kargs.c',
+  'err_rpc_dup_method':          test_dir / 'err_rpc_dup_method.c',
 }
 
 foreach name, src : ncc_error_tests

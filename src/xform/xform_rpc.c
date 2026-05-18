@@ -757,6 +757,56 @@ peel_stream_type(const char *text)
     return out;
 }
 
+// True iff the last parameter of `declarator`'s parameter list is
+// of type `n00b_rpc_ctx_t *` (spec §5.2 requires every @rpc handler
+// to take an `n00b_rpc_ctx_t *ctx` trailing parameter).
+static bool
+last_param_is_ctx(ncc_parse_tree_t *declarator)
+{
+    ncc_parse_tree_t *ptl = find_descendant_nt(declarator,
+                                                "parameter_type_list");
+
+    if (!ptl) {
+        return false;
+    }
+
+    ncc_string_t text = ncc_xform_node_to_text(ptl);
+
+    if (!text.data) {
+        return false;
+    }
+
+    // Scan to the last top-level comma; the substring after it is
+    // the last parameter's declaration.
+    const char *s         = text.data;
+    int         depth     = 0;
+    size_t      last_comma = 0;
+    bool        have_comma = false;
+
+    for (size_t i = 0; i < text.u8_bytes; i++) {
+        char c = s[i];
+
+        if (c == '(' || c == '[' || c == '{') {
+            depth++;
+        }
+        else if (c == ')' || c == ']' || c == '}') {
+            if (depth > 0) {
+                depth--;
+            }
+        }
+        else if (c == ',' && depth == 0) {
+            last_comma = i;
+            have_comma = true;
+        }
+    }
+
+    const char *last = have_comma ? s + last_comma + 1 : s;
+    bool        ok   = strstr(last, "n00b_rpc_ctx_t") != nullptr;
+
+    ncc_free(text.data);
+    return ok;
+}
+
 // Decide which of the four shapes the handler matches. Also returns
 // (via the out-pointers) the inner element types — caller frees both.
 //
@@ -1319,6 +1369,12 @@ xform_rpc_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
     ptrvec_t appended;
     ptrvec_init(&appended, 16);
 
+    // Per-TU registry of @rpc method strings already seen; used to
+    // diagnose duplicate `@rpc("same/method")` annotations. Each
+    // entry is a heap-copy of the method string we own.
+    ptrvec_t seen_methods;
+    ptrvec_init(&seen_methods, 8);
+
     bool changed = false;
 
     for (size_t i = 0; i < flat.len; i++) {
@@ -1383,6 +1439,37 @@ xform_rpc_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
         // declaration also gets stripped, but we don't double-emit
         // the dispatcher / ctor / stub).
         if (ncc_xform_nt_name_is(inner, "function_definition")) {
+            // Check for a duplicate `@rpc(method)` earlier in the TU.
+            for (size_t k = 0; k < seen_methods.len; k++) {
+                if (strcmp((const char *)seen_methods.items[k],
+                            method_string)
+                    == 0) {
+                    rpc_diagnostic(rpc_clause,
+                                   "@rpc method \"%s\" is already bound "
+                                   "by another handler in this "
+                                   "translation unit",
+                                   method_string);
+                }
+            }
+
+            // Take ownership of method_string in seen_methods (we
+            // free the dup list at the end of the TU walk). Use a
+            // copy so the original can still be freed after the
+            // call to synthesize_for_shape.
+            size_t ms_len = strlen(method_string);
+            char  *kept   = ncc_alloc_size(1, ms_len + 1);
+            memcpy(kept, method_string, ms_len + 1);
+            ptrvec_push(&seen_methods, (ncc_parse_tree_t *)kept);
+
+            ncc_parse_tree_t *declarator
+                = ncc_xform_find_child_nt(inner, "declarator");
+
+            if (!declarator || !last_param_is_ctx(declarator)) {
+                rpc_diagnostic(rpc_clause,
+                               "@rpc handler must take a trailing "
+                               "n00b_rpc_ctx_t * parameter (saw none)");
+            }
+
             char       *req_inner  = nullptr;
             char       *resp_inner = nullptr;
             rpc_shape_t shape      = detect_shape(inner, &resp_inner,
@@ -1410,6 +1497,11 @@ xform_rpc_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
         ncc_xform_remove_child(inner, rpc_idx);
         changed = true;
     }
+
+    for (size_t i = 0; i < seen_methods.len; i++) {
+        ncc_free(seen_methods.items[i]);
+    }
+    ncc_free(seen_methods.items);
 
     if (!changed) {
         ncc_free(flat.items);
