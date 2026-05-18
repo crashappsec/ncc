@@ -139,6 +139,7 @@ src_xform = files(
   'src/xform/xform_kargs_vargs.c',
   'src/xform/xform_once.c',
   'src/xform/xform_option.c',
+  'src/xform/xform_rpc.c',
   'src/xform/xform_rstr.c',
   'src/xform/xform_typeid.c',
   'src/xform/xform_typestr.c',
@@ -288,6 +289,8 @@ ncc_compile_tests = {
   'gs_result':      ['compile_run', test_dir / 'test_gs_result.c'],
   'rpc_keyword_collision': ['compile_run',
                             test_dir / 'test_rpc_keyword_collision.c'],
+  'rpc_strip_smoke':       ['compile_run',
+                            test_dir / 'test_rpc_strip_smoke.c'],
 }
 
 foreach name, params : ncc_compile_tests

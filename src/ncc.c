@@ -52,6 +52,7 @@ static const char embedded_grammar[] = {
 static const size_t embedded_grammar_len = sizeof(embedded_grammar) - 1;
 
 // Transform registration prototypes.
+extern void ncc_register_rpc_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_generic_struct_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_typeid_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_typestr_xform(ncc_xform_registry_t *reg);
@@ -1729,6 +1730,11 @@ compile_file(ncc_opts_t *opts)
     ncc_verbose("registering transforms");
     ncc_xform_registry_t xreg;
     ncc_xform_registry_init(&xreg, g);
+    // rpc must run first — its synthesized bodies reference the
+    // type-mangled identifiers that typeid / option / generic_struct /
+    // kargs_vargs produce; running after any of those would see the
+    // already-mangled signatures.
+    ncc_register_rpc_xform(&xreg);
     ncc_register_generic_struct_xform(&xreg);
     ncc_register_typeid_xform(&xreg);
     ncc_register_option_xform(&xreg);
