@@ -1,30 +1,23 @@
-// test_rpc_strip_smoke — Phase B regression: an `@rpc(...)` annotated
-// function must compile and run cleanly even though Phase B does not
-// yet synthesize the dispatcher / ctor / client stub. The xform's
-// job here is just to recognize the clause, validate the method
-// string, and strip the clause so clang sees plain C.
+// test_rpc_strip_smoke — verify that an @rpc clause attached to a
+// prototype (no body) is stripped from the parent declaration so
+// plain clang accepts the result.
 //
-// Uses simple `int (int)` signatures intentionally — parametric type
-// support (`n00b_result_t(T *)`, `n00b_rpc_stream_t(T) *`) lands with
-// the unary end-to-end test in a later phase.
+// This complements test_rpc_unary, which exercises the full
+// synthesize-on-function-definition path. The strip-on-prototype
+// path runs even when the signature isn't unary (the user may
+// attach @rpc to a forward declaration with whatever types they
+// want; only the function_definition triggers shape validation +
+// synthesis).
 
 #include <stdio.h>
 
-int hello(int x) @rpc("foo.v1.Foo/Bar");
-
-int
-hello(int x) @rpc("foo.v1.Foo/Bar")
-{
-    return x + 1;
-}
+// Prototype with @rpc — gets the clause stripped, then it's a
+// plain extern prototype that we never actually call.
+extern int hello_proto(int x) @rpc("foo.v1.Foo/Bar");
 
 int
 main(void)
 {
-    if (hello(41) != 42) {
-        return 1;
-    }
-
     printf("OK\n");
     return 0;
 }

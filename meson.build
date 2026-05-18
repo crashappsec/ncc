@@ -291,6 +291,8 @@ ncc_compile_tests = {
                             test_dir / 'test_rpc_keyword_collision.c'],
   'rpc_strip_smoke':       ['compile_run',
                             test_dir / 'test_rpc_strip_smoke.c'],
+  'rpc_unary':             ['compile_run',
+                            test_dir / 'test_rpc_unary.c'],
 }
 
 foreach name, params : ncc_compile_tests
