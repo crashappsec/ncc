@@ -601,12 +601,28 @@ extract_first_param_type(ncc_parse_tree_t *declarator)
 }
 
 // ============================================================================
-// Stream-shape detection (Phase D: unary only)
+// Stream-shape detection
 //
-// Returns true iff the signature looks unary — return type contains
-// `typeid("result"` and not `typeid("rpc_stream"`, AND the first
-// parameter's type isn't a stream.
+// Distinguishes the four stream shapes by leaf-text inspection of
+// the return type and first parameter:
+//
+//   ret has `typeid("result", T *)`            +  param T *      → UNARY
+//   ret has `typeid("result", n00b_rpc_stream_t(T) *)` + param T *
+//                                              → SERVER_STREAM
+//   ret has `typeid("result", T *)`            +  param n00b_rpc_stream_t(T) *
+//                                              → CLIENT_STREAM
+//   ret has `typeid("result", n00b_rpc_stream_t(T) *)`
+//                                              +  param n00b_rpc_stream_t(T) *
+//                                              → BIDI
 // ============================================================================
+
+typedef enum {
+    RPC_SHAPE_UNKNOWN,
+    RPC_SHAPE_UNARY,
+    RPC_SHAPE_SERVER_STREAM,
+    RPC_SHAPE_CLIENT_STREAM,
+    RPC_SHAPE_BIDI,
+} rpc_shape_t;
 
 // Match a `typeid(<whitespace>?"<tag>"<whitespace>?,` substring in
 // `text`. The leaf-text representation may include arbitrary
@@ -656,37 +672,171 @@ text_has_typeid_tag(const char *text, const char *tag)
     return false;
 }
 
-static bool
-is_unary_shape(ncc_parse_tree_t *inner)
+// Peel a stream-of-T type → T. Recognizes both the libn00b macro
+// form `n00b_rpc_stream_t(T)` (which downstream cpp will have
+// expanded before ncc sees it, but show-up shape-wise in some
+// edge cases) and the raw `_generic_struct typeid("rpc_stream", T)`
+// form that the macro expands to. Returns nullptr if not a stream.
+// Caller frees on success.
+static char *
+peel_stream_type(const char *text)
 {
+    if (!text) {
+        return nullptr;
+    }
+
+    // Try the raw form via the typeid extractor.
+    if (text_has_typeid_tag(text, "rpc_stream")) {
+        return extract_typeid_inner(text, "rpc_stream");
+    }
+
+    // Fallback: literal `n00b_rpc_stream_t(T)` (would appear pre-cpp).
+    static const char prefix[] = "n00b_rpc_stream_t";
+    size_t            pre_len  = sizeof(prefix) - 1;
+    const char       *p        = text;
+
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+
+    if (strncmp(p, prefix, pre_len) != 0) {
+        return nullptr;
+    }
+
+    p += pre_len;
+
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+
+    if (*p != '(') {
+        return nullptr;
+    }
+
+    p++;
+
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+
+    int         depth = 1;
+    const char *start = p;
+
+    while (*p && depth > 0) {
+        if (*p == '(') {
+            depth++;
+        }
+        else if (*p == ')') {
+            depth--;
+            if (depth == 0) {
+                break;
+            }
+        }
+
+        p++;
+    }
+
+    if (depth != 0) {
+        return nullptr;
+    }
+
+    const char *end = p;
+
+    while (end > start && (end[-1] == ' ' || end[-1] == '\t')) {
+        end--;
+    }
+
+    if (end == start) {
+        return nullptr;
+    }
+
+    size_t len = (size_t)(end - start);
+    char  *out = ncc_alloc_size(1, len + 1);
+    memcpy(out, start, len);
+    out[len] = '\0';
+    return out;
+}
+
+// Decide which of the four shapes the handler matches. Also returns
+// (via the out-pointers) the inner element types — caller frees both.
+//
+//   * `resp_inner_out`: T from `typeid("result", T *)` (unary,
+//      client-stream) or T from `typeid("result", n00b_rpc_stream_t(T) *)`
+//      (server-stream, bidi).
+//   * `req_inner_out`: T from `T *req` (unary, server-stream) or T
+//      from `n00b_rpc_stream_t(T) *in` (client-stream, bidi).
+static rpc_shape_t
+detect_shape(ncc_parse_tree_t *inner, char **resp_inner_out,
+             char **req_inner_out)
+{
+    *resp_inner_out = nullptr;
+    *req_inner_out  = nullptr;
+
     ncc_parse_tree_t *decl_specs
         = ncc_xform_find_child_nt(inner, "declaration_specifiers");
     ncc_parse_tree_t *declarator
         = ncc_xform_find_child_nt(inner, "declarator");
 
     if (!decl_specs || !declarator) {
-        return false;
+        return RPC_SHAPE_UNKNOWN;
     }
 
     ncc_string_t ret_text = ncc_xform_node_to_text(decl_specs);
 
-    bool ok = false;
-
-    if (text_has_typeid_tag(ret_text.data, "result")
-        && !text_has_typeid_tag(ret_text.data, "rpc_stream")) {
-        // First parameter — must not be a stream.
-        char *first_type = extract_first_param_type(declarator);
-
-        if (first_type
-            && strstr(first_type, "rpc_stream") == nullptr) {
-            ok = true;
-        }
-
-        ncc_free(first_type);
+    if (!text_has_typeid_tag(ret_text.data, "result")) {
+        ncc_free(ret_text.data);
+        return RPC_SHAPE_UNKNOWN;
     }
 
+    char *raw_resp = extract_typeid_inner(ret_text.data, "result");
     ncc_free(ret_text.data);
-    return ok;
+
+    if (!raw_resp) {
+        return RPC_SHAPE_UNKNOWN;
+    }
+
+    bool resp_is_stream     = false;
+    char *resp_inner        = peel_stream_type(raw_resp);
+
+    if (resp_inner) {
+        resp_is_stream = true;
+        ncc_free(raw_resp);
+    }
+    else {
+        resp_inner = raw_resp;
+    }
+
+    char *first_type = extract_first_param_type(declarator);
+
+    if (!first_type) {
+        ncc_free(resp_inner);
+        return RPC_SHAPE_UNKNOWN;
+    }
+
+    bool req_is_stream = false;
+    char *req_inner    = peel_stream_type(first_type);
+
+    if (req_inner) {
+        req_is_stream = true;
+        ncc_free(first_type);
+    }
+    else {
+        req_inner = first_type;
+    }
+
+    *resp_inner_out = resp_inner;
+    *req_inner_out  = req_inner;
+
+    if (!resp_is_stream && !req_is_stream) {
+        return RPC_SHAPE_UNARY;
+    }
+    if (resp_is_stream && !req_is_stream) {
+        return RPC_SHAPE_SERVER_STREAM;
+    }
+    if (!resp_is_stream && req_is_stream) {
+        return RPC_SHAPE_CLIENT_STREAM;
+    }
+    return RPC_SHAPE_BIDI;
 }
 
 // ============================================================================
@@ -758,120 +908,26 @@ flatten_group(ncc_parse_tree_t *node, ptrvec_t *out)
 // Synthesize unary dispatcher / ctor / stub via template
 // ============================================================================
 
+// ============================================================================
+// Per-shape source builders
+//
+// Each builder emits three external_declarations (dispatcher, ctor,
+// client stub) wired through the appropriate runtime entry-points.
+// The streaming variants exploit the runtime's structural alias
+// between typed and buffer streams: dispatchers cast the inbound
+// `n00b_rpc_stream_t(n00b_buffer_t *) *` to `n00b_rpc_stream_t(T) *`
+// for the handler call, and cast the handler's returned typed
+// stream back to buffer-stream form. The handler does per-item
+// CBOR on send/recv.
+// ============================================================================
+
 static void
-synthesize_unary(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *inner,
-                 ncc_parse_tree_t *rpc_clause,
-                 const char *method_string, ptrvec_t *appended)
+build_unary_source(ncc_buffer_t *src, const char *handler,
+                   const char *dispatcher, const char *registrar,
+                   const char *call_, const char *quoted_method,
+                   const char *req_t, const char *resp_t,
+                   const char *dec_req, const char *dec_resp)
 {
-    ncc_parse_tree_t *declarator
-        = ncc_xform_find_child_nt(inner, "declarator");
-    ncc_parse_tree_t *decl_specs
-        = ncc_xform_find_child_nt(inner, "declaration_specifiers");
-
-    if (!declarator || !decl_specs) {
-        rpc_diagnostic(rpc_clause,
-                       "@rpc handler is missing a declarator or "
-                       "return type");
-    }
-
-    char *func_name = extract_func_name(declarator);
-
-    if (!func_name) {
-        rpc_diagnostic(rpc_clause,
-                       "@rpc could not determine the handler's "
-                       "function name");
-    }
-
-    char *svc;
-    char *method;
-    split_method(method_string, &svc, &method);
-
-    // $3: full method string with quotes.
-    size_t  ms_len    = strlen(method_string);
-    char   *quoted_ms = ncc_alloc_size(1, ms_len + 3);
-    quoted_ms[0]      = '"';
-    memcpy(quoted_ms + 1, method_string, ms_len);
-    quoted_ms[ms_len + 1] = '"';
-    quoted_ms[ms_len + 2] = '\0';
-
-    // $5: response type T from typeid("result", T *).
-    ncc_string_t ret_text = ncc_xform_node_to_text(decl_specs);
-    char        *resp_type
-        = ret_text.data ? extract_typeid_inner(ret_text.data, "result")
-                        : nullptr;
-    ncc_free(ret_text.data);
-
-    if (!resp_type) {
-        rpc_diagnostic(rpc_clause,
-                       "@rpc unary handler must return "
-                       "n00b_result_t(T *) "
-                       "(expanded form: _generic_struct typeid(\"result\", T *))");
-    }
-
-    // $4: request type from the first parameter.
-    char *req_type = extract_first_param_type(declarator);
-
-    if (!req_type) {
-        rpc_diagnostic(rpc_clause,
-                       "@rpc unary handler must take T *req as its "
-                       "first parameter");
-    }
-
-    // Identifier names must be pre-computed (the template engine
-    // doesn't token-paste — `_n00b_rpc_dispatch__$1__$2` would
-    // become three separate IDENT tokens, not one identifier).
-    size_t svc_len    = strlen(svc);
-    size_t method_len = strlen(method);
-
-    // Compose `<prefix><svc>__<method>` into a fresh malloc'd string.
-    #define BUILD_NAME(prefix, suffix_out) do {                  \
-        size_t p_len = strlen(prefix);                          \
-        size_t total = p_len + svc_len + 2 + method_len + 1;    \
-        (suffix_out) = ncc_alloc_size(1, total);                \
-        memcpy((suffix_out), (prefix), p_len);                   \
-        memcpy((suffix_out) + p_len, svc, svc_len);              \
-        (suffix_out)[p_len + svc_len]     = '_';                 \
-        (suffix_out)[p_len + svc_len + 1] = '_';                 \
-        memcpy((suffix_out) + p_len + svc_len + 2,               \
-               method, method_len);                              \
-        (suffix_out)[total - 1] = '\0';                          \
-    } while (0)
-
-    char *dispatcher_name;
-    char *registrar_name;
-    char *call_name;
-    BUILD_NAME("_n00b_rpc_dispatch__", dispatcher_name);
-    BUILD_NAME("_n00b_rpc_register__", registrar_name);
-    BUILD_NAME("n00b_rpc_call_",       call_name);
-    #undef BUILD_NAME
-
-    // Decoder identifiers.
-    size_t pfx_len = strlen("_n00b_cbor_decode_");
-
-    size_t r4_len = strlen(req_type);
-    char  *dec_req = ncc_alloc_size(1, pfx_len + r4_len + 1);
-    memcpy(dec_req, "_n00b_cbor_decode_", pfx_len);
-    memcpy(dec_req + pfx_len, req_type, r4_len);
-    dec_req[pfx_len + r4_len] = '\0';
-
-    size_t r5_len = strlen(resp_type);
-    char  *dec_resp = ncc_alloc_size(1, pfx_len + r5_len + 1);
-    memcpy(dec_resp, "_n00b_cbor_decode_", pfx_len);
-    memcpy(dec_resp + pfx_len, resp_type, r5_len);
-    dec_resp[pfx_len + r5_len] = '\0';
-
-    // The template engine's parser path doesn't currently accept
-    // translation_unit start symbols — observed err 13 (parse fail)
-    // even on minimal multi-declaration templates that ncc parses
-    // fine when fed as a .c file. We sidestep by mirroring
-    // xform_once's pattern: build the source as a string, then
-    // hand it to ncc_xform_parse_source which IS known to handle
-    // translation_unit content. The .c.tmpl file in templates/ is
-    // kept as documentation of what the xform emits, but isn't
-    // instantiated through the template registry. (See Phase E for
-    // the streaming variants and a follow-up on the template engine
-    // limitation.)
-    ncc_buffer_t *src = ncc_buffer_empty();
     ncc_buffer_printf(src,
         "static _generic_struct typeid(\"result\", n00b_buffer_t *)\n"
         "%s(n00b_buffer_t *req_cbor, n00b_rpc_ctx_t *ctx)\n"
@@ -893,11 +949,7 @@ synthesize_unary(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *inner,
         "  };\n"
         "}\n"
         "__attribute__((constructor))\n"
-        "static void\n"
-        "%s(void)\n"
-        "{\n"
-        "  n00b_rpc_register(%s, &%s);\n"
-        "}\n"
+        "static void %s(void) { n00b_rpc_register(%s, &%s); }\n"
         "extern _generic_struct typeid(\"result\", %s *)\n"
         "%s(n00b_rpc_ctx_t *ctx, n00b_rpc_channel_t *chan, %s *req)\n"
         "{\n"
@@ -911,31 +963,305 @@ synthesize_unary(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *inner,
         "  }\n"
         "  return %s(wire.ok);\n"
         "}\n",
-        dispatcher_name,
-        req_type, dec_req,
-        resp_type, func_name,
-        registrar_name,
-        quoted_ms, dispatcher_name,
-        resp_type, call_name, req_type,
-        quoted_ms,
-        resp_type,
+        dispatcher,
+        req_t, dec_req,
+        resp_t, handler,
+        registrar, quoted_method, dispatcher,
+        resp_t, call_, req_t,
+        quoted_method,
+        resp_t,
         dec_resp);
+}
+
+// Shorthand used in the streaming builders below. `n00b_rpc_stream_t(T)`
+// is a libn00b macro that expands to `_generic_struct typeid("rpc_stream", T)`;
+// since template-synthesized text is parsed without cpp, we spell the
+// raw form everywhere.
+#define STREAM_OF_BUF \
+    "_generic_struct typeid(\"rpc_stream\", n00b_buffer_t *)"
+#define STREAM_OF "_generic_struct typeid(\"rpc_stream\", %s)"
+
+static void
+build_server_stream_source(ncc_buffer_t *src, const char *handler,
+                            const char *dispatcher, const char *registrar,
+                            const char *call_, const char *quoted_method,
+                            const char *req_t, const char *resp_t,
+                            const char *dec_req)
+{
+    ncc_buffer_printf(src,
+        "static _generic_struct typeid(\"result\", " STREAM_OF_BUF " *)\n"
+        "%s(n00b_buffer_t *req_cbor, n00b_rpc_ctx_t *ctx)\n"
+        "{\n"
+        "  _generic_struct typeid(\"result\", %s *) decoded = %s(req_cbor);\n"
+        "  if (!decoded.is_ok) {\n"
+        "    return (_generic_struct typeid(\"result\", " STREAM_OF_BUF " *)){\n"
+        "      .is_ok = false, .err = decoded.err,\n"
+        "    };\n"
+        "  }\n"
+        "  _generic_struct typeid(\"result\", " STREAM_OF " *) resp =\n"
+        "    %s(decoded.ok, ctx);\n"
+        "  if (!resp.is_ok) {\n"
+        "    return (_generic_struct typeid(\"result\", " STREAM_OF_BUF " *)){\n"
+        "      .is_ok = false, .err = resp.err,\n"
+        "    };\n"
+        "  }\n"
+        "  return (_generic_struct typeid(\"result\", " STREAM_OF_BUF " *)){\n"
+        "    .is_ok = true,\n"
+        "    .ok    = (" STREAM_OF_BUF " *)resp.ok,\n"
+        "  };\n"
+        "}\n"
+        "__attribute__((constructor))\n"
+        "static void %s(void) { n00b_rpc_register_server_stream(%s, &%s); }\n"
+        "extern _generic_struct typeid(\"result\", " STREAM_OF " *)\n"
+        "%s(n00b_rpc_ctx_t *ctx, n00b_rpc_channel_t *chan, %s *req)\n"
+        "{\n"
+        "  n00b_buffer_t *req_buf = n00b_cbor_encode(req);\n"
+        "  _generic_struct typeid(\"result\", " STREAM_OF_BUF " *) wire =\n"
+        "    n00b_rpc_call_server_stream(ctx, chan, %s, req_buf);\n"
+        "  if (!wire.is_ok) {\n"
+        "    return (_generic_struct typeid(\"result\", " STREAM_OF " *)){\n"
+        "      .is_ok = false, .err = wire.err,\n"
+        "    };\n"
+        "  }\n"
+        "  return (_generic_struct typeid(\"result\", " STREAM_OF " *)){\n"
+        "    .is_ok = true,\n"
+        "    .ok    = (" STREAM_OF " *)wire.ok,\n"
+        "  };\n"
+        "}\n",
+        dispatcher,
+        req_t, dec_req,
+        resp_t, handler,
+        registrar, quoted_method, dispatcher,
+        resp_t, call_, req_t,
+        quoted_method,
+        resp_t,
+        resp_t, resp_t);
+}
+
+static void
+build_client_stream_source(ncc_buffer_t *src, const char *handler,
+                            const char *dispatcher, const char *registrar,
+                            const char *call_, const char *quoted_method,
+                            const char *req_t, const char *resp_t,
+                            const char *dec_resp)
+{
+    ncc_buffer_printf(src,
+        "static _generic_struct typeid(\"result\", n00b_buffer_t *)\n"
+        "%s(" STREAM_OF_BUF " *in, n00b_rpc_ctx_t *ctx)\n"
+        "{\n"
+        "  _generic_struct typeid(\"result\", %s *) resp =\n"
+        "    %s((" STREAM_OF " *)in, ctx);\n"
+        "  if (!resp.is_ok) {\n"
+        "    return (_generic_struct typeid(\"result\", n00b_buffer_t *)){\n"
+        "      .is_ok = false, .err = resp.err,\n"
+        "    };\n"
+        "  }\n"
+        "  return (_generic_struct typeid(\"result\", n00b_buffer_t *)){\n"
+        "    .is_ok = true, .ok = n00b_cbor_encode(resp.ok),\n"
+        "  };\n"
+        "}\n"
+        "__attribute__((constructor))\n"
+        "static void %s(void) { n00b_rpc_register_client_stream(%s, &%s); }\n"
+        "extern _generic_struct typeid(\"result\", %s *)\n"
+        "%s(n00b_rpc_ctx_t *ctx, n00b_rpc_channel_t *chan, " STREAM_OF " *in)\n"
+        "{\n"
+        "  _generic_struct typeid(\"result\", n00b_buffer_t *) wire =\n"
+        "    n00b_rpc_call_client_stream(ctx, chan, %s, (" STREAM_OF_BUF " *)in);\n"
+        "  if (!wire.is_ok) {\n"
+        "    return (_generic_struct typeid(\"result\", %s *)){\n"
+        "      .is_ok = false, .err = wire.err,\n"
+        "    };\n"
+        "  }\n"
+        "  return %s(wire.ok);\n"
+        "}\n",
+        dispatcher,
+        resp_t, handler, req_t,
+        registrar, quoted_method, dispatcher,
+        resp_t, call_, req_t,
+        quoted_method,
+        resp_t,
+        dec_resp);
+}
+
+static void
+build_bidi_source(ncc_buffer_t *src, const char *handler,
+                  const char *dispatcher, const char *registrar,
+                  const char *call_, const char *quoted_method,
+                  const char *req_t, const char *resp_t)
+{
+    ncc_buffer_printf(src,
+        "static _generic_struct typeid(\"result\", " STREAM_OF_BUF " *)\n"
+        "%s(" STREAM_OF_BUF " *in, n00b_rpc_ctx_t *ctx)\n"
+        "{\n"
+        "  _generic_struct typeid(\"result\", " STREAM_OF " *) resp =\n"
+        "    %s((" STREAM_OF " *)in, ctx);\n"
+        "  if (!resp.is_ok) {\n"
+        "    return (_generic_struct typeid(\"result\", " STREAM_OF_BUF " *)){\n"
+        "      .is_ok = false, .err = resp.err,\n"
+        "    };\n"
+        "  }\n"
+        "  return (_generic_struct typeid(\"result\", " STREAM_OF_BUF " *)){\n"
+        "    .is_ok = true,\n"
+        "    .ok    = (" STREAM_OF_BUF " *)resp.ok,\n"
+        "  };\n"
+        "}\n"
+        "__attribute__((constructor))\n"
+        "static void %s(void) { n00b_rpc_register_bidi(%s, &%s); }\n"
+        "extern _generic_struct typeid(\"result\", " STREAM_OF " *)\n"
+        "%s(n00b_rpc_ctx_t *ctx, n00b_rpc_channel_t *chan, " STREAM_OF " *in)\n"
+        "{\n"
+        "  _generic_struct typeid(\"result\", " STREAM_OF_BUF " *) wire =\n"
+        "    n00b_rpc_call_bidi(ctx, chan, %s, (" STREAM_OF_BUF " *)in);\n"
+        "  if (!wire.is_ok) {\n"
+        "    return (_generic_struct typeid(\"result\", " STREAM_OF " *)){\n"
+        "      .is_ok = false, .err = wire.err,\n"
+        "    };\n"
+        "  }\n"
+        "  return (_generic_struct typeid(\"result\", " STREAM_OF " *)){\n"
+        "    .is_ok = true,\n"
+        "    .ok    = (" STREAM_OF " *)wire.ok,\n"
+        "  };\n"
+        "}\n",
+        dispatcher,
+        resp_t, handler, req_t,
+        registrar, quoted_method, dispatcher,
+        resp_t, call_, req_t,
+        quoted_method,
+        resp_t,
+        resp_t, resp_t);
+}
+
+#undef STREAM_OF_BUF
+#undef STREAM_OF
+
+// ============================================================================
+// Unified synthesizer — picks the right per-shape builder, runs the
+// shared metadata extraction + parse + splice.
+// ============================================================================
+
+static void
+synthesize_for_shape(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *inner,
+                     ncc_parse_tree_t *rpc_clause,
+                     const char *method_string,
+                     rpc_shape_t shape,
+                     char *req_inner, char *resp_inner,
+                     ptrvec_t *appended)
+{
+    ncc_parse_tree_t *declarator
+        = ncc_xform_find_child_nt(inner, "declarator");
+
+    char *func_name = extract_func_name(declarator);
+
+    if (!func_name) {
+        rpc_diagnostic(rpc_clause,
+                       "@rpc could not determine the handler's "
+                       "function name");
+    }
+
+    char *svc;
+    char *method;
+    split_method(method_string, &svc, &method);
+
+    size_t  ms_len    = strlen(method_string);
+    char   *quoted_ms = ncc_alloc_size(1, ms_len + 3);
+    quoted_ms[0]      = '"';
+    memcpy(quoted_ms + 1, method_string, ms_len);
+    quoted_ms[ms_len + 1] = '"';
+    quoted_ms[ms_len + 2] = '\0';
+
+    size_t svc_len    = strlen(svc);
+    size_t method_len = strlen(method);
+
+    #define BUILD_NAME(prefix, suffix_out) do {                  \
+        size_t p_len = strlen(prefix);                          \
+        size_t total = p_len + svc_len + 2 + method_len + 1;    \
+        (suffix_out) = ncc_alloc_size(1, total);                \
+        memcpy((suffix_out), (prefix), p_len);                   \
+        memcpy((suffix_out) + p_len, svc, svc_len);              \
+        (suffix_out)[p_len + svc_len]     = '_';                 \
+        (suffix_out)[p_len + svc_len + 1] = '_';                 \
+        memcpy((suffix_out) + p_len + svc_len + 2,               \
+               method, method_len);                              \
+        (suffix_out)[total - 1] = '\0';                          \
+    } while (0)
+
+    char *dispatcher_name;
+    char *registrar_name;
+    char *call_name;
+    BUILD_NAME("_n00b_rpc_dispatch__", dispatcher_name);
+    BUILD_NAME("_n00b_rpc_register__", registrar_name);
+    BUILD_NAME("n00b_rpc_call_",       call_name);
+    #undef BUILD_NAME
+
+    // Decoder identifiers — `_n00b_cbor_decode_<TypeName>`. Only
+    // request decoder for unary / server-stream; only response
+    // decoder for unary / client-stream; bidi needs neither
+    // (handler + runtime handle per-item CBOR themselves).
+    size_t pfx_len = strlen("_n00b_cbor_decode_");
+
+    char *dec_req  = nullptr;
+    char *dec_resp = nullptr;
+
+    if (shape == RPC_SHAPE_UNARY || shape == RPC_SHAPE_SERVER_STREAM) {
+        size_t r_len = strlen(req_inner);
+        dec_req      = ncc_alloc_size(1, pfx_len + r_len + 1);
+        memcpy(dec_req, "_n00b_cbor_decode_", pfx_len);
+        memcpy(dec_req + pfx_len, req_inner, r_len);
+        dec_req[pfx_len + r_len] = '\0';
+    }
+
+    if (shape == RPC_SHAPE_UNARY || shape == RPC_SHAPE_CLIENT_STREAM) {
+        size_t r_len = strlen(resp_inner);
+        dec_resp     = ncc_alloc_size(1, pfx_len + r_len + 1);
+        memcpy(dec_resp, "_n00b_cbor_decode_", pfx_len);
+        memcpy(dec_resp + pfx_len, resp_inner, r_len);
+        dec_resp[pfx_len + r_len] = '\0';
+    }
+
+    ncc_buffer_t *src = ncc_buffer_empty();
+
+    switch (shape) {
+    case RPC_SHAPE_UNARY:
+        build_unary_source(src, func_name, dispatcher_name,
+                            registrar_name, call_name, quoted_ms,
+                            req_inner, resp_inner, dec_req, dec_resp);
+        break;
+    case RPC_SHAPE_SERVER_STREAM:
+        build_server_stream_source(src, func_name, dispatcher_name,
+                                    registrar_name, call_name,
+                                    quoted_ms, req_inner, resp_inner,
+                                    dec_req);
+        break;
+    case RPC_SHAPE_CLIENT_STREAM:
+        build_client_stream_source(src, func_name, dispatcher_name,
+                                    registrar_name, call_name,
+                                    quoted_ms, req_inner, resp_inner,
+                                    dec_resp);
+        break;
+    case RPC_SHAPE_BIDI:
+        build_bidi_source(src, func_name, dispatcher_name,
+                           registrar_name, call_name, quoted_ms,
+                           req_inner, resp_inner);
+        break;
+    default:
+        rpc_diagnostic(rpc_clause,
+                       "@rpc: handler has an unrecognized signature "
+                       "shape");
+    }
 
     char *source = ncc_buffer_take(src);
 
     ncc_parse_tree_t *new_tu
         = ncc_xform_parse_source(ctx->grammar, "translation_unit",
-                                 source, "xform_rpc_unary");
+                                 source, "xform_rpc");
     ncc_free(source);
 
     if (!new_tu) {
         rpc_diagnostic(rpc_clause,
                        "internal error: failed to parse synthesized "
-                       "unary dispatcher source");
+                       "@rpc source");
     }
 
-    // Flatten the synthesized TU and queue its external_decls for
-    // appending after the user's original.
     ptrvec_t flat;
     ptrvec_init(&flat, 8);
 
@@ -956,8 +1282,6 @@ synthesize_unary(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *inner,
     ncc_free(svc);
     ncc_free(method);
     ncc_free(quoted_ms);
-    ncc_free(resp_type);
-    ncc_free(req_type);
     ncc_free(dispatcher_name);
     ncc_free(registrar_name);
     ncc_free(call_name);
@@ -1059,16 +1383,27 @@ xform_rpc_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
         // declaration also gets stripped, but we don't double-emit
         // the dispatcher / ctor / stub).
         if (ncc_xform_nt_name_is(inner, "function_definition")) {
-            if (!is_unary_shape(inner)) {
+            char       *req_inner  = nullptr;
+            char       *resp_inner = nullptr;
+            rpc_shape_t shape      = detect_shape(inner, &resp_inner,
+                                                  &req_inner);
+
+            if (shape == RPC_SHAPE_UNKNOWN) {
                 rpc_diagnostic(rpc_clause,
-                               "@rpc: only unary shape is implemented "
-                               "in this phase (server-stream, "
-                               "client-stream, and bidi land in the "
-                               "next phase)");
+                               "@rpc: handler signature does not match "
+                               "any supported shape (expected return "
+                               "n00b_result_t(T *) or "
+                               "n00b_result_t(n00b_rpc_stream_t(T) *), "
+                               "with first parameter T * or "
+                               "n00b_rpc_stream_t(T) *)");
             }
 
-            synthesize_unary(ctx, inner, rpc_clause, method_string,
-                             &appended);
+            synthesize_for_shape(ctx, inner, rpc_clause, method_string,
+                                 shape, req_inner, resp_inner,
+                                 &appended);
+
+            ncc_free(req_inner);
+            ncc_free(resp_inner);
         }
 
         ncc_free(method_string);

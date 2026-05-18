@@ -293,6 +293,12 @@ ncc_compile_tests = {
                             test_dir / 'test_rpc_strip_smoke.c'],
   'rpc_unary':             ['compile_run',
                             test_dir / 'test_rpc_unary.c'],
+  'rpc_server_stream':     ['compile_run',
+                            test_dir / 'test_rpc_server_stream.c'],
+  'rpc_client_stream':     ['compile_run',
+                            test_dir / 'test_rpc_client_stream.c'],
+  'rpc_bidi':              ['compile_run',
+                            test_dir / 'test_rpc_bidi.c'],
 }
 
 foreach name, params : ncc_compile_tests
