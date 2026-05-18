@@ -10,6 +10,7 @@
 // - All C23 operators
 
 #include "parse/c_tokenizer.h"
+#include "parse/token.h"
 #include "scanner/scan_builtins.h"
 #include "scanner/token_stream.h"
 #include "lib/alloc.h"
@@ -585,6 +586,38 @@ scan_raw_string(ncc_scanner_t *s, int32_t tid)
 }
 
 // ============================================================================
+// Internal: contextual demotion for the `rpc` keyword
+//
+// `rpc` participates in the grammar only as part of an `@rpc("...")`
+// clause, but the name is common in user code (variables, fields,
+// function names). The grammar registers `rpc` as a terminal so the
+// `<rpc_clause>` production can match it; without this demotion every
+// existing use of `rpc` as an identifier would tokenize as the
+// terminal and break the parse. We force the terminal id only when
+// the previous emitted token is `@`.
+// ============================================================================
+
+static int32_t
+demote_contextual_keyword(ncc_scanner_t *s, ncc_string_t id, int32_t kw_id)
+{
+    if (id.u8_bytes != 3 || memcmp(id.data, "rpc", 3) != 0) {
+        return kw_id;
+    }
+
+    ncc_token_stream_t *ts = s->stream;
+
+    if (ts && ts->token_count > 0) {
+        ncc_token_info_t *prev = ts->tokens[ts->token_count - 1];
+
+        if (prev && prev->tid == '@') {
+            return kw_id;
+        }
+    }
+
+    return (int32_t)NCC_TOK_IDENTIFIER;
+}
+
+// ============================================================================
 // Main tokenizer callback
 // ============================================================================
 
@@ -673,12 +706,11 @@ restart:
 
         int64_t kw_id = ncc_scan_terminal_id(s, id_str.data);
 
-        if (kw_id != NCC_TOK_OTHER) {
-            ncc_scan_emit(s, (int32_t)kw_id, id_val);
-        }
-        else {
-            ncc_scan_emit(s, (int32_t)NCC_TOK_IDENTIFIER, id_val);
-        }
+        int32_t tid = (kw_id != NCC_TOK_OTHER)
+                          ? demote_contextual_keyword(s, id_str,
+                                                      (int32_t)kw_id)
+                          : (int32_t)NCC_TOK_IDENTIFIER;
+        ncc_scan_emit(s, tid, id_val);
 
         mark_system_header(s);
         return true;
@@ -703,12 +735,11 @@ restart:
             ncc_string_t id_str = ncc_option_get(id_val);
             int64_t kw_id = ncc_scan_terminal_id(s, id_str.data);
 
-            if (kw_id != NCC_TOK_OTHER) {
-                ncc_scan_emit(s, (int32_t)kw_id, id_val);
-            }
-            else {
-                ncc_scan_emit(s, (int32_t)NCC_TOK_IDENTIFIER, id_val);
-            }
+            int32_t tid = (kw_id != NCC_TOK_OTHER)
+                              ? demote_contextual_keyword(s, id_str,
+                                                          (int32_t)kw_id)
+                              : (int32_t)NCC_TOK_IDENTIFIER;
+            ncc_scan_emit(s, tid, id_val);
 
             mark_system_header(s);
             return true;

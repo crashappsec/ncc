@@ -286,6 +286,8 @@ ncc_compile_tests = {
   'option':       ['compile_run',  test_dir / 'test_option.c'],
   'generic_struct': ['compile_run', test_dir / 'test_generic_struct.c'],
   'gs_result':      ['compile_run', test_dir / 'test_gs_result.c'],
+  'rpc_keyword_collision': ['compile_run',
+                            test_dir / 'test_rpc_keyword_collision.c'],
 }
 
 foreach name, params : ncc_compile_tests

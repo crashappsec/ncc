@@ -337,6 +337,9 @@
 <declaration> ::= <static_assert_declaration>
     | <attribute_declaration>
     | <attribute_specifier_sequence>? <declaration_specifiers> <declarator> <keyword_clause> %";"
+    | <declaration_specifiers> <declarator> <rpc_clause> %";"
+    | <declaration_specifiers> <declarator> <keyword_clause> <rpc_clause> %";"
+    | <declaration_specifiers> <declarator> <rpc_clause> <keyword_clause> %";"
     | <declaration_specifiers> <attribute_specifier_sequence> %";"
     | %"__extension__" <declaration>
 
@@ -408,6 +411,9 @@
 <function_declarator> ::= <direct_declarator> %"(" <parameter_type_list>? %")"
 
 <function_definition> ::= <attribute_specifier_sequence>? <declaration_specifiers> <declarator> <keyword_clause> <function_body>
+    | <attribute_specifier_sequence>? <declaration_specifiers> <declarator> <rpc_clause> <function_body>
+    | <attribute_specifier_sequence>? <declaration_specifiers> <declarator> <keyword_clause> <rpc_clause> <function_body>
+    | <attribute_specifier_sequence>? <declaration_specifiers> <declarator> <rpc_clause> <keyword_clause> <function_body>
     | <attribute_specifier_sequence>? <declaration_specifiers> <declarator> <function_body>
     | %"__extension__" <function_definition>
 
@@ -471,6 +477,11 @@
 
 <keyword_clause> ::= %"_kargs" %"{" <keyword_param_list> %"}"
     | %"_kargs" %":" %"opaque"
+
+# The `rpc` keyword is contextual — the tokenizer only emits it as a
+# grammar terminal when preceded by `@`, so existing user code that
+# uses `rpc` as an identifier (variable, field, function) is unaffected.
+<rpc_clause> ::= %"@" %"rpc" %"(" <string_literal> %")"
 
 <keyword_param> ::= <declaration_specifiers> <declarator> %"=" <initializer> %";"
     | <declaration_specifiers> <declarator> %";"
