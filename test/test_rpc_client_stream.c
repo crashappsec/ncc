@@ -43,7 +43,7 @@ n00b_rpc_register_client_stream(const char *method, cs_dispatch_fn_t fn)
 static UploadReply g_decoded_reply;
 
 _generic_struct typeid("result", UploadReply *)
-_n00b_cbor_decode_UploadReply(n00b_buffer_t *buf)
+typeid("cbor_decode", UploadReply *)(n00b_buffer_t *buf)
 {
     g_decoded_reply.n = buf ? buf->p : 0;
     return (_generic_struct typeid("result", UploadReply *)){
@@ -53,10 +53,9 @@ _n00b_cbor_decode_UploadReply(n00b_buffer_t *buf)
 
 static n00b_buffer_t g_enc_buf;
 n00b_buffer_t *
-n00b_cbor_encode(void *thing)
+typeid("cbor_encode", UploadReply *)(UploadReply *thing)
 {
-    UploadReply *r = thing;
-    g_enc_buf.p    = r->n;
+    g_enc_buf.p    = thing->n;
     return &g_enc_buf;
 }
 

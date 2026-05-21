@@ -61,7 +61,7 @@ n00b_rpc_register(const char *method, dispatch_fn_t fn)
 static Req_t g_last_req_seen;
 
 _generic_struct typeid("result", Req_t *)
-_n00b_cbor_decode_Req_t(n00b_buffer_t *buf)
+typeid("cbor_decode", Req_t *)(n00b_buffer_t *buf)
 {
     g_last_req_seen.x = buf ? buf->placeholder : -1;
     return (_generic_struct typeid("result", Req_t *)){
@@ -73,7 +73,7 @@ _n00b_cbor_decode_Req_t(n00b_buffer_t *buf)
 static Reply_t g_decoded_reply;
 
 _generic_struct typeid("result", Reply_t *)
-_n00b_cbor_decode_Reply_t(n00b_buffer_t *buf)
+typeid("cbor_decode", Reply_t *)(n00b_buffer_t *buf)
 {
     g_decoded_reply.y = buf ? buf->placeholder : -1;
     return (_generic_struct typeid("result", Reply_t *)){
@@ -82,16 +82,19 @@ _n00b_cbor_decode_Reply_t(n00b_buffer_t *buf)
     };
 }
 
-// `n00b_cbor_encode` is generic in real n00b. Here we stub a single
-// signature — `void *` in, returning a buffer whose `placeholder`
-// holds the `y` field for replies or the `x` field for requests.
 static n00b_buffer_t g_encoded_buf;
 
 n00b_buffer_t *
-n00b_cbor_encode(void *thing)
+typeid("cbor_encode", Req_t *)(Req_t *thing)
 {
-    Reply_t *r = thing;
-    g_encoded_buf.placeholder = r->y;
+    g_encoded_buf.placeholder = thing->x;
+    return &g_encoded_buf;
+}
+
+n00b_buffer_t *
+typeid("cbor_encode", Reply_t *)(Reply_t *thing)
+{
+    g_encoded_buf.placeholder = thing->y;
     return &g_encoded_buf;
 }
 

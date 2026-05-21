@@ -59,7 +59,7 @@ n00b_rpc_register_server_stream(const char *method, ss_dispatch_fn_t fn)
 static Req_t g_decoded_req;
 
 _generic_struct typeid("result", Req_t *)
-_n00b_cbor_decode_Req_t(n00b_buffer_t *buf)
+typeid("cbor_decode", Req_t *)(n00b_buffer_t *buf)
 {
     g_decoded_req.x = buf ? buf->p : 0;
     return (_generic_struct typeid("result", Req_t *)){
@@ -69,10 +69,9 @@ _n00b_cbor_decode_Req_t(n00b_buffer_t *buf)
 
 static n00b_buffer_t g_enc_buf;
 n00b_buffer_t *
-n00b_cbor_encode(void *thing)
+typeid("cbor_encode", Req_t *)(Req_t *thing)
 {
-    Req_t *r        = thing;
-    g_enc_buf.p     = r->x;
+    g_enc_buf.p     = thing->x;
     return &g_enc_buf;
 }
 
