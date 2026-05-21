@@ -52,6 +52,7 @@ static const char embedded_grammar[] = {
 static const size_t embedded_grammar_len = sizeof(embedded_grammar) - 1;
 
 // Transform registration prototypes.
+extern void ncc_register_rpc_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_generic_struct_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_typeid_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_typestr_xform(ncc_xform_registry_t *reg);
@@ -1729,6 +1730,11 @@ compile_file(ncc_opts_t *opts)
     ncc_verbose("registering transforms");
     ncc_xform_registry_t xreg;
     ncc_xform_registry_init(&xreg, g);
+    // rpc must run first — its synthesized bodies reference the
+    // type-mangled identifiers that typeid / option / generic_struct /
+    // kargs_vargs produce; running after any of those would see the
+    // already-mangled signatures.
+    ncc_register_rpc_xform(&xreg);
     ncc_register_generic_struct_xform(&xreg);
     ncc_register_typeid_xform(&xreg);
     ncc_register_option_xform(&xreg);
@@ -1782,6 +1788,37 @@ compile_file(ncc_opts_t *opts)
         , '\0'
     };
     ncc_template_register(&tmpl_reg, "bang", "primary_expression", bang_tmpl);
+
+    // @rpc(...) templates — one per stream shape. Parsed as
+    // translation_unit because each expands to multiple external
+    // declarations (dispatcher, constructor, client stub).
+    static const char rpc_unary_tmpl[] = {
+#embed "templates/rpc_unary.c.tmpl"
+        , '\0'
+    };
+    ncc_template_register(&tmpl_reg, "rpc_unary", "translation_unit",
+                          rpc_unary_tmpl);
+
+    static const char rpc_server_stream_tmpl[] = {
+#embed "templates/rpc_server_stream.c.tmpl"
+        , '\0'
+    };
+    ncc_template_register(&tmpl_reg, "rpc_server_stream",
+                          "translation_unit", rpc_server_stream_tmpl);
+
+    static const char rpc_client_stream_tmpl[] = {
+#embed "templates/rpc_client_stream.c.tmpl"
+        , '\0'
+    };
+    ncc_template_register(&tmpl_reg, "rpc_client_stream",
+                          "translation_unit", rpc_client_stream_tmpl);
+
+    static const char rpc_bidi_tmpl[] = {
+#embed "templates/rpc_bidi.c.tmpl"
+        , '\0'
+    };
+    ncc_template_register(&tmpl_reg, "rpc_bidi", "translation_unit",
+                          rpc_bidi_tmpl);
 
     // Resolve vargs_type, once_prefix, rstr_string_type: CLI > meson define > default.
     const char *vargs_type      = "ncc_vargs_t";

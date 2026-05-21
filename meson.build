@@ -139,6 +139,7 @@ src_xform = files(
   'src/xform/xform_kargs_vargs.c',
   'src/xform/xform_once.c',
   'src/xform/xform_option.c',
+  'src/xform/xform_rpc.c',
   'src/xform/xform_rstr.c',
   'src/xform/xform_typeid.c',
   'src/xform/xform_typestr.c',
@@ -286,6 +287,18 @@ ncc_compile_tests = {
   'option':       ['compile_run',  test_dir / 'test_option.c'],
   'generic_struct': ['compile_run', test_dir / 'test_generic_struct.c'],
   'gs_result':      ['compile_run', test_dir / 'test_gs_result.c'],
+  'rpc_keyword_collision': ['compile_run',
+                            test_dir / 'test_rpc_keyword_collision.c'],
+  'rpc_strip_smoke':       ['compile_run',
+                            test_dir / 'test_rpc_strip_smoke.c'],
+  'rpc_unary':             ['compile_run',
+                            test_dir / 'test_rpc_unary.c'],
+  'rpc_server_stream':     ['compile_run',
+                            test_dir / 'test_rpc_server_stream.c'],
+  'rpc_client_stream':     ['compile_run',
+                            test_dir / 'test_rpc_client_stream.c'],
+  'rpc_bidi':              ['compile_run',
+                            test_dir / 'test_rpc_bidi.c'],
 }
 
 foreach name, params : ncc_compile_tests
@@ -413,6 +426,11 @@ ncc_error_tests = {
   'err_once_non_function':       test_dir / 'err_once_non_function.c',
   'err_rstr_bad_tag':            test_dir / 'err_rstr_bad_tag.c',
   'err_typeid_no_args':          test_dir / 'err_typeid_no_args.c',
+  'err_rpc_void_return':         test_dir / 'err_rpc_void_return.c',
+  'err_rpc_no_ctx':              test_dir / 'err_rpc_no_ctx.c',
+  'err_rpc_bad_method':          test_dir / 'err_rpc_bad_method.c',
+  'err_rpc_with_kargs':          test_dir / 'err_rpc_with_kargs.c',
+  'err_rpc_dup_method':          test_dir / 'err_rpc_dup_method.c',
 }
 
 foreach name, src : ncc_error_tests

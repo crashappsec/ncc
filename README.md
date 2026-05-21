@@ -469,6 +469,70 @@ don't currently check because, again, laziness).
 Outside of definitions and declarations, `once` is treated like an
 identifier. Everything above isn't; they're all keywords.
 
+### RPC Annotations (`@rpc(...)`)
+
+`@rpc("package.Service/Method")` on a function declaration or
+definition tells ncc to emit a small bundle of glue code so the
+function participates in a CBOR-over-the-wire RPC system. ncc itself
+ships no transport — the synthesized code calls into a runtime
+your project provides (`n00b_rpc_register`, `n00b_rpc_call_unary`,
+the per-type CBOR `encode`/`decode` symbols, etc.). The libn00b
+ecosystem has a complete implementation; downstream projects can
+swap in their own runtime as long as the names match.
+
+The handler signature picks the RPC shape:
+
+| Return type                                                | First parameter                    | Shape          |
+|------------------------------------------------------------|------------------------------------|----------------|
+| `n00b_result_t(T *)`                                       | `U *`                              | unary          |
+| `n00b_result_t(n00b_rpc_stream_t(T) *)`                    | `U *`                              | server-stream  |
+| `n00b_result_t(T *)`                                       | `n00b_rpc_stream_t(U) *`           | client-stream  |
+| `n00b_result_t(n00b_rpc_stream_t(T) *)`                    | `n00b_rpc_stream_t(U) *`           | bidi           |
+
+Every handler must take a trailing `n00b_rpc_ctx_t *ctx` parameter.
+
+Example:
+
+```c
+#include <n00b.h>
+#include <net/quic/rpc.h>
+
+n00b_result_t(GreetReply *)
+greet_hello(GreetRequest *req, n00b_rpc_ctx_t *ctx)
+    @rpc("greet.v1.Greeter/Hello")
+{
+    /* handler body */
+}
+```
+
+For each annotated handler ncc emits three external declarations
+following the spelling rules:
+
+| Symbol                                                | Visibility       |
+|-------------------------------------------------------|------------------|
+| `_n00b_rpc_dispatch__<svc_underscored>__<method>`     | static           |
+| `_n00b_rpc_register__<svc_underscored>__<method>`     | static + ctor    |
+| `n00b_rpc_call_<svc_underscored>__<method>`           | extern (public)  |
+
+where `<svc_underscored>` replaces dots with underscores in the
+service path (`greet.v1.Greeter` → `greet_v1_Greeter`). The
+constructor fires at process start and registers the dispatcher
+with the runtime; the public client stub is the typed call site
+service authors invoke.
+
+The method string is validated against
+`^[a-zA-Z_][a-zA-Z0-9_.]*\.[A-Z][a-zA-Z0-9]*\/[A-Z][a-zA-Z0-9]*$` —
+dotted package + service starting with an uppercase letter, then
+`/`, then an uppercase method name. The xform also rejects:
+combining `@rpc` with `_kargs` on the same function; a missing
+trailing `n00b_rpc_ctx_t *` parameter; and two `@rpc(...)`
+handlers in the same translation unit binding the same method
+string.
+
+The `rpc` token is contextual: outside an `@rpc(...)` clause it
+still tokenizes as a plain identifier, so existing code using `rpc`
+as a variable, field, function, or parameter name is unaffected.
+
 ### Rich String Literals (`r""`)
 
 Pre-compiled string literals with inline styling markup. We provide a

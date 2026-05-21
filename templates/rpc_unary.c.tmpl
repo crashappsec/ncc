@@ -1,0 +1,71 @@
+// Generated from @rpc($4) on $0.
+//
+// Slot layout (template engine does not token-paste; every identifier
+// the xform constructs by gluing strings together is passed as its own
+// pre-computed slot):
+//   $0 — user handler name
+//   $1 — dispatcher name        (`_n00b_rpc_dispatch__<svc>__<method>`)
+//   $2 — registrar name         (`_n00b_rpc_register__<svc>__<method>`)
+//   $3 — call (client-stub) name (`n00b_rpc_call_<svc>__<method>`)
+//   $4 — full method string literal, including quotes
+//   $5 — request type
+//   $6 — response type
+//   $7 — request decoder identifier
+//   $8 — response decoder identifier
+//
+// Uses raw ncc `_generic_struct typeid(...)` for `n00b_result_t(T *)`
+// (libn00b macros expand to this form before user code reaches ncc;
+// template text is not preprocessed, so it must spell the raw form
+// directly).
+
+static _generic_struct typeid("result", n00b_buffer_t *)
+$1(n00b_buffer_t *req_cbor, n00b_rpc_ctx_t *ctx)
+{
+    _generic_struct typeid("result", $5 *) decoded = $7(req_cbor);
+    if (!decoded.is_ok) {
+        return (_generic_struct typeid("result", n00b_buffer_t *)){
+            .is_ok = false,
+            .err   = decoded.err,
+        };
+    }
+
+    _generic_struct typeid("result", $6 *) resp = $0(decoded.ok, ctx);
+    if (!resp.is_ok) {
+        return (_generic_struct typeid("result", n00b_buffer_t *)){
+            .is_ok = false,
+            .err   = resp.err,
+        };
+    }
+
+    return (_generic_struct typeid("result", n00b_buffer_t *)){
+        .is_ok = true,
+        .ok    = n00b_cbor_encode(resp.ok),
+    };
+}
+
+__attribute__((constructor))
+static void
+$2(void)
+{
+    n00b_rpc_register($4, &$1);
+}
+
+extern _generic_struct typeid("result", $6 *)
+$3(n00b_rpc_ctx_t     *ctx,
+   n00b_rpc_channel_t *chan,
+   $5                 *req)
+{
+    n00b_buffer_t *req_buf = n00b_cbor_encode(req);
+
+    _generic_struct typeid("result", n00b_buffer_t *) wire =
+        n00b_rpc_call_unary(ctx, chan, $4, req_buf);
+
+    if (!wire.is_ok) {
+        return (_generic_struct typeid("result", $6 *)){
+            .is_ok = false,
+            .err   = wire.err,
+        };
+    }
+
+    return $8(wire.ok);
+}
