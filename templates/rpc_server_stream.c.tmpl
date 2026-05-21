@@ -10,7 +10,8 @@
 static n00b_result_t(n00b_rpc_stream_t(n00b_buffer_t *) *)
 _n00b_rpc_dispatch__$1__$2(n00b_buffer_t *req_cbor, n00b_rpc_ctx_t *ctx)
 {
-    n00b_result_t($4 *) decoded = _n00b_cbor_decode($4, req_cbor);
+    n00b_result_t($4 *) decoded =
+        typeid("cbor_decode", $4 *)(req_cbor);
     if (n00b_result_is_err(decoded)) {
         return n00b_result_err(n00b_rpc_stream_t(n00b_buffer_t *) *,
                                n00b_result_get_err(decoded));
@@ -41,7 +42,7 @@ n00b_rpc_call_$1__$2(n00b_rpc_ctx_t     *ctx,
                      n00b_rpc_channel_t *chan,
                      $4                 *req)
 {
-    n00b_buffer_t *req_buf = n00b_cbor_encode(req);
+    n00b_buffer_t *req_buf = typeid("cbor_encode", $4 *)(req);
 
     n00b_result_t(n00b_rpc_stream_t(n00b_buffer_t *) *) wire =
         n00b_rpc_call_server_stream(ctx, chan, $3, req_buf);

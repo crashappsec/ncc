@@ -10,8 +10,6 @@
 //   $4 — full method string literal, including quotes
 //   $5 — request type
 //   $6 — response type
-//   $7 — request decoder identifier
-//   $8 — response decoder identifier
 //
 // Uses raw ncc `_generic_struct typeid(...)` for `n00b_result_t(T *)`
 // (libn00b macros expand to this form before user code reaches ncc;
@@ -21,7 +19,8 @@
 static _generic_struct typeid("result", n00b_buffer_t *)
 $1(n00b_buffer_t *req_cbor, n00b_rpc_ctx_t *ctx)
 {
-    _generic_struct typeid("result", $5 *) decoded = $7(req_cbor);
+    _generic_struct typeid("result", $5 *) decoded =
+        typeid("cbor_decode", $5 *)(req_cbor);
     if (!decoded.is_ok) {
         return (_generic_struct typeid("result", n00b_buffer_t *)){
             .is_ok = false,
@@ -39,7 +38,7 @@ $1(n00b_buffer_t *req_cbor, n00b_rpc_ctx_t *ctx)
 
     return (_generic_struct typeid("result", n00b_buffer_t *)){
         .is_ok = true,
-        .ok    = n00b_cbor_encode(resp.ok),
+        .ok    = typeid("cbor_encode", $6 *)(resp.ok),
     };
 }
 
@@ -55,7 +54,7 @@ $3(n00b_rpc_ctx_t     *ctx,
    n00b_rpc_channel_t *chan,
    $5                 *req)
 {
-    n00b_buffer_t *req_buf = n00b_cbor_encode(req);
+    n00b_buffer_t *req_buf = typeid("cbor_encode", $5 *)(req);
 
     _generic_struct typeid("result", n00b_buffer_t *) wire =
         n00b_rpc_call_unary(ctx, chan, $4, req_buf);
@@ -67,5 +66,5 @@ $3(n00b_rpc_ctx_t     *ctx,
         };
     }
 
-    return $8(wire.ok);
+    return typeid("cbor_decode", $6 *)(wire.ok);
 }
