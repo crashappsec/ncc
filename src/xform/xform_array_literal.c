@@ -44,6 +44,26 @@ get_array_literal_data_expr(ncc_xform_ctx_t *ctx)
     return ncc_xform_get_data(ctx)->array_literal_data_expr;
 }
 
+static const char *
+get_static_object_entry_attr(ncc_xform_ctx_t *ctx)
+{
+    const char *attr = ncc_xform_get_data(ctx)->static_object_entry_attr;
+    return attr ? attr : "";
+}
+
+static void
+build_array_static_object_names(const char *data_name, char *desc_name,
+                                size_t desc_size, char *entry_name,
+                                size_t entry_size, char *object_id,
+                                size_t object_id_size)
+{
+    snprintf(desc_name, desc_size, "%s_desc", data_name);
+    snprintf(entry_name, entry_size, "%s_entry", data_name);
+
+    uint64_t id = ncc_type_hash_u64(desc_name);
+    snprintf(object_id, object_id_size, "%" PRIu64 "ULL", id);
+}
+
 static char *
 expand_source_template(const char *tmpl, const char **args, int nargs)
 {
@@ -830,18 +850,29 @@ build_array_data_decl(ncc_xform_ctx_t *ctx, array_type_info_t *type,
         no_scan    = "false";
     }
     else if (elem_is_pointer) {
-        scan_kind = "0";
+        scan_kind = "2";
         no_scan   = "false";
     }
+
+    char desc_name[128];
+    char entry_name[128];
+    char object_id_str[32];
+    build_array_static_object_names(data_name, desc_name, sizeof(desc_name),
+                                    entry_name, sizeof(entry_name),
+                                    object_id_str, sizeof(object_id_str));
+
+    const char *static_flags = "2";
+    const char *entry_attr   = get_static_object_entry_attr(ctx);
 
     const char *all_args[] = {
         type->elem_type, data_name, count_str, items, typehash_str,
         ptr_words_str, scan_kind, scan_cb, scan_user, wrapper_name,
         shape_name, stride_words, "0", shape_decl, no_scan,
+        desc_name, entry_name, object_id_str, static_flags, entry_attr,
     };
 
     char *result = expand_source_template(get_array_literal_data_template(ctx),
-                                          all_args, 15);
+                                          all_args, 20);
 
     ncc_free(items);
     ncc_free(shape_decl);
@@ -871,20 +902,31 @@ build_array_data_expr(ncc_xform_ctx_t *ctx, array_type_info_t *type,
     snprintf(ptr_words_str, sizeof(ptr_words_str), "%d",
              elem_is_pointer && !elem_is_nested ? count : 0);
 
-    const char *scan_kind = elem_is_nested ? "4" : elem_is_pointer ? "0" : "1";
+    const char *scan_kind = elem_is_nested ? "4" : elem_is_pointer ? "2" : "1";
     const char *scan_cb = elem_is_nested ? "n00b_gc_scan_cb_struct_field"
                                          : "nullptr";
     const char *scan_user = elem_is_nested ? "__unused_shape" : "nullptr";
     const char *no_scan = elem_is_nested || elem_is_pointer ? "false" : "true";
 
+    char desc_name[128];
+    char entry_name[128];
+    char object_id_str[32];
+    build_array_static_object_names(data_name, desc_name, sizeof(desc_name),
+                                    entry_name, sizeof(entry_name),
+                                    object_id_str, sizeof(object_id_str));
+
+    const char *static_flags = "2";
+    const char *entry_attr   = get_static_object_entry_attr(ctx);
+
     const char *all_args[] = {
         type->elem_type, data_name, count_str, "", typehash_str,
         ptr_words_str, scan_kind, scan_cb, scan_user, wrapper_name,
         "__unused_shape", "0", "0", "", no_scan,
+        desc_name, entry_name, object_id_str, static_flags, entry_attr,
     };
 
     return expand_source_template(get_array_literal_data_expr(ctx),
-                                  all_args, 15);
+                                  all_args, 20);
 }
 
 static char *

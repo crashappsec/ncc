@@ -250,6 +250,7 @@ typedef struct {
     const char  *rstr_static_ref_expr_plain;
     const char  *array_literal_data_template;
     const char  *array_literal_data_expr;
+    const char  *static_object_entry_attr;
 
     // vargs/once/rstr overrides (CLI > meson define > default).
     const char  *vargs_type;
@@ -583,6 +584,14 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
                 continue;
             }
         }
+        {
+            static const char prefix[] = "--ncc-static-object-entry-attr=";
+            if (strncmp(arg, prefix, sizeof(prefix) - 1) == 0) {
+                opts->static_object_entry_attr =
+                    arg + sizeof(prefix) - 1;
+                continue;
+            }
+        }
         if (strncmp(arg, "--ncc-vargs-type=", 17) == 0) {
             opts->vargs_type = arg + 17;
             continue;
@@ -777,6 +786,9 @@ print_help(void)
         "                       Override array literal backing storage template\n"
         "  --ncc-array-literal-data-expr=EXPR\n"
         "                       Override expression used as array .data pointer\n"
+        "  --ncc-static-object-entry-attr=ATTR\n"
+        "                       Attribute text for generated static-object\n"
+        "                       descriptor section entries\n"
         "\n"
         "Standard flags:\n"
         "  -E                   Preprocess + transform, emit C to stdout\n"
@@ -1964,6 +1976,7 @@ compile_file(ncc_opts_t *opts)
     static const char *default_array_literal_data_template =
         "static $0 $1[]={$3};";
     static const char *default_array_literal_data_expr = "$1";
+    static const char *default_static_object_entry_attr = "";
 
     // Resolution order: CLI flag > meson define > built-in default.
     const char *rstr_styled = default_rstr_styled;
@@ -1979,6 +1992,8 @@ compile_file(ncc_opts_t *opts)
     const char *array_literal_data_template =
         default_array_literal_data_template;
     const char *array_literal_data_expr = default_array_literal_data_expr;
+    const char *static_object_entry_attr =
+        default_static_object_entry_attr;
 
 #ifdef NCC_RSTR_TEMPLATE_STYLED
     rstr_styled = NCC_RSTR_TEMPLATE_STYLED;
@@ -2004,6 +2019,9 @@ compile_file(ncc_opts_t *opts)
 #ifdef NCC_ARRAY_LITERAL_DATA_EXPR
     array_literal_data_expr = NCC_ARRAY_LITERAL_DATA_EXPR;
 #endif
+#ifdef NCC_STATIC_OBJECT_ENTRY_ATTR
+    static_object_entry_attr = NCC_STATIC_OBJECT_ENTRY_ATTR;
+#endif
 
     if (opts->rstr_template_styled) {
         rstr_styled = opts->rstr_template_styled;
@@ -2028,6 +2046,9 @@ compile_file(ncc_opts_t *opts)
     }
     if (opts->array_literal_data_expr) {
         array_literal_data_expr = opts->array_literal_data_expr;
+    }
+    if (opts->static_object_entry_attr) {
+        static_object_entry_attr = opts->static_object_entry_attr;
     }
 
     ncc_template_register(&tmpl_reg, "rstr_styled",
@@ -2131,6 +2152,7 @@ compile_file(ncc_opts_t *opts)
         .rstr_static_ref_expr_plain  = rstr_static_ref_expr_plain,
         .array_literal_data_template = array_literal_data_template,
         .array_literal_data_expr     = array_literal_data_expr,
+        .static_object_entry_attr    = static_object_entry_attr,
         .gc_stack_maps               = opts->gc_stack_maps,
         .gc_stack_maps_relaxed       = opts->gc_stack_maps_relaxed,
     };

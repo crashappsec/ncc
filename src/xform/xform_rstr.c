@@ -56,6 +56,37 @@ static const char *get_rstr_static_ref_expr_plain(ncc_xform_ctx_t *ctx) {
   return ncc_xform_get_data(ctx)->rstr_static_ref_expr_plain;
 }
 
+static const char *get_static_object_entry_attr(ncc_xform_ctx_t *ctx) {
+  const char *attr = ncc_xform_get_data(ctx)->static_object_entry_attr;
+  return attr ? attr : "";
+}
+
+static void require_rstr_template_slots(const char *name, int requested,
+                                        int available) {
+  if (requested <= available) {
+    return;
+  }
+
+  fprintf(stderr,
+          "ncc: error: r-string template '%s' references slot $%d, but only "
+          "$0..$%d are available\n",
+          name, requested - 1, available - 1);
+  exit(1);
+}
+
+static void build_rstr_static_object_names(int uid, char *desc_name,
+                                           size_t desc_size,
+                                           char *entry_name,
+                                           size_t entry_size,
+                                           char *object_id,
+                                           size_t object_id_size) {
+  snprintf(desc_name, desc_size, "_ncc_rsd_%d", uid);
+  snprintf(entry_name, entry_size, "_ncc_rse_%d", uid);
+
+  uint64_t id = ncc_type_hash_u64(desc_name);
+  snprintf(object_id, object_id_size, "%" PRIu64 "ULL", id);
+}
+
 static char *expand_rstr_source_template(const char *tmpl,
                                          const char **args,
                                          int nargs) {
@@ -1021,6 +1052,19 @@ ncc_rstr_static_ref_t ncc_rstr_build_static_ref(ncc_xform_ctx_t *ctx,
   char wrapper_var[64];
   snprintf(wrapper_var, sizeof(wrapper_var), "_ncc_rsh_%d", uid);
 
+  char desc_name[64];
+  char entry_name[64];
+  char object_id_str[32];
+  build_rstr_static_object_names(uid, desc_name, sizeof(desc_name),
+                                 entry_name, sizeof(entry_name),
+                                 object_id_str, sizeof(object_id_str));
+
+  const char *static_flags = "2";
+  const char *scan_kind    = "1";
+  const char *scan_cb      = "nullptr";
+  const char *scan_user    = "nullptr";
+  const char *entry_attr   = get_static_object_entry_attr(ctx);
+
   char *decl_str = nullptr;
   char *expr_str = nullptr;
 
@@ -1033,27 +1077,35 @@ ncc_rstr_static_ref_t ncc_rstr_build_static_ref(ncc_xform_ctx_t *ctx,
     // Slot layout mirrors the main styled r-string template:
     // $0=style_decls $1=var $2=bytes $3=data $4=codepoints
     // $5=styling $6=typehash $7=wrapper_var
+    // $8=descriptor $9=entry $10=object_id $11=flags
+    // $12=scan_kind $13=scan_cb $14=scan_user $15=entry_attr
     const char *all_args[] = {
         style_decls, var_name, bytes_str, data_str,
         cp_str,      styling_str, typehash_str, wrapper_var,
+        desc_name,    entry_name, object_id_str, static_flags,
+        scan_kind,    scan_cb,    scan_user,     entry_attr,
     };
 
     decl_str = expand_rstr_source_template(
-        get_rstr_static_ref_template_styled(ctx), all_args, 8);
+        get_rstr_static_ref_template_styled(ctx), all_args, 16);
     expr_str = expand_rstr_source_template(
-        get_rstr_static_ref_expr_styled(ctx), all_args, 8);
+        get_rstr_static_ref_expr_styled(ctx), all_args, 16);
     ncc_free(style_decls);
   } else {
     // Slot layout mirrors the main plain r-string template:
     // $0=var $1=bytes $2=data $3=codepoints $4=typehash $5=wrapper_var
+    // $6=descriptor $7=entry $8=object_id $9=flags
+    // $10=scan_kind $11=scan_cb $12=scan_user $13=entry_attr
     const char *all_args[] = {
         var_name, bytes_str, data_str, cp_str, typehash_str, wrapper_var,
+        desc_name, entry_name, object_id_str, static_flags,
+        scan_kind, scan_cb,    scan_user,     entry_attr,
     };
 
     decl_str = expand_rstr_source_template(
-        get_rstr_static_ref_template_plain(ctx), all_args, 6);
+        get_rstr_static_ref_template_plain(ctx), all_args, 14);
     expr_str = expand_rstr_source_template(
-        get_rstr_static_ref_expr_plain(ctx), all_args, 6);
+        get_rstr_static_ref_expr_plain(ctx), all_args, 14);
   }
 
   ncc_free(content);
@@ -1167,12 +1219,27 @@ static ncc_parse_tree_t *xform_rstr(ncc_xform_ctx_t *ctx,
   char wrapper_var[64];
   snprintf(wrapper_var, sizeof(wrapper_var), "_ncc_rsh_%d", uid);
 
+  char desc_name[64];
+  char entry_name[64];
+  char object_id_str[32];
+  build_rstr_static_object_names(uid, desc_name, sizeof(desc_name),
+                                 entry_name, sizeof(entry_name),
+                                 object_id_str, sizeof(object_id_str));
+
+  const char *static_flags = "2";
+  const char *scan_kind    = "1";
+  const char *scan_cb      = "nullptr";
+  const char *scan_user    = "nullptr";
+  const char *entry_attr   = get_static_object_entry_attr(ctx);
+
   ncc_result_t(ncc_parse_tree_ptr_t) r;
 
   if (out.count > 0) {
     // Styled template.
     // Slot layout: $0=style_decls $1=var $2=bytes $3=data
     //              $4=codepoints $5=styling $6=typehash $7=wrapper_var
+    //              $8=descriptor $9=entry $10=object_id $11=flags
+    //              $12=scan_kind $13=scan_cb $14=scan_user $15=entry_attr
     char *style_decls = emit_style_declarations(ctx, &out, uid);
 
     char styling_str[64];
@@ -1181,18 +1248,26 @@ static ncc_parse_tree_t *xform_rstr(ncc_xform_ctx_t *ctx,
     const char *all_args[] = {
         style_decls, var_name,    bytes_str,    data_str,
         cp_str,      styling_str, typehash_str, wrapper_var,
+        desc_name,    entry_name,  object_id_str, static_flags,
+        scan_kind,    scan_cb,     scan_user,     entry_attr,
     };
     int nslots = ncc_template_slot_count(tmpl_reg, "rstr_styled");
+    require_rstr_template_slots("rstr_styled", nslots, 16);
     r = ncc_template_instantiate(tmpl_reg, "rstr_styled", all_args, nslots);
     ncc_free(style_decls);
   } else {
     // Plain template.
     // Slot layout: $0=var $1=bytes $2=data $3=codepoints
     //              $4=typehash $5=wrapper_var
+    //              $6=descriptor $7=entry $8=object_id $9=flags
+    //              $10=scan_kind $11=scan_cb $12=scan_user $13=entry_attr
     const char *all_args[] = {
         var_name, bytes_str, data_str, cp_str, typehash_str, wrapper_var,
+        desc_name, entry_name, object_id_str, static_flags,
+        scan_kind, scan_cb,    scan_user,     entry_attr,
     };
     int nslots = ncc_template_slot_count(tmpl_reg, "rstr_plain");
+    require_rstr_template_slots("rstr_plain", nslots, 14);
     r = ncc_template_instantiate(tmpl_reg, "rstr_plain", all_args, nslots);
   }
 

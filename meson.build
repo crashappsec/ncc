@@ -91,6 +91,10 @@ array_literal_data_expr = get_option('array_literal_data_expr')
 if array_literal_data_expr != ''
   c_args += ['-DNCC_ARRAY_LITERAL_DATA_EXPR="' + array_literal_data_expr + '"']
 endif
+static_object_entry_attr = get_option('static_object_entry_attr')
+if static_object_entry_attr != ''
+  c_args += ['-DNCC_STATIC_OBJECT_ENTRY_ATTR="' + static_object_entry_attr + '"']
+endif
 vargs_type_opt = get_option('vargs_type')
 if vargs_type_opt != ''
   c_args += ['-DNCC_VARGS_TYPE="' + vargs_type_opt + '"']
@@ -330,6 +334,15 @@ ncc_test_flags = [
   '-I' + ncc_include_dir,
 ]
 
+ncc_static_descriptor_flags = [
+  '--ncc-static-object-entry-attr=__attribute__((used))',
+  '--ncc-rstr-template-styled=({$0 static ncc_string_t $1={.u8_bytes=$2,.data=$3,.codepoints=$4,.styling=$5};static const n00b_static_object_desc_t $8={.start=(const void*)&$1,.len=(uint64_t)sizeof($1),.tinfo=$6,.scan_kind=$12,.scan_cb=$13,.scan_user=$14,.object_id=$10,.file=__FILE__,.flags=$11};static const n00b_static_object_desc_t * const $9 $15=&$8;&$1;})',
+  '--ncc-rstr-template-plain=({static ncc_string_t $0={.u8_bytes=$1,.data=$2,.codepoints=$3,.styling=((void*)0)};static const n00b_static_object_desc_t $6={.start=(const void*)&$0,.len=(uint64_t)sizeof($0),.tinfo=$4,.scan_kind=$10,.scan_cb=$11,.scan_user=$12,.object_id=$8,.file=__FILE__,.flags=$9};static const n00b_static_object_desc_t * const $7 $13=&$6;&$0;})',
+  '--ncc-rstr-static-ref-template-styled=$0 static ncc_string_t $1={.u8_bytes=$2,.data=$3,.codepoints=$4,.styling=$5};static const n00b_static_object_desc_t $8={.start=(const void*)&$1,.len=(uint64_t)sizeof($1),.tinfo=$6,.scan_kind=$12,.scan_cb=$13,.scan_user=$14,.object_id=$10,.file=__FILE__,.flags=$11};static const n00b_static_object_desc_t * const $9 $15=&$8;',
+  '--ncc-rstr-static-ref-template-plain=static ncc_string_t $0={.u8_bytes=$1,.data=$2,.codepoints=$3,.styling=((void*)0)};static const n00b_static_object_desc_t $6={.start=(const void*)&$0,.len=(uint64_t)sizeof($0),.tinfo=$4,.scan_kind=$10,.scan_cb=$11,.scan_user=$12,.object_id=$8,.file=__FILE__,.flags=$9};static const n00b_static_object_desc_t * const $7 $13=&$6;',
+  '--ncc-array-literal-data-template=$13 static $0 $1[]={$3};static const n00b_static_object_desc_t $15={.start=(const void*)$1,.len=(uint64_t)sizeof($1),.tinfo=$4,.scan_kind=$6,.scan_cb=$7,.scan_user=$8,.object_id=$17,.file=__FILE__,.flags=$18};static const n00b_static_object_desc_t * const $16 $19=&$15;',
+]
+
 # Compiler-level tests (run through ncc executable)
 ncc_compile_tests = {
   'bang':          ['compile_run',  test_dir / 'test_bang.c'],
@@ -364,6 +377,59 @@ foreach name, params : ncc_compile_tests
     depends : ncc_exe,
   )
 endforeach
+
+test('ncc_static_object_descriptors', test_runner,
+  args : [ncc_exe, 'compile_run',
+          test_dir / 'test_static_object_descriptors.c']
+         + ncc_test_flags + ncc_static_descriptor_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_static_object_descriptors_array_desc', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_static_object_descriptors.c',
+          'n00b_static_object_desc_t __ncc_arraylit_']
+         + ncc_test_flags + ncc_static_descriptor_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_static_object_descriptors_rstr_desc', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_static_object_descriptors.c',
+          'n00b_static_object_desc_t _ncc_rsd_']
+         + ncc_test_flags + ncc_static_descriptor_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_static_object_descriptors_pointer_scan', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_static_object_descriptors.c',
+          '.scan_kind = 2']
+         + ncc_test_flags + ncc_static_descriptor_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_static_object_descriptors_nested_scan', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_static_object_descriptors.c',
+          'n00b_gc_scan_cb_struct_field']
+         + ncc_test_flags + ncc_static_descriptor_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_static_object_descriptors_entry_attr', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_static_object_descriptors.c',
+          '__attribute__ ((used))']
+         + ncc_test_flags + ncc_static_descriptor_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
+)
 
 if host_machine.system() != 'windows' and cc.has_header('pthread.h')
   test('ncc_constexpr_pthread', test_runner,
@@ -574,6 +640,15 @@ test('ncc_gc_stack_maps_system_header_user_function_kept', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_stack_maps_system_header.c',
           '.function_name = "gc_stack_maps_system_header_fixture"']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_homebrew_header_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_homebrew_header.c',
+          '.function_name = "ncc_fake_homebrew_inline"']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
   depends : ncc_exe,

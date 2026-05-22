@@ -38,6 +38,10 @@ option('array_literal_data_expr',
        type: 'string',
        value: '',
        description: 'Override the expression used as the array literal data pointer')
+option('static_object_entry_attr',
+       type: 'string',
+       value: '',
+       description: 'Attribute text emitted on generated static-object descriptor entries')
 option('vargs_type',
        type: 'string',
        value: '',

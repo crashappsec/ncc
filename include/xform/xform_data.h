@@ -69,6 +69,7 @@ typedef struct {
     const char                *rstr_static_ref_expr_plain;
     const char                *array_literal_data_template;
     const char                *array_literal_data_expr;
+    const char                *static_object_entry_attr;
     bool                       gc_stack_maps;
     bool                       gc_stack_maps_relaxed;
     ncc_gc_stack_root_t       *gc_stack_roots;

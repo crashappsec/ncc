@@ -582,8 +582,11 @@ this syntax.
 The generated C uses static backing storage and initializes the array
 value with `.data`, `.len`, `.cap`, `.lock`, `.allocator`,
 `.scan_kind`, `.scan_cb`, and `.scan_user`. Embedding runtimes can
-override the backing-storage templates to wrap the static data in their
-own allocation headers for GC and memory-introspection support.
+override the backing-storage templates to emit static-object descriptor
+records next to the generated storage for GC and memory-introspection
+support. These templates should emit ordinary C declarations, not macro
+calls that depend on source preprocessor definitions, because ncc
+inserts generated code after preprocessing.
 
 ### n00b GC Stack Maps
 
@@ -658,6 +661,7 @@ Pass these with `meson setup -Doption=value`:
 | `rstr_static_ref_expr_plain` | (built-in) | Address expression template for plain `r""` literals embedded in static array literal initializers |
 | `array_literal_data_template` | (built-in) | Declaration template for array literal backing storage |
 | `array_literal_data_expr` | (built-in) | Expression used as the generated array `.data` pointer |
+| `static_object_entry_attr` | empty | Attribute text emitted on static-object descriptor entry declarations |
 | `gc_stack_maps` | `false` | Enable n00b GC stack-map emission by default for this ncc binary |
 | `coverage` | `false` | Enable clang source-based code coverage |
 
@@ -685,6 +689,7 @@ arguments reach clang.
 | `--ncc-rstr-static-ref-expr-plain=EXPR` | Override plain rstr address expression for static array literal initializers |
 | `--ncc-array-literal-data-template=TMPL` | Override array literal backing storage declaration template |
 | `--ncc-array-literal-data-expr=EXPR` | Override expression used as the generated array `.data` pointer |
+| `--ncc-static-object-entry-attr=ATTR` | Attribute text emitted on static-object descriptor entry declarations |
 | `--ncc-gc-stack-maps` | Emit n00b GC stack-map metadata in strict mode |
 | `--ncc-gc-stack-maps-relaxed` | Emit n00b GC stack maps while skipping unsupported local roots |
 | `--ncc-no-gc-stack-maps` | Disable n00b GC stack-map metadata for this invocation |
@@ -714,6 +719,16 @@ Templates use `$N` positional slots:
 | `$3` | String data pointer |
 | `$4` | Codepoint count |
 | `$5` | Styling data pointer |
+| `$6` | Type hash for the configured rich-string pointer type |
+| `$7` | Reserved wrapper/static name |
+| `$8` | Static-object descriptor variable name |
+| `$9` | Static-object descriptor entry variable name |
+| `$10` | Static-object object id |
+| `$11` | Static-object flags (`2` for mutable in the current transform) |
+| `$12` | GC scan kind (`1`, no scan) |
+| `$13` | GC scan callback (`nullptr`) |
+| `$14` | GC scan user data (`nullptr`) |
+| `$15` | Static-object entry attribute text |
 
 **Plain template slots:**
 | Slot | Content |
@@ -722,6 +737,16 @@ Templates use `$N` positional slots:
 | `$1` | Byte count (`u8_bytes`) |
 | `$2` | String data pointer |
 | `$3` | Codepoint count |
+| `$4` | Type hash for the configured rich-string pointer type |
+| `$5` | Reserved wrapper/static name |
+| `$6` | Static-object descriptor variable name |
+| `$7` | Static-object descriptor entry variable name |
+| `$8` | Static-object object id |
+| `$9` | Static-object flags (`2` for mutable in the current transform) |
+| `$10` | GC scan kind (`1`, no scan) |
+| `$11` | GC scan callback (`nullptr`) |
+| `$12` | GC scan user data (`nullptr`) |
+| `$13` | Static-object entry attribute text |
 
 **Default templates** (built into ncc):
 ```c
@@ -748,13 +773,47 @@ meson setup build \
   -Drstr_string_type='my_string_t*' \
   -Dvargs_type='my_vargs_t' \
   -Donce_prefix='__my_' \
-  '-Drstr_template_styled=({$0 static struct{gc_header_t hdr; my_string_t obj;} $6={.hdr={.magic=0xdeadbeef,.type=$5,.len=sizeof(my_string_t)},.obj={.u8_bytes=$2,.data=$3,.codepoints=$4,.styling=$5}};&$6.obj;})' \
+  '-Drstr_template_styled=({$0 static struct{gc_header_t hdr; my_string_t obj;} $7={.hdr={.magic=0xdeadbeef,.type=$6,.len=sizeof(my_string_t)},.obj={.u8_bytes=$2,.data=$3,.codepoints=$4,.styling=$5}};&$7.obj;})' \
   '-Drstr_template_plain=({static struct{gc_header_t hdr; my_string_t obj;} $5={.hdr={.magic=0xdeadbeef,.type=$4,.len=sizeof(my_string_t)},.obj={.u8_bytes=$1,.data=$2,.codepoints=$3,.styling=((void*)0)}};&$5.obj;})'
 ```
 
-When overriding templates, additional `$N` slots beyond the defaults are
-available for the wrapper struct's own fields (e.g., `$5`/`$6`/`$7` for
-styled, `$4`/`$5` for plain).
+The static-ref rich-string templates used for `r""` values embedded in
+array literals use the same slot layout as the primary rich-string
+templates. Template expansion fails with a diagnostic if a template
+references a slot beyond the supported range.
+
+### Array Literal Templates
+
+`array_literal_data_template` emits the static backing storage for a
+non-empty array literal. `array_literal_data_expr` emits the expression
+used for the generated array value's `.data` field. Both templates use
+the same slot layout:
+
+| Slot | Content |
+|------|---------|
+| `$0` | Element type |
+| `$1` | Backing data variable name |
+| `$2` | Element count |
+| `$3` | Comma-joined initializer items |
+| `$4` | Type hash for `element_type *` |
+| `$5` | Pointer word count for pointer element arrays |
+| `$6` | GC scan kind (`1` none, `2` all pointers, `4` callback) |
+| `$7` | GC scan callback |
+| `$8` | GC scan user data |
+| `$9` | Reserved wrapper/static name |
+| `$10` | Nested-array shape variable name |
+| `$11` | Nested-array stride in words |
+| `$12` | Reserved |
+| `$13` | Nested-array shape declaration, or empty |
+| `$14` | `true` when the storage has no pointer scan needs |
+| `$15` | Static-object descriptor variable name |
+| `$16` | Static-object descriptor entry variable name |
+| `$17` | Static-object object id |
+| `$18` | Static-object flags (`2` for mutable in the current transform) |
+| `$19` | Static-object entry attribute text |
+
+The descriptor slots are intended for runtimes that publish generated
+static storage through linker sections or equivalent platform metadata.
 
 ## Environment Variables
 
