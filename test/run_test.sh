@@ -6,6 +6,8 @@
 # Modes:
 #   compile_run  — compile source, run the binary, expect exit 0
 #   preprocess   — run with -E, expect exit 0 and non-empty output
+#   preprocess_contains — run with -E, expect output to contain substring
+#   preprocess_not_contains — run with -E, expect output to omit substring
 #   no_ncc       — compile with --no-ncc, run the binary, expect exit 0
 #   expect_error — compile, expect non-zero exit
 #   expect_error_contains — compile, expect non-zero exit and stderr substring
@@ -65,6 +67,38 @@ case "$MODE" in
         OUTPUT=$("$NCC" "$@" -E "$SRC")
         if [ -z "$OUTPUT" ]; then
             echo "FAIL: -E produced empty output" >&2
+            exit 1
+        fi
+        ;;
+
+    preprocess_contains)
+        EXPECTED="$1"
+        shift || true
+        if [ -z "$EXPECTED" ]; then
+            echo "FAIL: expected output substring is required" >&2
+            exit 1
+        fi
+        "$NCC" "$@" -E "$SRC" > "$OUTBIN.c"
+        if ! grep -F -q "$EXPECTED" "$OUTBIN.c"; then
+            echo "FAIL: transformed output did not contain expected text:" \
+                 "$EXPECTED" >&2
+            cat "$OUTBIN.c" >&2
+            exit 1
+        fi
+        ;;
+
+    preprocess_not_contains)
+        UNEXPECTED="$1"
+        shift || true
+        if [ -z "$UNEXPECTED" ]; then
+            echo "FAIL: unexpected output substring is required" >&2
+            exit 1
+        fi
+        "$NCC" "$@" -E "$SRC" > "$OUTBIN.c"
+        if grep -F -q "$UNEXPECTED" "$OUTBIN.c"; then
+            echo "FAIL: transformed output contained unexpected text:" \
+                 "$UNEXPECTED" >&2
+            cat "$OUTBIN.c" >&2
             exit 1
         fi
         ;;

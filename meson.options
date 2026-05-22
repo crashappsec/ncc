@@ -62,3 +62,7 @@ option('mem_debug',
        type: 'boolean',
        value: false,
        description: 'Enable memory allocation tracking and per-stage reporting')
+option('gc_stack_maps',
+       type: 'boolean',
+       value: false,
+       description: 'Enable n00b GC stack-map emission by default for this ncc binary')

@@ -118,6 +118,13 @@ if mem_debug_enabled
   c_args += ['-DNCC_MEM_DEBUG']
 endif
 
+# Build-time default for n00b GC stack-map emission. The upstream ncc default
+# remains off; n00b can opt its compiler build into stack maps explicitly.
+gc_stack_maps_default = get_option('gc_stack_maps')
+if gc_stack_maps_default
+  c_args += ['-DNCC_GC_STACK_MAPS_DEFAULT']
+endif
+
 # Clang source-based code coverage
 coverage_enabled = get_option('coverage')
 coverage_args = []
@@ -169,6 +176,7 @@ src_xform = files(
   'src/xform/xform_constexpr.c',
   'src/xform/xform_constexpr_paste.c',
   'src/xform/xform_generic_struct.c',
+  'src/xform/xform_gc_stack_maps.c',
   'src/xform/xform_kargs_vargs.c',
   'src/xform/xform_once.c',
   'src/xform/xform_option.c',
@@ -374,6 +382,234 @@ test('ncc_rstr_ansi', test_runner,
   depends : [ncc_exe, libncc],
 )
 
+test('ncc_gc_stack_maps_default_off', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_flag.c', 'n00b_gc_stack_']
+         + ncc_test_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_flag_accepted', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_flag.c', 'n00b_gc_stack_push']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_root_discovery', test_runner,
+  args : [ncc_exe, 'preprocess', test_dir / 'test_gc_stack_maps_roots.c']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_pointer_array_words', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_roots.c', '.num_words = 3']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_aggregate_field_roots', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_roots.c', '& box.nested.inner']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_aggregate_not_word_range', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_roots.c', 'sizeof (box)']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_aggregate_array_field_roots', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_roots.c', 'filters [0].ctx']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_aggregate_array_not_pointer_array', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_roots.c', 'sizeof (filters)']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_flexible_member_field_root', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_roots.c', '& flex.known']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_flexible_member_not_sized', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_roots.c', 'flex.opaque']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_atomic_pointer_field', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_roots.c', '& holder.store']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_atomic_not_pointee_fields', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_roots.c', 'holder.store.next']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_atomic_aggregate_offset', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_roots.c', '__builtin_offsetof']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_atomic_aggregate_not_member_access', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_roots.c', 'atomic_store.next']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_cleanup_attr', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_roots.c',
+          'cleanup (n00b_gc_stack_pop)']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_scalar_array_not_root', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_scalar_array.c', '& values']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_empty_body_param', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_empty_body.c', 'n00b_gc_stack_push']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_function_pointer_name', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_function_pointer.c', '& fn']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_qualified_pointer_name', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_qualified_pointer.c', '& state']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_array_sizeof_bounds', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_array_sizeof.c',
+          'sizeof (vecs) / sizeof (void *)']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_computed_goto_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_computed_goto.c',
+          'n00b_gc_stack_push']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_relaxed_for_init_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'err_gc_stack_maps_for_init.c',
+          '& cursor']
+         + ncc_test_flags + ['--ncc-gc-stack-maps-relaxed'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_system_header_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_system_header.c',
+          '.function_name = "__sputc"']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_system_header_user_function_kept', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_system_header.c',
+          '.function_name = "gc_stack_maps_system_header_fixture"']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_thread_runtime_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_thread_runtime_skip.c',
+          'n00b_gc_stack_push']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_runtime_compile', test_runner,
+  args : [ncc_exe, 'compile_run', test_dir / 'test_gc_stack_maps_runtime.c']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_control_flow', test_runner,
+  args : [ncc_exe, 'compile_run',
+          test_dir / 'test_gc_stack_maps_control_flow.c']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_force_include_not_replayed', test_runner,
+  args : [ncc_exe, 'compile_run', test_dir / 'test_force_include_once.c']
+         + ncc_test_flags + ['-include', test_dir / 'force_include_once.h'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 test('ncc_verbose_binary_output', test_runner,
   args : [ncc_exe, 'verbose_binary_output', test_dir / 'test_bang.c'],
   env : {'NCC_COMPILER' : test_fake_binary_compiler.full_path()},
@@ -522,12 +758,31 @@ ncc_error_contains_tests = {
     test_dir / 'err_array_literal_unsupported_elem.c',
     'is not supported for static initialization yet',
   ],
+  'err_gc_stack_maps_unnamed_param': [
+    test_dir / 'err_gc_stack_maps_unnamed_param.c',
+    'pointer or aggregate parameter has no name',
+    '--ncc-gc-stack-maps',
+  ],
+  'err_gc_stack_maps_vla': [
+    test_dir / 'err_gc_stack_maps_vla.c',
+    'variable-length or incomplete array',
+    '--ncc-gc-stack-maps',
+  ],
+  'err_gc_stack_maps_for_init': [
+    test_dir / 'err_gc_stack_maps_for_init.c',
+    'unsupported statement context',
+    '--ncc-gc-stack-maps',
+  ],
 }
 
 foreach name, params : ncc_error_contains_tests
+  extra_args = []
+  if params.length() > 2
+    extra_args = [params[2]]
+  endif
   test('ncc_' + name, test_runner,
     args : [ncc_exe, 'expect_error_contains', params[0], params[1]]
-           + ncc_test_flags,
+           + ncc_test_flags + extra_args,
     suite : 'ncc',
     depends : ncc_exe,
   )

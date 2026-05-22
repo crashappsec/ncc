@@ -9,6 +9,7 @@
 //   --ncc-dump-tree        Dump parse tree (pre-transform)
 //   --ncc-dump-tree-raw    Dump parse tree with group wrapper nodes visible
 //   --ncc-dump-output      Dump emitted C to stderr
+//   --ncc-gc-stack-maps    Emit n00b GC stack-map metadata
 //   -E                     Preprocess + transform, emit to stdout
 //   -c                     Compile only (pipe to clang)
 //   -o FILE                Output file
@@ -60,6 +61,7 @@ extern void ncc_register_typehash_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_once_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_bang_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_rstr_xform(ncc_xform_registry_t *reg);
+extern void ncc_register_gc_stack_maps_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_constexpr_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_constexpr_paste_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_kargs_vargs_xform(ncc_xform_registry_t *reg);
@@ -229,6 +231,8 @@ typedef struct {
     bool         dump_tree;
     bool         dump_tree_raw;
     bool         dump_output;
+    bool         gc_stack_maps;
+    bool         gc_stack_maps_relaxed;
 
     // Dependency file generation (handled separately from compilation).
     bool         has_dep_flags; // -MD or -MMD present
@@ -264,6 +268,21 @@ typedef struct {
 } ncc_opts_t;
 
 #include "xform/xform_data.h"
+
+static void
+free_gc_stack_roots(ncc_gc_stack_root_t *root)
+{
+    while (root) {
+        ncc_gc_stack_root_t *next = root->next;
+        ncc_free(root->function_name);
+        ncc_free(root->name);
+        ncc_free(root->type_text);
+        ncc_free(root->address_expr);
+        ncc_free(root->num_words_expr);
+        ncc_free(root);
+        root = next;
+    }
+}
 
 static void
 add_clang_arg(ncc_opts_t *opts, const char *arg)
@@ -389,6 +408,10 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
 
     verbose = env_var_enabled("NCC_VERBOSE");
 
+#ifdef NCC_GC_STACK_MAPS_DEFAULT
+    opts->gc_stack_maps = true;
+#endif
+
     opts->compiler = getenv("NCC_COMPILER");
     if (opts->compiler) {
         ncc_verbose("using NCC_COMPILER=%s", opts->compiler);
@@ -465,6 +488,20 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
         }
         if (strcmp(arg, "--ncc-dump-output") == 0) {
             opts->dump_output = true;
+            continue;
+        }
+        if (strcmp(arg, "--ncc-gc-stack-maps") == 0) {
+            opts->gc_stack_maps = true;
+            continue;
+        }
+        if (strcmp(arg, "--ncc-gc-stack-maps-relaxed") == 0) {
+            opts->gc_stack_maps         = true;
+            opts->gc_stack_maps_relaxed = true;
+            continue;
+        }
+        if (strcmp(arg, "--ncc-no-gc-stack-maps") == 0) {
+            opts->gc_stack_maps         = false;
+            opts->gc_stack_maps_relaxed = false;
             continue;
         }
         if (strcmp(arg, "--ncc-constexpr-include") == 0) {
@@ -680,9 +717,10 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
                                            : opts->has_c ? "compile-only"
                                                          : "compile-and-link",
                 opts->compiler, opts->n_clang_args);
-    ncc_verbose("flags: -E=%d -c=%d std=%d dep=%d dump_tokens=%d dump_tree=%d dump_output=%d",
+    ncc_verbose("flags: -E=%d -c=%d std=%d dep=%d dump_tokens=%d dump_tree=%d dump_output=%d gc_stack_maps=%d",
                 opts->has_E, opts->has_c, opts->has_std, opts->has_dep_flags,
-                opts->dump_tokens, opts->dump_tree, opts->dump_output);
+                opts->dump_tokens, opts->dump_tree, opts->dump_output,
+                opts->gc_stack_maps);
     if (opts->constexpr_headers) {
         ncc_verbose("constexpr headers=%s", opts->constexpr_headers);
     }
@@ -714,6 +752,11 @@ print_help(void)
         "  --ncc-dump-tree      Dump parse tree (pre-transform)\n"
         "  --ncc-dump-tree-raw  Dump parse tree showing group wrapper nodes\n"
         "  --ncc-dump-output    Dump emitted C to stderr\n"
+        "  --ncc-gc-stack-maps  Emit n00b GC stack-map metadata\n"
+        "  --ncc-gc-stack-maps-relaxed\n"
+        "                       Emit n00b GC stack maps, skipping unsupported roots\n"
+        "  --ncc-no-gc-stack-maps\n"
+        "                       Disable n00b GC stack-map metadata\n"
         "  --ncc-constexpr-include HDRS\n"
         "                       Comma-separated headers for constexpr eval\n"
         "                       (e.g. '<myheader.h>,\"local.h\"')\n"
@@ -1487,6 +1530,9 @@ pipe_to_compiler(const ncc_opts_t *opts, const char *c_source, size_t c_len)
                 argv[ai++] = opts->clang_args[++i];
             }
         }
+        else if (strcmp(opts->clang_args[i], "-include") == 0) {
+            i++;
+        }
         else if (!is_linker_input(opts->clang_args[i])) {
             argv[ai++] = opts->clang_args[i];
         }
@@ -1892,6 +1938,7 @@ compile_file(ncc_opts_t *opts)
     ncc_register_once_xform(&xreg);
     ncc_register_bang_xform(&xreg);
     ncc_register_rstr_xform(&xreg);
+    ncc_register_gc_stack_maps_xform(&xreg);
     ncc_register_constexpr_xform(&xreg);
     ncc_register_constexpr_paste_xform(&xreg);
 
@@ -2084,6 +2131,8 @@ compile_file(ncc_opts_t *opts)
         .rstr_static_ref_expr_plain  = rstr_static_ref_expr_plain,
         .array_literal_data_template = array_literal_data_template,
         .array_literal_data_expr     = array_literal_data_expr,
+        .gc_stack_maps               = opts->gc_stack_maps,
+        .gc_stack_maps_relaxed       = opts->gc_stack_maps_relaxed,
     };
     ncc_dict_init(&xdata.option_meta,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
@@ -2092,6 +2141,10 @@ compile_file(ncc_opts_t *opts)
     ncc_dict_init(&xdata.generic_struct_decls,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
     ncc_dict_init(&xdata.array_types,
+                            ncc_hash_cstring, ncc_dict_cstr_eq);
+    ncc_dict_init(&xdata.gc_aggregate_types,
+                            ncc_hash_cstring, ncc_dict_cstr_eq);
+    ncc_dict_init(&xdata.gc_pointer_typedefs,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
     xctx.user_data = &xdata;
     ncc_verbose("applying transforms");
@@ -2109,6 +2162,9 @@ compile_file(ncc_opts_t *opts)
     ncc_dict_free(&xdata.option_decls);
     ncc_dict_free(&xdata.generic_struct_decls);
     ncc_dict_free(&xdata.array_types);
+    ncc_dict_free(&xdata.gc_aggregate_types);
+    ncc_dict_free(&xdata.gc_pointer_typedefs);
+    free_gc_stack_roots(xdata.gc_stack_roots);
     ncc_template_registry_free(&tmpl_reg);
     ncc_xform_registry_free(&xreg);
 

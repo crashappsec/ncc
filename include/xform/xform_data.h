@@ -20,6 +20,33 @@ typedef struct {
     ncc_meta_entry_t entries[NCC_META_TABLE_SIZE];
 } ncc_meta_table_t;
 
+typedef enum {
+    NCC_GC_STACK_ROOT_PARAM,
+    NCC_GC_STACK_ROOT_LOCAL,
+} ncc_gc_stack_root_kind_t;
+
+typedef enum {
+    NCC_GC_STACK_ROOT_POINTER,
+    NCC_GC_STACK_ROOT_POINTER_ARRAY,
+    NCC_GC_STACK_ROOT_AGGREGATE,
+} ncc_gc_stack_root_shape_t;
+
+typedef struct ncc_gc_stack_root_t {
+    char                       *function_name;
+    char                       *name;
+    char                       *type_text;
+    char                       *address_expr;
+    char                       *num_words_expr;
+    ncc_gc_stack_root_kind_t    kind;
+    ncc_gc_stack_root_shape_t   shape;
+    uint64_t                    num_words;
+    uint32_t                    line;
+    uint32_t                    col;
+    ncc_parse_tree_t           *scope;
+    ncc_parse_tree_t           *declaration;
+    struct ncc_gc_stack_root_t *next;
+} ncc_gc_stack_root_t;
+
 typedef struct {
     const char                *compiler;
     const char                *constexpr_headers;
@@ -28,6 +55,8 @@ typedef struct {
     ncc_dict_t                 option_decls;
     ncc_dict_t                 generic_struct_decls;
     ncc_dict_t                 array_types;
+    ncc_dict_t                 gc_aggregate_types;
+    ncc_dict_t                 gc_pointer_typedefs;
     ncc_template_registry_t   *template_reg;
     const char                *vargs_type;
     const char                *once_prefix;
@@ -40,6 +69,10 @@ typedef struct {
     const char                *rstr_static_ref_expr_plain;
     const char                *array_literal_data_template;
     const char                *array_literal_data_expr;
+    bool                       gc_stack_maps;
+    bool                       gc_stack_maps_relaxed;
+    ncc_gc_stack_root_t       *gc_stack_roots;
+    size_t                     gc_stack_root_count;
 } ncc_xform_data_t;
 
 static inline ncc_xform_data_t *ncc_xform_get_data(ncc_xform_ctx_t *ctx) {
