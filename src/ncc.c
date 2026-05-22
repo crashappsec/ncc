@@ -61,6 +61,7 @@ extern void ncc_register_typehash_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_once_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_bang_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_rstr_xform(ncc_xform_registry_t *reg);
+extern void ncc_register_gc_stack_maps_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_constexpr_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_constexpr_paste_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_kargs_vargs_xform(ncc_xform_registry_t *reg);
@@ -266,6 +267,19 @@ typedef struct {
 } ncc_opts_t;
 
 #include "xform/xform_data.h"
+
+static void
+free_gc_stack_roots(ncc_gc_stack_root_t *root)
+{
+    while (root) {
+        ncc_gc_stack_root_t *next = root->next;
+        ncc_free(root->function_name);
+        ncc_free(root->name);
+        ncc_free(root->type_text);
+        ncc_free(root);
+        root = next;
+    }
+}
 
 static void
 add_clang_arg(ncc_opts_t *opts, const char *arg)
@@ -1910,6 +1924,7 @@ compile_file(ncc_opts_t *opts)
     ncc_register_once_xform(&xreg);
     ncc_register_bang_xform(&xreg);
     ncc_register_rstr_xform(&xreg);
+    ncc_register_gc_stack_maps_xform(&xreg);
     ncc_register_constexpr_xform(&xreg);
     ncc_register_constexpr_paste_xform(&xreg);
 
@@ -2128,6 +2143,7 @@ compile_file(ncc_opts_t *opts)
     ncc_dict_free(&xdata.option_decls);
     ncc_dict_free(&xdata.generic_struct_decls);
     ncc_dict_free(&xdata.array_types);
+    free_gc_stack_roots(xdata.gc_stack_roots);
     ncc_template_registry_free(&tmpl_reg);
     ncc_xform_registry_free(&xreg);
 

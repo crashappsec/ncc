@@ -176,6 +176,7 @@ src_xform = files(
   'src/xform/xform_constexpr.c',
   'src/xform/xform_constexpr_paste.c',
   'src/xform/xform_generic_struct.c',
+  'src/xform/xform_gc_stack_maps.c',
   'src/xform/xform_kargs_vargs.c',
   'src/xform/xform_once.c',
   'src/xform/xform_option.c',
@@ -396,6 +397,13 @@ test('ncc_gc_stack_maps_flag_accepted', test_runner,
   depends : ncc_exe,
 )
 
+test('ncc_gc_stack_maps_root_discovery', test_runner,
+  args : [ncc_exe, 'preprocess', test_dir / 'test_gc_stack_maps_roots.c']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 test('ncc_verbose_binary_output', test_runner,
   args : [ncc_exe, 'verbose_binary_output', test_dir / 'test_bang.c'],
   env : {'NCC_COMPILER' : test_fake_binary_compiler.full_path()},
@@ -544,12 +552,26 @@ ncc_error_contains_tests = {
     test_dir / 'err_array_literal_unsupported_elem.c',
     'is not supported for static initialization yet',
   ],
+  'err_gc_stack_maps_unnamed_param': [
+    test_dir / 'err_gc_stack_maps_unnamed_param.c',
+    'pointer or aggregate parameter has no name',
+    '--ncc-gc-stack-maps',
+  ],
+  'err_gc_stack_maps_vla': [
+    test_dir / 'err_gc_stack_maps_vla.c',
+    'variable-length or incomplete array',
+    '--ncc-gc-stack-maps',
+  ],
 }
 
 foreach name, params : ncc_error_contains_tests
+  extra_args = []
+  if params.length() > 2
+    extra_args = [params[2]]
+  endif
   test('ncc_' + name, test_runner,
     args : [ncc_exe, 'expect_error_contains', params[0], params[1]]
-           + ncc_test_flags,
+           + ncc_test_flags + extra_args,
     suite : 'ncc',
     depends : ncc_exe,
   )
