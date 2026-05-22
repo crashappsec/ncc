@@ -551,6 +551,40 @@ The `r""` prefix triggers compile-time parsing of markup tags. The
 transform emits a static compound literal with pre-computed styling
 data, so there is zero runtime parsing cost.
 
+### Static Array Literals (`[...]`)
+
+Array literals initialize `ncc_array_t(T)` or an embedding runtime's
+compatible array type from compile-time data:
+
+```c
+ncc_array_t(int) xs = [1, 2, 3];
+const ncc_array_t(ncc_array_t(int)) rows = [[1, 2], [3, 4, 5]];
+ncc_array_t(ncc_string_t *) words = [r"one", r"<b>two</b>"];
+```
+
+The v1 transform is intentionally limited to declaration
+initializers, where the declared target type and storage context are
+known. Module-scope declarations may be mutable or `const`; block-scope
+declarations must be `const`. A mutable local declaration such as
+`ncc_array_t(int) xs = [1, 2, 3];` inside a function is rejected because
+ncc does not yet perform the lifetime analysis needed for mutable local
+objects with static backing storage.
+
+Supported element types are static-initialization-safe scalars,
+pointers, rich-string pointers matching the configured rich-string
+type, and nested compatible array values. Unknown structs, runtime
+containers, dictionaries, lock-bearing values, allocator-owned values,
+and callback-heavy types are rejected until they opt in through a
+future static-literal type policy. Literal lists and dictionaries are
+reserved for a later literal modifier design and are not implemented by
+this syntax.
+
+The generated C uses static backing storage and initializes the array
+value with `.data`, `.len`, `.cap`, `.lock`, `.allocator`,
+`.scan_kind`, `.scan_cb`, and `.scan_user`. Embedding runtimes can
+override the backing-storage templates to wrap the static data in their
+own allocation headers for GC and memory-introspection support.
+
 
 ## Customization
 
@@ -568,8 +602,16 @@ Pass these with `meson setup -Doption=value`:
 | `vargs_type` | `ncc_vargs_t` | Struct type name for variadic parameters |
 | `once_prefix` | `__ncc_` | Identifier prefix for `once` guard variables |
 | `rstr_string_type` | `ncc_string_t*` | Type name used in `typehash()` for rich strings |
+| `rstr_text_style_type` | `ncc_text_style_t` | Text style type emitted for styled rich strings |
+| `rstr_style_record_type` | `ncc_style_record_t` | Style record type emitted for styled rich strings |
 | `rstr_template_styled` | (built-in) | Code template for styled `r""` literals |
 | `rstr_template_plain` | (built-in) | Code template for plain `r""` literals |
+| `rstr_static_ref_template_styled` | (built-in) | Declaration template for styled `r""` literals embedded in static array literal initializers |
+| `rstr_static_ref_template_plain` | (built-in) | Declaration template for plain `r""` literals embedded in static array literal initializers |
+| `rstr_static_ref_expr_styled` | (built-in) | Address expression template for styled `r""` literals embedded in static array literal initializers |
+| `rstr_static_ref_expr_plain` | (built-in) | Address expression template for plain `r""` literals embedded in static array literal initializers |
+| `array_literal_data_template` | (built-in) | Declaration template for array literal backing storage |
+| `array_literal_data_expr` | (built-in) | Expression used as the generated array `.data` pointer |
 | `coverage` | `false` | Enable clang source-based code coverage |
 
 These same options can be overridden per-invocation via CLI flags (see
@@ -586,8 +628,16 @@ arguments reach clang.
 | `--ncc-vargs-type=TYPE` | Override vargs struct type name |
 | `--ncc-once-prefix=PREFIX` | Override once-guard prefix |
 | `--ncc-rstr-string-type=TYPE` | Override rstr string type for typehash |
+| `--ncc-rstr-text-style-type=TYPE` | Override styled rstr text style type |
+| `--ncc-rstr-style-record-type=TYPE` | Override styled rstr style record type |
 | `--ncc-rstr-template-styled=TMPL` | Override styled rstr template |
 | `--ncc-rstr-template-plain=TMPL` | Override plain rstr template |
+| `--ncc-rstr-static-ref-template-styled=TMPL` | Override styled rstr declaration template for static array literal initializers |
+| `--ncc-rstr-static-ref-template-plain=TMPL` | Override plain rstr declaration template for static array literal initializers |
+| `--ncc-rstr-static-ref-expr-styled=EXPR` | Override styled rstr address expression for static array literal initializers |
+| `--ncc-rstr-static-ref-expr-plain=EXPR` | Override plain rstr address expression for static array literal initializers |
+| `--ncc-array-literal-data-template=TMPL` | Override array literal backing storage declaration template |
+| `--ncc-array-literal-data-expr=EXPR` | Override expression used as the generated array `.data` pointer |
 | `--ncc-constexpr-include=HDRS` | Headers for constexpr eval programs |
 | `--ncc-dump-tokens` | Dump token stream to stderr |
 | `--ncc-dump-tree` | Dump parse tree to stderr |

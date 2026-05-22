@@ -67,6 +67,30 @@ rstr_plain = get_option('rstr_template_plain')
 if rstr_plain != ''
   c_args += ['-DNCC_RSTR_TEMPLATE_PLAIN="' + rstr_plain + '"']
 endif
+rstr_static_ref_styled = get_option('rstr_static_ref_template_styled')
+if rstr_static_ref_styled != ''
+  c_args += ['-DNCC_RSTR_STATIC_REF_TEMPLATE_STYLED="' + rstr_static_ref_styled + '"']
+endif
+rstr_static_ref_plain = get_option('rstr_static_ref_template_plain')
+if rstr_static_ref_plain != ''
+  c_args += ['-DNCC_RSTR_STATIC_REF_TEMPLATE_PLAIN="' + rstr_static_ref_plain + '"']
+endif
+rstr_static_ref_expr_styled = get_option('rstr_static_ref_expr_styled')
+if rstr_static_ref_expr_styled != ''
+  c_args += ['-DNCC_RSTR_STATIC_REF_EXPR_STYLED="' + rstr_static_ref_expr_styled + '"']
+endif
+rstr_static_ref_expr_plain = get_option('rstr_static_ref_expr_plain')
+if rstr_static_ref_expr_plain != ''
+  c_args += ['-DNCC_RSTR_STATIC_REF_EXPR_PLAIN="' + rstr_static_ref_expr_plain + '"']
+endif
+array_literal_data_template = get_option('array_literal_data_template')
+if array_literal_data_template != ''
+  c_args += ['-DNCC_ARRAY_LITERAL_DATA_TEMPLATE="' + array_literal_data_template + '"']
+endif
+array_literal_data_expr = get_option('array_literal_data_expr')
+if array_literal_data_expr != ''
+  c_args += ['-DNCC_ARRAY_LITERAL_DATA_EXPR="' + array_literal_data_expr + '"']
+endif
 vargs_type_opt = get_option('vargs_type')
 if vargs_type_opt != ''
   c_args += ['-DNCC_VARGS_TYPE="' + vargs_type_opt + '"']
@@ -78,6 +102,14 @@ endif
 rstr_string_type_opt = get_option('rstr_string_type')
 if rstr_string_type_opt != ''
   c_args += ['-DNCC_RSTR_STRING_TYPE="' + rstr_string_type_opt + '"']
+endif
+rstr_text_style_type_opt = get_option('rstr_text_style_type')
+if rstr_text_style_type_opt != ''
+  c_args += ['-DNCC_RSTR_TEXT_STYLE_TYPE="' + rstr_text_style_type_opt + '"']
+endif
+rstr_style_record_type_opt = get_option('rstr_style_record_type')
+if rstr_style_record_type_opt != ''
+  c_args += ['-DNCC_RSTR_STYLE_RECORD_TYPE="' + rstr_style_record_type_opt + '"']
 endif
 
 # Memory debug tracking
@@ -131,6 +163,7 @@ src_util = files(
 
 src_xform = files(
   'src/xform/transform.c',
+  'src/xform/xform_array_literal.c',
   'src/xform/xform_helpers.c',
   'src/xform/xform_bang.c',
   'src/xform/xform_constexpr.c',
@@ -218,6 +251,14 @@ test_bnf = executable('test_bnf',
 )
 test('bnf_c_parse', test_bnf, suite : 'ncc')
 
+test_array = executable('test_array',
+  'test/test_array.c',
+  c_args : c_args + coverage_args,
+  link_args : coverage_link_args,
+  dependencies : libncc_dep,
+)
+test('array_layout', test_array, suite : 'ncc')
+
 test_xform_template = executable('test_xform_template',
   'test/test_xform_template.c',
   c_args : c_args + coverage_args,
@@ -272,12 +313,19 @@ ncc_test_flags = [
   '--ncc-rstr-string-type=ncc_string_t*',
   '--ncc-rstr-template-styled=({$0 static ncc_string_t $1={.u8_bytes=$2,.data=$3,.codepoints=$4,.styling=$5};&$1;})',
   '--ncc-rstr-template-plain=({static ncc_string_t $0={.u8_bytes=$1,.data=$2,.codepoints=$3,.styling=((void*)0)};&$0;})',
+  '--ncc-rstr-static-ref-template-styled=$0 static ncc_string_t $1={.u8_bytes=$2,.data=$3,.codepoints=$4,.styling=$5};',
+  '--ncc-rstr-static-ref-template-plain=static ncc_string_t $0={.u8_bytes=$1,.data=$2,.codepoints=$3,.styling=((void*)0)};',
+  '--ncc-rstr-static-ref-expr-styled=&$1',
+  '--ncc-rstr-static-ref-expr-plain=&$0',
+  '--ncc-array-literal-data-template=static $0 $1[]={$3};',
+  '--ncc-array-literal-data-expr=$1',
   '-I' + ncc_include_dir,
 ]
 
 # Compiler-level tests (run through ncc executable)
 ncc_compile_tests = {
   'bang':          ['compile_run',  test_dir / 'test_bang.c'],
+  'array_literal': ['compile_run',  test_dir / 'test_array_literal.c'],
   'constexpr':    ['compile_run',  test_dir / 'test_constexpr.c'],
   'kargs':        ['compile_run',  test_dir / 'test_kargs.c'],
   'kargs_vargs':  ['compile_run',  test_dir / 'test_kargs_vargs.c'],
@@ -436,6 +484,50 @@ ncc_error_tests = {
 foreach name, src : ncc_error_tests
   test('ncc_' + name, test_runner,
     args : [ncc_exe, 'expect_error', src],
+    suite : 'ncc',
+    depends : ncc_exe,
+  )
+endforeach
+
+ncc_error_contains_tests = {
+  'err_array_literal_local_mutable': [
+    test_dir / 'err_array_literal_local_mutable.c',
+    'non-const local array literal',
+  ],
+  'err_array_literal_nested_mismatch': [
+    test_dir / 'err_array_literal_nested_mismatch.c',
+    'must be an array literal like',
+  ],
+  'err_array_literal_non_array_target': [
+    test_dir / 'err_array_literal_non_array_target.c',
+    'requires an ncc_array_t(T) or n00b_array_t(T) object target',
+  ],
+  'err_array_literal_pointer_target': [
+    test_dir / 'err_array_literal_pointer_target.c',
+    'must target an array object, not a pointer',
+  ],
+  'err_array_literal_rstr_type': [
+    test_dir / 'err_array_literal_rstr_type.c',
+    'r-string array element requires element type',
+  ],
+  'err_array_literal_scalar_nested': [
+    test_dir / 'err_array_literal_scalar_nested.c',
+    'is scalar, so nested array literal',
+  ],
+  'err_array_literal_statement': [
+    test_dir / 'err_array_literal_statement.c',
+    'array literals are currently supported only',
+  ],
+  'err_array_literal_unsupported_elem': [
+    test_dir / 'err_array_literal_unsupported_elem.c',
+    'is not supported for static initialization yet',
+  ],
+}
+
+foreach name, params : ncc_error_contains_tests
+  test('ncc_' + name, test_runner,
+    args : [ncc_exe, 'expect_error_contains', params[0], params[1]]
+           + ncc_test_flags,
     suite : 'ncc',
     depends : ncc_exe,
   )

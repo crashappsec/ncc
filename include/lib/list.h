@@ -402,6 +402,11 @@ ncc_list_decl(ncc_string_t);
             .data      = _bl_lp->data,                                         \
             .len       = _bl_lp->len,                                          \
             .cap       = _bl_lp->cap,                                          \
+            .lock      = nullptr,                                              \
+            .allocator = nullptr,                                              \
+            .scan_kind = NCC_GC_SCAN_KIND_DEFAULT,                             \
+            .scan_cb   = nullptr,                                              \
+            .scan_user = nullptr,                                              \
         };                                                                     \
         _bl_lp->data      = nullptr;                                           \
         _bl_lp->len       = 0;                                                 \

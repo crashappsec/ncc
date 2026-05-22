@@ -202,6 +202,44 @@ load_c_grammar(void)
     return g;
 }
 
+static bool
+parse_c_source(ncc_grammar_t *g, const char *src)
+{
+    ncc_buffer_t *buf = ncc_buffer_from_bytes(src, (int64_t)strlen(src));
+    ncc_scanner_t *scanner = ncc_scanner_new(buf, c_tokenize, g,
+                                             ncc_option_none(ncc_string_t),
+                                             nullptr, nullptr);
+    ncc_token_stream_t *ts = ncc_token_stream_new(scanner);
+    ncc_pwz_parser_t *p = ncc_pwz_new(g);
+    assert(p);
+
+    bool ok = ncc_pwz_parse(p, ts);
+
+    ncc_pwz_free(p);
+    ncc_token_stream_free(ts);
+    ncc_scanner_free(scanner);
+
+    return ok;
+}
+
+static void
+assert_c_parse(ncc_grammar_t *g, const char *src)
+{
+    if (!parse_c_source(g, src)) {
+        fprintf(stderr, "  [FAIL] expected parse success for:\n%s\n", src);
+        assert(false);
+    }
+}
+
+static void
+assert_c_parse_rejects(ncc_grammar_t *g, const char *src)
+{
+    if (parse_c_source(g, src)) {
+        fprintf(stderr, "  [FAIL] expected parse rejection for:\n%s\n", src);
+        assert(false);
+    }
+}
+
 // ============================================================================
 // Test: load grammar
 // ============================================================================
@@ -279,6 +317,43 @@ test_parse_simple_c(void)
     ncc_grammar_free(g);
 }
 
+static void
+test_parse_array_literal_initializers(void)
+{
+    printf("Test: Parse array literal initializers...\n");
+
+    ncc_grammar_t *g = load_c_grammar();
+
+    if (!g) {
+        printf("  SKIP\n");
+        return;
+    }
+
+    assert_c_parse(g,
+                   "int xs = [1, 2, 3];\n"
+                   "int empty = [];\n"
+                   "int nested = [[1, 2], [3, 4]];\n");
+    assert_c_parse(g,
+                   "int main(void) {\n"
+                   "  const int xs = [1, 2, 3,];\n"
+                   "  return 0;\n"
+                   "}\n");
+    assert_c_parse(g,
+                   "[[maybe_unused]] int attr_preserved = 1;\n"
+                   "int main(void) {\n"
+                   "  [[maybe_unused]] int local_attr = 2;\n"
+                   "  return local_attr;\n"
+                   "}\n");
+    assert_c_parse_rejects(g,
+                           "int main(void) {\n"
+                           "  [1, 2, 3];\n"
+                           "  return 0;\n"
+                           "}\n");
+
+    printf("  PASS\n");
+    ncc_grammar_free(g);
+}
+
 // ============================================================================
 // Test: BNF preprocessing
 // ============================================================================
@@ -315,6 +390,7 @@ main(void)
     test_bnf_preprocess();
     test_load_grammar();
     test_parse_simple_c();
+    test_parse_array_literal_initializers();
 
     printf("\nAll BNF tests passed.\n");
     return 0;

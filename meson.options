@@ -14,6 +14,30 @@ option('rstr_template_plain',
        type: 'string',
        value: '',
        description: 'Override the default plain rstr code generation template')
+option('rstr_static_ref_template_styled',
+       type: 'string',
+       value: '',
+       description: 'Override the styled rstr static-ref declaration template')
+option('rstr_static_ref_template_plain',
+       type: 'string',
+       value: '',
+       description: 'Override the plain rstr static-ref declaration template')
+option('rstr_static_ref_expr_styled',
+       type: 'string',
+       value: '',
+       description: 'Override the styled rstr static-ref expression template')
+option('rstr_static_ref_expr_plain',
+       type: 'string',
+       value: '',
+       description: 'Override the plain rstr static-ref expression template')
+option('array_literal_data_template',
+       type: 'string',
+       value: '',
+       description: 'Override the array literal backing storage declaration template')
+option('array_literal_data_expr',
+       type: 'string',
+       value: '',
+       description: 'Override the expression used as the array literal data pointer')
 option('vargs_type',
        type: 'string',
        value: '',
@@ -26,6 +50,14 @@ option('rstr_string_type',
        type: 'string',
        value: '',
        description: 'Override the rstr string type name for typehash (default: ncc_string_t*)')
+option('rstr_text_style_type',
+       type: 'string',
+       value: '',
+       description: 'Override the styled rstr text style type name (default: ncc_text_style_t)')
+option('rstr_style_record_type',
+       type: 'string',
+       value: '',
+       description: 'Override the styled rstr style record type name (default: ncc_style_record_t)')
 option('mem_debug',
        type: 'boolean',
        value: false,

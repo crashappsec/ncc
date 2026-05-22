@@ -27,10 +27,19 @@ typedef struct {
     ncc_dict_t                 option_meta;
     ncc_dict_t                 option_decls;
     ncc_dict_t                 generic_struct_decls;
+    ncc_dict_t                 array_types;
     ncc_template_registry_t   *template_reg;
     const char                *vargs_type;
     const char                *once_prefix;
     const char                *rstr_string_type;
+    const char                *rstr_text_style_type;
+    const char                *rstr_style_record_type;
+    const char                *rstr_static_ref_template_styled;
+    const char                *rstr_static_ref_template_plain;
+    const char                *rstr_static_ref_expr_styled;
+    const char                *rstr_static_ref_expr_plain;
+    const char                *array_literal_data_template;
+    const char                *array_literal_data_expr;
 } ncc_xform_data_t;
 
 static inline ncc_xform_data_t *ncc_xform_get_data(ncc_xform_ctx_t *ctx) {

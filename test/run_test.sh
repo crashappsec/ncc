@@ -8,6 +8,7 @@
 #   preprocess   — run with -E, expect exit 0 and non-empty output
 #   no_ncc       — compile with --no-ncc, run the binary, expect exit 0
 #   expect_error — compile, expect non-zero exit
+#   expect_error_contains — compile, expect non-zero exit and stderr substring
 #   depfile      — compile with -MMD -MF, expect a populated depfile
 #   depfile_md   — -MD -MF targets the requested object path
 #   depfile_default — -MMD without -MF writes the default .d path
@@ -76,6 +77,29 @@ case "$MODE" in
     expect_error)
         if "$NCC" "$@" -o "$OUTBIN" "$SRC" 2>/dev/null; then
             echo "FAIL: expected non-zero exit from ncc" >&2
+            exit 1
+        fi
+        ;;
+
+    expect_error_contains)
+        EXPECTED="$1"
+        shift || true
+        if [ -z "$EXPECTED" ]; then
+            echo "FAIL: expected diagnostic substring is required" >&2
+            exit 1
+        fi
+        set +e
+        "$NCC" "$@" -o "$OUTBIN" "$SRC" 2> "$OUTBIN.stderr"
+        STATUS=$?
+        set -e
+        if [ "$STATUS" -eq 0 ]; then
+            echo "FAIL: expected non-zero exit from ncc" >&2
+            exit 1
+        fi
+        if ! grep -F -q "$EXPECTED" "$OUTBIN.stderr"; then
+            echo "FAIL: diagnostic did not contain expected text:" \
+                 "$EXPECTED" >&2
+            cat "$OUTBIN.stderr" >&2
             exit 1
         fi
         ;;
