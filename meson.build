@@ -445,6 +445,14 @@ test('ncc_gc_stack_maps_runtime_compile', test_runner,
   depends : ncc_exe,
 )
 
+test('ncc_gc_stack_maps_control_flow', test_runner,
+  args : [ncc_exe, 'compile_run',
+          test_dir / 'test_gc_stack_maps_control_flow.c']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 test('ncc_verbose_binary_output', test_runner,
   args : [ncc_exe, 'verbose_binary_output', test_dir / 'test_bang.c'],
   env : {'NCC_COMPILER' : test_fake_binary_compiler.full_path()},
