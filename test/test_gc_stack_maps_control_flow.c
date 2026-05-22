@@ -47,6 +47,18 @@ struct macro_option {
 
 #define macro_wrapped_option_t(T) struct macro_option
 
+struct gc_stack_maps_exact_inner {
+    void *ptr;
+    int   scalar;
+};
+
+struct gc_stack_maps_exact_outer {
+    unsigned long                    disguised;
+    struct gc_stack_maps_exact_inner inner;
+    void                            *ptrs[2];
+    int                              tag;
+};
+
 void
 n00b_gc_stack_push(n00b_gc_stack_frame_t *frame,
                    const n00b_gc_stack_map_t *map,
@@ -268,6 +280,29 @@ gc_stack_maps_manual_api_fixture(void *input)
 }
 
 static int
+gc_stack_maps_aggregate_precision_fixture(void *live, unsigned long dead_bits)
+{
+    struct gc_stack_maps_exact_outer agg = {
+        .disguised = dead_bits,
+        .inner = {.ptr = live, .scalar = 1},
+        .ptrs = {live, 0},
+        .tag = 7,
+    };
+
+    expected = live;
+    if (!n00b_gc_stack_test_contains_expected()) {
+        return 100;
+    }
+
+    expected = (void *)dead_bits;
+    if (n00b_gc_stack_test_contains_expected()) {
+        return 101;
+    }
+
+    return agg.inner.ptr == live ? 0 : 102;
+}
+
+static int
 check_result(int rc)
 {
     if (rc != 0) {
@@ -324,6 +359,11 @@ main(void)
         return rc;
     }
     rc = check_result(gc_stack_maps_manual_api_fixture(&a));
+    if (rc) {
+        return rc;
+    }
+    rc = check_result(gc_stack_maps_aggregate_precision_fixture(&a,
+                                                               (unsigned long)&b));
     if (rc) {
         return rc;
     }

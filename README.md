@@ -605,15 +605,18 @@ static slot/map records, an array of root-slot addresses, a stack frame,
 and a cleanup-backed pop so ordinary C exits such as return, break,
 continue, and goto-out unwind frames in LIFO order.
 
-Supported roots are named pointer or aggregate parameters, local pointer
-variables, fixed-size local pointer arrays, and local aggregate values.
-Lexical scope is the lifetime boundary. This can retain objects longer
-than minimal liveness would, but it avoids losing a declared root before
-the block exits.
+Supported roots are named pointer or pointer-bearing aggregate parameters,
+local pointer variables, fixed-size local pointer arrays, and local aggregate
+values. Aggregate roots expand to pointer-bearing field slots, including
+nested aggregate fields and fixed arrays of aggregates; ncc does not publish
+the whole aggregate object as a `sizeof(root)` word range. Lexical scope is the
+lifetime boundary. This can retain objects longer than minimal liveness would,
+but it avoids losing a declared root before the block exits.
 
 Strict mode rejects unsupported root shapes with diagnostics, including
 unnamed pointer/aggregate parameters, variable-length or incomplete
-arrays, parenthesized pointer-array declarators, and roots declared in
+arrays, aggregate arrays with non-literal bounds, parenthesized
+pointer-array declarators, and roots declared in
 statement contexts such as `for` initializers. `--ncc-gc-stack-maps-relaxed`
 enables the same transform but skips unsupported local root shapes instead
 of failing the translation unit; this is intended for bootstrapping large
@@ -622,10 +625,11 @@ runtimes while coverage is still incomplete.
 The transform intentionally skips functions that would make exact stack
 publication unsafe or recursive: the generated/manual `n00b_gc_stack_*`
 API, n00b thread/safepoint/futex helpers, computed-goto functions,
-system-header functions, selected runtime helpers, and functions that
+functions declared in system headers, selected runtime helpers, and functions that
 manually call `n00b_gc_stack_push()` or `n00b_gc_stack_pop()`. Exact-only
 collection across arbitrary uninstrumented C boundaries, non-local exits,
-and precise field maps for arbitrary aggregate values remain future work.
+minimal last-use liveness, and active-member precision for unions remain
+future work.
 
 
 ## Customization

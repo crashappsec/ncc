@@ -35,6 +35,8 @@ typedef struct ncc_gc_stack_root_t {
     char                       *function_name;
     char                       *name;
     char                       *type_text;
+    char                       *address_expr;
+    char                       *num_words_expr;
     ncc_gc_stack_root_kind_t    kind;
     ncc_gc_stack_root_shape_t   shape;
     uint64_t                    num_words;
@@ -53,6 +55,8 @@ typedef struct {
     ncc_dict_t                 option_decls;
     ncc_dict_t                 generic_struct_decls;
     ncc_dict_t                 array_types;
+    ncc_dict_t                 gc_aggregate_types;
+    ncc_dict_t                 gc_pointer_typedefs;
     ncc_template_registry_t   *template_reg;
     const char                *vargs_type;
     const char                *once_prefix;
@@ -67,7 +71,6 @@ typedef struct {
     const char                *array_literal_data_expr;
     bool                       gc_stack_maps;
     bool                       gc_stack_maps_relaxed;
-    bool                       gc_stack_maps_helper_inserted;
     ncc_gc_stack_root_t       *gc_stack_roots;
     size_t                     gc_stack_root_count;
 } ncc_xform_data_t;

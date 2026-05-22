@@ -277,6 +277,8 @@ free_gc_stack_roots(ncc_gc_stack_root_t *root)
         ncc_free(root->function_name);
         ncc_free(root->name);
         ncc_free(root->type_text);
+        ncc_free(root->address_expr);
+        ncc_free(root->num_words_expr);
         ncc_free(root);
         root = next;
     }
@@ -2140,6 +2142,10 @@ compile_file(ncc_opts_t *opts)
                             ncc_hash_cstring, ncc_dict_cstr_eq);
     ncc_dict_init(&xdata.array_types,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
+    ncc_dict_init(&xdata.gc_aggregate_types,
+                            ncc_hash_cstring, ncc_dict_cstr_eq);
+    ncc_dict_init(&xdata.gc_pointer_typedefs,
+                            ncc_hash_cstring, ncc_dict_cstr_eq);
     xctx.user_data = &xdata;
     ncc_verbose("applying transforms");
     tree = ncc_xform_apply(&xreg, &xctx);
@@ -2156,6 +2162,8 @@ compile_file(ncc_opts_t *opts)
     ncc_dict_free(&xdata.option_decls);
     ncc_dict_free(&xdata.generic_struct_decls);
     ncc_dict_free(&xdata.array_types);
+    ncc_dict_free(&xdata.gc_aggregate_types);
+    ncc_dict_free(&xdata.gc_pointer_typedefs);
     free_gc_stack_roots(xdata.gc_stack_roots);
     ncc_template_registry_free(&tmpl_reg);
     ncc_xform_registry_free(&xreg);
