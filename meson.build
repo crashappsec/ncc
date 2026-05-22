@@ -391,7 +391,8 @@ test('ncc_gc_stack_maps_default_off', test_runner,
 )
 
 test('ncc_gc_stack_maps_flag_accepted', test_runner,
-  args : [ncc_exe, 'preprocess', test_dir / 'test_gc_stack_maps_flag.c']
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_flag.c', 'n00b_gc_stack_push']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
   depends : ncc_exe,
@@ -399,6 +400,46 @@ test('ncc_gc_stack_maps_flag_accepted', test_runner,
 
 test('ncc_gc_stack_maps_root_discovery', test_runner,
   args : [ncc_exe, 'preprocess', test_dir / 'test_gc_stack_maps_roots.c']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_pointer_array_words', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_roots.c', '.num_words = 3']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_cleanup_attr', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_roots.c',
+          'cleanup (__ncc_gc_stack_pop_cleanup)']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_scalar_array_not_root', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_scalar_array.c', '& values']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_empty_body_param', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_empty_body.c', 'n00b_gc_stack_push']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_runtime_compile', test_runner,
+  args : [ncc_exe, 'compile_run', test_dir / 'test_gc_stack_maps_runtime.c']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
   depends : ncc_exe,
@@ -560,6 +601,11 @@ ncc_error_contains_tests = {
   'err_gc_stack_maps_vla': [
     test_dir / 'err_gc_stack_maps_vla.c',
     'variable-length or incomplete array',
+    '--ncc-gc-stack-maps',
+  ],
+  'err_gc_stack_maps_for_init': [
+    test_dir / 'err_gc_stack_maps_for_init.c',
+    'unsupported statement context',
     '--ncc-gc-stack-maps',
   ],
 }
