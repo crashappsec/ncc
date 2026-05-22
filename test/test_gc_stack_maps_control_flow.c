@@ -28,6 +28,25 @@ static void *expected;
 static void *global_a;
 static void *global_b;
 
+static const n00b_gc_stack_slot_t manual_slots[] = {
+    {.root_index = 0, .num_words = 1},
+};
+
+static const n00b_gc_stack_map_t manual_map = {
+    .num_roots     = 1,
+    .num_slots     = 1,
+    .slots         = manual_slots,
+    .function_name = "manual",
+    .file_name     = __FILE__,
+};
+
+struct macro_option {
+    void *value;
+    int   has_value;
+};
+
+#define macro_wrapped_option_t(T) struct macro_option
+
 void
 n00b_gc_stack_push(n00b_gc_stack_frame_t *frame,
                    const n00b_gc_stack_map_t *map,
@@ -200,6 +219,55 @@ out:
 }
 
 static int
+gc_stack_maps_forward_goto_fixture(void *input)
+{
+    int base = n00b_gc_stack_test_depth();
+
+    goto add_arg;
+
+    void *skipped = input;
+    if (skipped) {
+        return 70;
+    }
+
+    macro_wrapped_option_t(unsigned long) macro_skipped =
+        (struct macro_option){.value = input, .has_value = input != 0};
+    if (macro_skipped.has_value) {
+        return 73;
+    }
+
+add_arg:;
+    {
+        void *after = input;
+        expected = input;
+        if (!after || !n00b_gc_stack_test_contains_expected()) {
+            return 71;
+        }
+    }
+
+    return n00b_gc_stack_test_depth() == base ? 0 : 72;
+}
+
+static int
+gc_stack_maps_manual_api_fixture(void *input)
+{
+    int base = n00b_gc_stack_test_depth();
+
+    void                 *local = input;
+    void                 *roots[] = {&local};
+    n00b_gc_stack_frame_t frame;
+
+    n00b_gc_stack_push(&frame, &manual_map, roots);
+    expected = input;
+    if (!local || !n00b_gc_stack_test_contains_expected()) {
+        return 80;
+    }
+    n00b_gc_stack_pop(&frame);
+
+    return n00b_gc_stack_test_depth() == base ? 0 : 81;
+}
+
+static int
 check_result(int rc)
 {
     if (rc != 0) {
@@ -248,6 +316,14 @@ main(void)
         return rc;
     }
     rc = check_result(gc_stack_maps_goto_fixture(&a));
+    if (rc) {
+        return rc;
+    }
+    rc = check_result(gc_stack_maps_forward_goto_fixture(&a));
+    if (rc) {
+        return rc;
+    }
+    rc = check_result(gc_stack_maps_manual_api_fixture(&a));
     if (rc) {
         return rc;
     }

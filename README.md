@@ -585,6 +585,48 @@ value with `.data`, `.len`, `.cap`, `.lock`, `.allocator`,
 override the backing-storage templates to wrap the static data in their
 own allocation headers for GC and memory-introspection support.
 
+### n00b GC Stack Maps
+
+ncc can emit n00b-compatible exact stack-map metadata for stack roots:
+
+```sh
+ncc --ncc-gc-stack-maps -c module.c
+```
+
+This feature is off by default in upstream ncc because the generated C
+references the n00b GC stack ABI. Embedding runtimes that enable it must
+make these names visible before transformed code is compiled:
+`n00b_gc_stack_slot_t`, `n00b_gc_stack_map_t`,
+`n00b_gc_stack_frame_t`, `n00b_gc_stack_push()`, and
+`n00b_gc_stack_pop()`.
+
+Generated code publishes root addresses, not root values. ncc emits
+static slot/map records, an array of root-slot addresses, a stack frame,
+and a cleanup-backed pop so ordinary C exits such as return, break,
+continue, and goto-out unwind frames in LIFO order.
+
+Supported roots are named pointer or aggregate parameters, local pointer
+variables, fixed-size local pointer arrays, and local aggregate values.
+Lexical scope is the lifetime boundary. This can retain objects longer
+than minimal liveness would, but it avoids losing a declared root before
+the block exits.
+
+Strict mode rejects unsupported root shapes with diagnostics, including
+unnamed pointer/aggregate parameters, variable-length or incomplete
+arrays, parenthesized pointer-array declarators, and roots declared in
+statement contexts such as `for` initializers. `--ncc-gc-stack-maps-relaxed`
+enables the same transform but skips unsupported local root shapes instead
+of failing the translation unit; this is intended for bootstrapping large
+runtimes while coverage is still incomplete.
+
+The transform intentionally skips functions that would make exact stack
+publication unsafe or recursive: the generated/manual `n00b_gc_stack_*`
+API, n00b thread/safepoint/futex helpers, computed-goto functions,
+system-header functions, selected runtime helpers, and functions that
+manually call `n00b_gc_stack_push()` or `n00b_gc_stack_pop()`. Exact-only
+collection across arbitrary uninstrumented C boundaries, non-local exits,
+and precise field maps for arbitrary aggregate values remain future work.
+
 
 ## Customization
 
@@ -612,6 +654,7 @@ Pass these with `meson setup -Doption=value`:
 | `rstr_static_ref_expr_plain` | (built-in) | Address expression template for plain `r""` literals embedded in static array literal initializers |
 | `array_literal_data_template` | (built-in) | Declaration template for array literal backing storage |
 | `array_literal_data_expr` | (built-in) | Expression used as the generated array `.data` pointer |
+| `gc_stack_maps` | `false` | Enable n00b GC stack-map emission by default for this ncc binary |
 | `coverage` | `false` | Enable clang source-based code coverage |
 
 These same options can be overridden per-invocation via CLI flags (see
@@ -638,6 +681,9 @@ arguments reach clang.
 | `--ncc-rstr-static-ref-expr-plain=EXPR` | Override plain rstr address expression for static array literal initializers |
 | `--ncc-array-literal-data-template=TMPL` | Override array literal backing storage declaration template |
 | `--ncc-array-literal-data-expr=EXPR` | Override expression used as the generated array `.data` pointer |
+| `--ncc-gc-stack-maps` | Emit n00b GC stack-map metadata in strict mode |
+| `--ncc-gc-stack-maps-relaxed` | Emit n00b GC stack maps while skipping unsupported local roots |
+| `--ncc-no-gc-stack-maps` | Disable n00b GC stack-map metadata for this invocation |
 | `--ncc-constexpr-include=HDRS` | Headers for constexpr eval programs |
 | `--ncc-dump-tokens` | Dump token stream to stderr |
 | `--ncc-dump-tree` | Dump parse tree to stderr |

@@ -232,6 +232,7 @@ typedef struct {
     bool         dump_tree_raw;
     bool         dump_output;
     bool         gc_stack_maps;
+    bool         gc_stack_maps_relaxed;
 
     // Dependency file generation (handled separately from compilation).
     bool         has_dep_flags; // -MD or -MMD present
@@ -491,8 +492,14 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
             opts->gc_stack_maps = true;
             continue;
         }
+        if (strcmp(arg, "--ncc-gc-stack-maps-relaxed") == 0) {
+            opts->gc_stack_maps         = true;
+            opts->gc_stack_maps_relaxed = true;
+            continue;
+        }
         if (strcmp(arg, "--ncc-no-gc-stack-maps") == 0) {
-            opts->gc_stack_maps = false;
+            opts->gc_stack_maps         = false;
+            opts->gc_stack_maps_relaxed = false;
             continue;
         }
         if (strcmp(arg, "--ncc-constexpr-include") == 0) {
@@ -744,6 +751,8 @@ print_help(void)
         "  --ncc-dump-tree-raw  Dump parse tree showing group wrapper nodes\n"
         "  --ncc-dump-output    Dump emitted C to stderr\n"
         "  --ncc-gc-stack-maps  Emit n00b GC stack-map metadata\n"
+        "  --ncc-gc-stack-maps-relaxed\n"
+        "                       Emit n00b GC stack maps, skipping unsupported roots\n"
         "  --ncc-no-gc-stack-maps\n"
         "                       Disable n00b GC stack-map metadata\n"
         "  --ncc-constexpr-include HDRS\n"
@@ -1519,6 +1528,9 @@ pipe_to_compiler(const ncc_opts_t *opts, const char *c_source, size_t c_len)
                 argv[ai++] = opts->clang_args[++i];
             }
         }
+        else if (strcmp(opts->clang_args[i], "-include") == 0) {
+            i++;
+        }
         else if (!is_linker_input(opts->clang_args[i])) {
             argv[ai++] = opts->clang_args[i];
         }
@@ -2118,6 +2130,7 @@ compile_file(ncc_opts_t *opts)
         .array_literal_data_template = array_literal_data_template,
         .array_literal_data_expr     = array_literal_data_expr,
         .gc_stack_maps               = opts->gc_stack_maps,
+        .gc_stack_maps_relaxed       = opts->gc_stack_maps_relaxed,
     };
     ncc_dict_init(&xdata.option_meta,
                             ncc_hash_cstring, ncc_dict_cstr_eq);

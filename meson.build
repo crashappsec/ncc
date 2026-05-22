@@ -438,6 +438,67 @@ test('ncc_gc_stack_maps_empty_body_param', test_runner,
   depends : ncc_exe,
 )
 
+test('ncc_gc_stack_maps_function_pointer_name', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_function_pointer.c', '& fn']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_qualified_pointer_name', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_qualified_pointer.c', '& state']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_array_sizeof_bounds', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_array_sizeof.c',
+          'sizeof (vecs) / sizeof (void *)']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_computed_goto_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_computed_goto.c',
+          'n00b_gc_stack_push']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_relaxed_for_init_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'err_gc_stack_maps_for_init.c',
+          '& cursor']
+         + ncc_test_flags + ['--ncc-gc-stack-maps-relaxed'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_system_header_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_system_header.c',
+          '.function_name = "__sputc"']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_thread_runtime_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_thread_runtime_skip.c',
+          'n00b_gc_stack_push']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 test('ncc_gc_stack_maps_runtime_compile', test_runner,
   args : [ncc_exe, 'compile_run', test_dir / 'test_gc_stack_maps_runtime.c']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
@@ -449,6 +510,13 @@ test('ncc_gc_stack_maps_control_flow', test_runner,
   args : [ncc_exe, 'compile_run',
           test_dir / 'test_gc_stack_maps_control_flow.c']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_force_include_not_replayed', test_runner,
+  args : [ncc_exe, 'compile_run', test_dir / 'test_force_include_once.c']
+         + ncc_test_flags + ['-include', test_dir / 'force_include_once.h'],
   suite : 'ncc',
   depends : ncc_exe,
 )

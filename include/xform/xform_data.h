@@ -66,6 +66,7 @@ typedef struct {
     const char                *array_literal_data_template;
     const char                *array_literal_data_expr;
     bool                       gc_stack_maps;
+    bool                       gc_stack_maps_relaxed;
     bool                       gc_stack_maps_helper_inserted;
     ncc_gc_stack_root_t       *gc_stack_roots;
     size_t                     gc_stack_root_count;

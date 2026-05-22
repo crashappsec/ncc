@@ -75,26 +75,6 @@ contains_leaf_text(ncc_parse_tree_t *node, const char *text)
     return false;
 }
 
-static int
-count_leaf_text(ncc_parse_tree_t *node, const char *text)
-{
-    if (!node) {
-        return 0;
-    }
-
-    if (ncc_tree_is_leaf(node)) {
-        return ncc_xform_leaf_text_eq(node, text) ? 1 : 0;
-    }
-
-    int    result = 0;
-    size_t nc     = ncc_tree_num_children(node);
-    for (size_t i = 0; i < nc; i++) {
-        result += count_leaf_text(ncc_tree_child(node, i), text);
-    }
-
-    return result;
-}
-
 typedef struct {
     ncc_parse_tree_t **data;
     size_t             len;
@@ -174,6 +154,142 @@ first_leaf_token(ncc_parse_tree_t *node)
     }
 
     return nullptr;
+}
+
+static const char *
+token_file(ncc_token_info_t *tok)
+{
+    if (!tok || !ncc_option_is_set(tok->file)) {
+        return nullptr;
+    }
+
+    ncc_string_t file = ncc_option_get(tok->file);
+    return file.data;
+}
+
+static bool
+token_file_looks_system_header(ncc_token_info_t *tok)
+{
+    const char *file = token_file(tok);
+    if (!file) {
+        return false;
+    }
+
+    return strstr(file, "/usr/include/") != nullptr
+        || strstr(file, "/usr/lib/clang/") != nullptr
+        || strstr(file, "/System/Library/Frameworks/") != nullptr
+        || strstr(file, "/opt/homebrew/") != nullptr
+        || strstr(file, "/usr/local/") != nullptr;
+}
+
+static bool
+node_starts_in_system_header(ncc_parse_tree_t *node)
+{
+    ncc_token_info_t *tok = first_leaf_token(node);
+    return tok && (tok->system_header || token_file_looks_system_header(tok));
+}
+
+static bool
+node_has_system_header_token(ncc_parse_tree_t *node)
+{
+    if (!node) {
+        return false;
+    }
+
+    if (ncc_tree_is_leaf(node)) {
+        ncc_token_info_t *tok = ncc_tree_leaf_value(node);
+        return tok && (tok->system_header || token_file_looks_system_header(tok));
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        if (node_has_system_header_token(ncc_tree_child(node, i))) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool
+node_direct_child_leaf_text(ncc_parse_tree_t *node, const char *text)
+{
+    if (!node || ncc_tree_is_leaf(node)) {
+        return false;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        ncc_parse_tree_t *child = ncc_tree_child(node, i);
+        if (child && ncc_tree_is_leaf(child)
+            && ncc_xform_leaf_text_eq(child, text)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool
+node_first_child_leaf_text(ncc_parse_tree_t *node, const char *text)
+{
+    if (!node || ncc_tree_is_leaf(node) || ncc_tree_num_children(node) == 0) {
+        return false;
+    }
+
+    ncc_parse_tree_t *child = ncc_tree_child(node, 0);
+    return child && ncc_tree_is_leaf(child)
+        && ncc_xform_leaf_text_eq(child, text);
+}
+
+static bool
+node_uses_computed_goto(ncc_parse_tree_t *node)
+{
+    if (!node || ncc_tree_is_leaf(node)) {
+        return false;
+    }
+
+    if (ncc_xform_nt_name_is(node, "jump_statement")
+        && node_first_child_leaf_text(node, "goto")
+        && node_direct_child_leaf_text(node, "*")) {
+        return true;
+    }
+
+    if (ncc_xform_nt_name_is(node, "unary_expression")
+        && node_first_child_leaf_text(node, "&&")) {
+        return true;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        if (node_uses_computed_goto(ncc_tree_child(node, i))) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool
+node_mentions_manual_gc_stack_api(ncc_parse_tree_t *node)
+{
+    if (!node) {
+        return false;
+    }
+
+    if (ncc_tree_is_leaf(node)) {
+        return ncc_xform_leaf_text_eq(node, "n00b_gc_stack_push")
+            || ncc_xform_leaf_text_eq(node, "n00b_gc_stack_pop");
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        if (node_mentions_manual_gc_stack_api(ncc_tree_child(node, i))) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static void
@@ -279,6 +395,201 @@ first_descendant_nt(ncc_parse_tree_t *node, const char *name)
     return nullptr;
 }
 
+static int32_t
+first_positive_token_index(ncc_parse_tree_t *node)
+{
+    if (!node) {
+        return 0;
+    }
+
+    if (ncc_tree_is_leaf(node)) {
+        ncc_token_info_t *tok = ncc_tree_leaf_value(node);
+        return tok && tok->index > 0 ? tok->index : 0;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        int32_t index = first_positive_token_index(ncc_tree_child(node, i));
+        if (index > 0) {
+            return index;
+        }
+    }
+
+    return 0;
+}
+
+static int32_t
+node_start_index(ncc_parse_tree_t *node)
+{
+    int32_t index = first_positive_token_index(node);
+    if (index > 0) {
+        return index;
+    }
+
+    ncc_token_info_t *tok = first_leaf_token(node);
+    return tok ? tok->index : 0;
+}
+
+static char *
+direct_goto_label_name(ncc_parse_tree_t *node)
+{
+    if (!node || ncc_tree_is_leaf(node)
+        || !ncc_xform_nt_name_is(node, "jump_statement")
+        || !node_first_child_leaf_text(node, "goto")
+        || node_direct_child_leaf_text(node, "*")) {
+        return nullptr;
+    }
+
+    ncc_parse_tree_t *id = first_descendant_nt(node, "identifier");
+    return id ? node_text(id) : nullptr;
+}
+
+static char *
+statement_label_name(ncc_parse_tree_t *node)
+{
+    if (!node || ncc_tree_is_leaf(node)
+        || !ncc_xform_nt_name_is(node, "label")
+        || contains_leaf_text(node, "case")
+        || contains_leaf_text(node, "default")) {
+        return nullptr;
+    }
+
+    ncc_parse_tree_t *id = first_descendant_nt(node, "identifier");
+    return id ? node_text(id) : nullptr;
+}
+
+static bool
+has_matching_label_after(ncc_parse_tree_t *node, const char *name,
+                         int32_t anchor_start)
+{
+    if (!node || ncc_tree_is_leaf(node)) {
+        return false;
+    }
+
+    char *label = statement_label_name(node);
+    if (label) {
+        bool match = node_start_index(node) > anchor_start
+                  && strcmp(label, name) == 0;
+        ncc_free(label);
+        if (match) {
+            return true;
+        }
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        if (has_matching_label_after(ncc_tree_child(node, i), name,
+                                     anchor_start)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool
+has_forward_goto_bypassing_anchor_r(ncc_parse_tree_t *root,
+                                    ncc_parse_tree_t *node,
+                                    int32_t anchor_start)
+{
+    if (!root || !node || ncc_tree_is_leaf(node)) {
+        return false;
+    }
+
+    char *name = direct_goto_label_name(node);
+    if (name) {
+        bool bypass = node_start_index(node) < anchor_start
+                   && has_matching_label_after(root, name, anchor_start);
+        ncc_free(name);
+        if (bypass) {
+            return true;
+        }
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        if (has_forward_goto_bypassing_anchor_r(root, ncc_tree_child(node, i),
+                                                anchor_start)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool
+has_forward_goto_bypassing_anchor(ncc_parse_tree_t *fn,
+                                  ncc_parse_tree_t *anchor)
+{
+    return fn && anchor
+        && has_forward_goto_bypassing_anchor_r(fn, fn,
+                                               node_start_index(anchor));
+}
+
+static bool
+node_first_leaf_text_eq(ncc_parse_tree_t *node, const char *text)
+{
+    ncc_token_info_t *tok = first_leaf_token(node);
+    if (!tok || !ncc_option_is_set(tok->value)) {
+        return false;
+    }
+
+    ncc_string_t value = ncc_option_get(tok->value);
+    return value.data && strcmp(value.data, text) == 0;
+}
+
+static bool
+node_starts_with_switch_case_label(ncc_parse_tree_t *node)
+{
+    return node_first_leaf_text_eq(node, "case")
+        || node_first_leaf_text_eq(node, "default");
+}
+
+static bool
+block_has_case_label_item(ncc_parse_tree_t *anchor)
+{
+    ncc_parse_tree_t *container = node_parent(anchor);
+
+    if (!container) {
+        return false;
+    }
+
+    size_t nc = ncc_tree_num_children(container);
+    for (size_t i = 0; i < nc; i++) {
+        if (node_starts_with_switch_case_label(ncc_tree_child(container, i))) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static int
+pointer_depth_in_declarator(ncc_parse_tree_t *node)
+{
+    if (!node || ncc_tree_is_leaf(node)) {
+        return 0;
+    }
+
+    if (ncc_xform_nt_name_is(node, "parameter_type_list")
+        || ncc_xform_nt_name_is(node, "assignment_expression")) {
+        return 0;
+    }
+
+    int count = 0;
+    if (ncc_xform_nt_name_is(node, "pointer")) {
+        count += node_direct_child_leaf_text(node, "*") ? 1 : 0;
+        count += node_direct_child_leaf_text(node, "^") ? 1 : 0;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        count += pointer_depth_in_declarator(ncc_tree_child(node, i));
+    }
+
+    return count;
+}
+
 static char *
 declarator_name(ncc_parse_tree_t *node)
 {
@@ -286,24 +597,47 @@ declarator_name(ncc_parse_tree_t *node)
         return nullptr;
     }
 
+    if (!ncc_tree_is_leaf(node)
+        && (ncc_xform_nt_name_is(node, "parameter_type_list")
+            || ncc_xform_nt_name_is(node, "assignment_expression"))) {
+        return nullptr;
+    }
+
     if (ncc_tree_is_leaf(node)) {
         const char *text = ncc_xform_leaf_text(node);
+        if (text
+            && (strcmp(text, "const") == 0
+                || strcmp(text, "restrict") == 0
+                || strcmp(text, "volatile") == 0
+                || strcmp(text, "_Atomic") == 0
+                || strcmp(text, "_Nullable") == 0
+                || strcmp(text, "_Nonnull") == 0
+                || strcmp(text, "_Null_unspecified") == 0
+                || strcmp(text, "__const__") == 0
+                || strcmp(text, "__const") == 0
+                || strcmp(text, "__restrict__") == 0
+                || strcmp(text, "__restrict") == 0
+                || strcmp(text, "__volatile__") == 0
+                || strcmp(text, "__volatile") == 0
+                || strcmp(text, "__nullable") == 0
+                || strcmp(text, "__nonnull") == 0
+                || strcmp(text, "__null_unspecified") == 0)) {
+            return nullptr;
+        }
         if (text && (isalpha((unsigned char)text[0]) || text[0] == '_')) {
             return copy_cstr(text);
         }
         return nullptr;
     }
 
-    char  *last = nullptr;
-    size_t nc   = ncc_tree_num_children(node);
+    size_t nc = ncc_tree_num_children(node);
     for (size_t i = 0; i < nc; i++) {
         char *candidate = declarator_name(ncc_tree_child(node, i));
         if (candidate) {
-            ncc_free(last);
-            last = candidate;
+            return candidate;
         }
     }
-    return last;
+    return nullptr;
 }
 
 static bool
@@ -439,8 +773,34 @@ parse_positive_integer_literal(const char *text, uint64_t *out)
 }
 
 static bool
+array_bound_allows_static_sizeof(const char *text)
+{
+    char *trimmed = trim_copy(text);
+    bool  saw_upper = false;
+    bool  ok        = trimmed[0] != '\0';
+
+    for (char *p = trimmed; ok && *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (isupper(c) || *p == '_') {
+            saw_upper = true;
+            continue;
+        }
+        if (isdigit(c) || isspace(c) || *p == '(' || *p == ')' || *p == '+'
+            || *p == '-' || *p == '*' || *p == '/' || *p == '%'
+            || *p == '<' || *p == '>' || *p == '|' || *p == '&'
+            || *p == '~') {
+            continue;
+        }
+        ok = false;
+    }
+
+    ncc_free(trimmed);
+    return ok && saw_upper;
+}
+
+static bool
 array_bound_product(ncc_parse_tree_t *node, uint64_t *product,
-                    ncc_parse_tree_t **bad_array)
+                    bool *use_sizeof, ncc_parse_tree_t **bad_array)
 {
     if (!node || ncc_tree_is_leaf(node)) {
         return true;
@@ -452,26 +812,30 @@ array_bound_product(ncc_parse_tree_t *node, uint64_t *product,
         uint64_t count = 0;
 
         if (!bound) {
-            *bad_array = node;
-            return false;
+            *use_sizeof = true;
         }
-
-        char *text = node_text(bound);
-        bool  ok   = parse_positive_integer_literal(text, &count);
-        ncc_free(text);
-
-        if (!ok) {
-            *bad_array = node;
-            return false;
+        else {
+            char *text = node_text(bound);
+            bool  ok   = parse_positive_integer_literal(text, &count);
+            if (ok) {
+                *product *= count;
+            }
+            else if (array_bound_allows_static_sizeof(text)) {
+                *use_sizeof = true;
+            }
+            else {
+                ncc_free(text);
+                *bad_array = node;
+                return false;
+            }
+            ncc_free(text);
         }
-
-        *product *= count;
     }
 
     size_t nc = ncc_tree_num_children(node);
     for (size_t i = 0; i < nc; i++) {
         if (!array_bound_product(ncc_tree_child(node, i), product,
-                                 bad_array)) {
+                                 use_sizeof, bad_array)) {
             return false;
         }
     }
@@ -532,8 +896,13 @@ classify_declarator(ncc_xform_ctx_t *ctx, const char *function,
         return;
     }
 
-    int  ptr_depth = count_leaf_text(declarator, "*")
-                   + count_leaf_text(declarator, "^");
+    ncc_xform_data_t *data = ncc_xform_get_data(ctx);
+
+    if (function && strncmp(function, "ncplane_", 8) == 0) {
+        return;
+    }
+
+    int  ptr_depth = pointer_depth_in_declarator(declarator);
     bool is_array  = first_descendant_nt(declarator, "array_declarator")
                   != nullptr;
     bool aggregate = decl_specs_are_aggregate(decl_specs);
@@ -564,6 +933,10 @@ classify_declarator(ncc_xform_ctx_t *ctx, const char *function,
 
     if (is_array) {
         if (ptr_depth > 0 && has_parenthesized_pointer_array(declarator)) {
+            if (data && data->gc_stack_maps_relaxed) {
+                ncc_free(name);
+                return;
+            }
             gc_stack_errorf(declarator,
                             "GC stack-map root '%s' in function '%s' uses a "
                             "parenthesized pointer/array declarator; spell the "
@@ -574,7 +947,13 @@ classify_declarator(ncc_xform_ctx_t *ctx, const char *function,
 
         ncc_parse_tree_t *bad_array = nullptr;
         uint64_t          product   = 1;
-        if (!array_bound_product(declarator, &product, &bad_array)) {
+        bool              use_sizeof = false;
+        if (!array_bound_product(declarator, &product, &use_sizeof,
+                                 &bad_array)) {
+            if (data && data->gc_stack_maps_relaxed) {
+                ncc_free(name);
+                return;
+            }
             gc_stack_errorf(bad_array ? bad_array : declarator,
                             "GC stack-map root '%s' in function '%s' uses a "
                             "variable-length or incomplete array; only "
@@ -582,7 +961,7 @@ classify_declarator(ncc_xform_ctx_t *ctx, const char *function,
                             name, function);
         }
 
-        num_words = product;
+        num_words = use_sizeof ? 0 : product;
         shape     = ptr_depth > 0 ? NCC_GC_STACK_ROOT_POINTER_ARRAY
                                   : NCC_GC_STACK_ROOT_AGGREGATE;
     }
@@ -591,13 +970,27 @@ classify_declarator(ncc_xform_ctx_t *ctx, const char *function,
         num_words = 0;
     }
 
-    if (kind == NCC_GC_STACK_ROOT_LOCAL
-        && !declaration_block_item(declarator)) {
-        gc_stack_errorf(declarator,
-                        "GC stack-map root '%s' in function '%s' is declared "
-                        "in an unsupported statement context; declare the root "
-                        "as a block item before the statement",
-                        name, function);
+    if (kind == NCC_GC_STACK_ROOT_LOCAL) {
+        ncc_parse_tree_t *anchor = declaration_block_item(declarator);
+        if (!anchor) {
+            if (data && data->gc_stack_maps_relaxed) {
+                ncc_free(name);
+                return;
+            }
+            gc_stack_errorf(declarator,
+                            "GC stack-map root '%s' in function '%s' is declared "
+                            "in an unsupported statement context; declare the root "
+                            "as a block item before the statement",
+                            name, function);
+        }
+
+        ncc_parse_tree_t *fn = ncc_xform_find_ancestor(decl_node,
+                                                       "function_definition");
+        if (block_has_case_label_item(anchor)
+            || has_forward_goto_bypassing_anchor(fn, declarator)) {
+            ncc_free(name);
+            return;
+        }
     }
 
     record_root(ctx, function, name, decl_specs, kind, shape, num_words,
@@ -711,9 +1104,24 @@ xform_gc_stack_function(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *fn)
         return nullptr;
     }
 
+    if (node_starts_in_system_header(fn) || node_has_system_header_token(fn)
+        || node_uses_computed_goto(fn)
+        || node_mentions_manual_gc_stack_api(compound)) {
+        return nullptr;
+    }
+
     char *fname = function_name(declarator);
     if (strncmp(fname, "n00b_gc_stack_", 14) == 0
-        || strncmp(fname, "__ncc_gc_stack_", 16) == 0) {
+        || strncmp(fname, "n00b_thread_", 12) == 0
+        || strncmp(fname, "_n00b_thread_", 13) == 0
+        || strncmp(fname, "n00b_capture_stack_", 18) == 0
+        || strncmp(fname, "n00b_futex_", 11) == 0
+        || strcmp(fname, "_n00b_stop_the_world") == 0
+        || strcmp(fname, "_n00b_restart_the_world") == 0
+        || strcmp(fname, "n00b_wait_for_stw_release") == 0
+        || strncmp(fname, "__ncc_gc_stack_", 16) == 0
+        || strncmp(fname, "__", 2) == 0
+        || strncmp(fname, "ncplane_", 8) == 0) {
         ncc_free(fname);
         return nullptr;
     }
@@ -868,6 +1276,12 @@ append_slot_num_words(ncc_buffer_t *buf, ncc_gc_stack_root_t *root)
         ncc_buffer_printf(buf,
                           "((sizeof(%s)+sizeof(void *)-1)/sizeof(void *))",
                           root->name);
+        return;
+    }
+
+    if (root->shape == NCC_GC_STACK_ROOT_POINTER_ARRAY
+        && root->num_words == 0) {
+        ncc_buffer_printf(buf, "(sizeof(%s)/sizeof(void *))", root->name);
         return;
     }
 
