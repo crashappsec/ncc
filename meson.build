@@ -118,6 +118,13 @@ if mem_debug_enabled
   c_args += ['-DNCC_MEM_DEBUG']
 endif
 
+# Build-time default for n00b GC stack-map emission. The upstream ncc default
+# remains off; n00b can opt its compiler build into stack maps explicitly.
+gc_stack_maps_default = get_option('gc_stack_maps')
+if gc_stack_maps_default
+  c_args += ['-DNCC_GC_STACK_MAPS_DEFAULT']
+endif
+
 # Clang source-based code coverage
 coverage_enabled = get_option('coverage')
 coverage_args = []
@@ -372,6 +379,21 @@ test('ncc_rstr_ansi', test_runner,
          + ncc_test_flags + [libncc.full_path()],
   suite : 'ncc',
   depends : [ncc_exe, libncc],
+)
+
+test('ncc_gc_stack_maps_default_off', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_flag.c', 'n00b_gc_stack_']
+         + ncc_test_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_flag_accepted', test_runner,
+  args : [ncc_exe, 'preprocess', test_dir / 'test_gc_stack_maps_flag.c']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
 )
 
 test('ncc_verbose_binary_output', test_runner,

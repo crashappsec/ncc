@@ -40,6 +40,7 @@ typedef struct {
     const char                *rstr_static_ref_expr_plain;
     const char                *array_literal_data_template;
     const char                *array_literal_data_expr;
+    bool                       gc_stack_maps;
 } ncc_xform_data_t;
 
 static inline ncc_xform_data_t *ncc_xform_get_data(ncc_xform_ctx_t *ctx) {

@@ -9,6 +9,7 @@
 //   --ncc-dump-tree        Dump parse tree (pre-transform)
 //   --ncc-dump-tree-raw    Dump parse tree with group wrapper nodes visible
 //   --ncc-dump-output      Dump emitted C to stderr
+//   --ncc-gc-stack-maps    Emit n00b GC stack-map metadata
 //   -E                     Preprocess + transform, emit to stdout
 //   -c                     Compile only (pipe to clang)
 //   -o FILE                Output file
@@ -229,6 +230,7 @@ typedef struct {
     bool         dump_tree;
     bool         dump_tree_raw;
     bool         dump_output;
+    bool         gc_stack_maps;
 
     // Dependency file generation (handled separately from compilation).
     bool         has_dep_flags; // -MD or -MMD present
@@ -389,6 +391,10 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
 
     verbose = env_var_enabled("NCC_VERBOSE");
 
+#ifdef NCC_GC_STACK_MAPS_DEFAULT
+    opts->gc_stack_maps = true;
+#endif
+
     opts->compiler = getenv("NCC_COMPILER");
     if (opts->compiler) {
         ncc_verbose("using NCC_COMPILER=%s", opts->compiler);
@@ -465,6 +471,14 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
         }
         if (strcmp(arg, "--ncc-dump-output") == 0) {
             opts->dump_output = true;
+            continue;
+        }
+        if (strcmp(arg, "--ncc-gc-stack-maps") == 0) {
+            opts->gc_stack_maps = true;
+            continue;
+        }
+        if (strcmp(arg, "--ncc-no-gc-stack-maps") == 0) {
+            opts->gc_stack_maps = false;
             continue;
         }
         if (strcmp(arg, "--ncc-constexpr-include") == 0) {
@@ -680,9 +694,10 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
                                            : opts->has_c ? "compile-only"
                                                          : "compile-and-link",
                 opts->compiler, opts->n_clang_args);
-    ncc_verbose("flags: -E=%d -c=%d std=%d dep=%d dump_tokens=%d dump_tree=%d dump_output=%d",
+    ncc_verbose("flags: -E=%d -c=%d std=%d dep=%d dump_tokens=%d dump_tree=%d dump_output=%d gc_stack_maps=%d",
                 opts->has_E, opts->has_c, opts->has_std, opts->has_dep_flags,
-                opts->dump_tokens, opts->dump_tree, opts->dump_output);
+                opts->dump_tokens, opts->dump_tree, opts->dump_output,
+                opts->gc_stack_maps);
     if (opts->constexpr_headers) {
         ncc_verbose("constexpr headers=%s", opts->constexpr_headers);
     }
@@ -714,6 +729,9 @@ print_help(void)
         "  --ncc-dump-tree      Dump parse tree (pre-transform)\n"
         "  --ncc-dump-tree-raw  Dump parse tree showing group wrapper nodes\n"
         "  --ncc-dump-output    Dump emitted C to stderr\n"
+        "  --ncc-gc-stack-maps  Emit n00b GC stack-map metadata\n"
+        "  --ncc-no-gc-stack-maps\n"
+        "                       Disable n00b GC stack-map metadata\n"
         "  --ncc-constexpr-include HDRS\n"
         "                       Comma-separated headers for constexpr eval\n"
         "                       (e.g. '<myheader.h>,\"local.h\"')\n"
@@ -2084,6 +2102,7 @@ compile_file(ncc_opts_t *opts)
         .rstr_static_ref_expr_plain  = rstr_static_ref_expr_plain,
         .array_literal_data_template = array_literal_data_template,
         .array_literal_data_expr     = array_literal_data_expr,
+        .gc_stack_maps               = opts->gc_stack_maps,
     };
     ncc_dict_init(&xdata.option_meta,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
