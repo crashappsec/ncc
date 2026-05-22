@@ -11,8 +11,10 @@
 #include "util/type_normalize.h"
 #include "xform/xform_data.h"
 #include "xform/xform_helpers.h"
+#include "xform/xform_rstr.h"
 #include "xform/xform_template.h"
 
+#include <ctype.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,6 +30,62 @@ static ncc_template_registry_t *get_template_reg(ncc_xform_ctx_t *ctx) {
 
 static const char *get_rstr_string_type(ncc_xform_ctx_t *ctx) {
   return ncc_xform_get_data(ctx)->rstr_string_type;
+}
+
+static const char *get_rstr_text_style_type(ncc_xform_ctx_t *ctx) {
+  return ncc_xform_get_data(ctx)->rstr_text_style_type;
+}
+
+static const char *get_rstr_style_record_type(ncc_xform_ctx_t *ctx) {
+  return ncc_xform_get_data(ctx)->rstr_style_record_type;
+}
+
+static const char *get_rstr_static_ref_template_styled(ncc_xform_ctx_t *ctx) {
+  return ncc_xform_get_data(ctx)->rstr_static_ref_template_styled;
+}
+
+static const char *get_rstr_static_ref_template_plain(ncc_xform_ctx_t *ctx) {
+  return ncc_xform_get_data(ctx)->rstr_static_ref_template_plain;
+}
+
+static const char *get_rstr_static_ref_expr_styled(ncc_xform_ctx_t *ctx) {
+  return ncc_xform_get_data(ctx)->rstr_static_ref_expr_styled;
+}
+
+static const char *get_rstr_static_ref_expr_plain(ncc_xform_ctx_t *ctx) {
+  return ncc_xform_get_data(ctx)->rstr_static_ref_expr_plain;
+}
+
+static char *expand_rstr_source_template(const char *tmpl,
+                                         const char **args,
+                                         int nargs) {
+  ncc_buffer_t *buf = ncc_buffer_empty();
+
+  for (const char *p = tmpl; p && *p;) {
+    if (*p != '$' || !isdigit((unsigned char)p[1])) {
+      ncc_buffer_putc(buf, *p++);
+      continue;
+    }
+
+    p++;
+    int slot = 0;
+    while (isdigit((unsigned char)*p)) {
+      slot = slot * 10 + (*p - '0');
+      p++;
+    }
+
+    if (slot < 0 || slot >= nargs) {
+      fprintf(stderr,
+              "ncc: error: r-string static-ref template references "
+              "unavailable slot $%d\n",
+              slot);
+      exit(1);
+    }
+
+    ncc_buffer_puts(buf, args[slot] ? args[slot] : "");
+  }
+
+  return ncc_buffer_take(buf);
 }
 
 // =========================================================================
@@ -633,41 +691,44 @@ static void emit_escaped_string(ncc_buffer_t *buf, const char *data, int len) {
 }
 
 static void emit_style_var(ncc_buffer_t *buf, out_style_t *os, int idx,
-                           int uid) {
+                           int uid, const char *text_style_type) {
   if (os->kind == PSTYLE_NAMED || os->kind == PSTYLE_ROLE) {
     // Deferred: info = nullptr, tag = "name". No style variable needed.
   } else if (os->kind == PSTYLE_CASE) {
     ncc_buffer_printf(buf,
-                      "static ncc_text_style_t _ncc_rs_%d_ts_%d="
+                      "static %s _ncc_rs_%d_ts_%d="
                       "{.text_case=%d};",
-                      uid, idx, os->case_val);
+                      text_style_type, uid, idx, os->case_val);
   } else {
     ncc_buffer_printf(buf,
-                      "static ncc_text_style_t _ncc_rs_%d_ts_%d="
+                      "static %s _ncc_rs_%d_ts_%d="
                       "{.%s=2};",
-                      uid, idx, os->field_name);
+                      text_style_type, uid, idx, os->field_name);
   }
 }
 
 // Emit style variable declarations and style info struct as a string.
 // This becomes the $0 argument to the rstr_styled template.
 // Returns an allocated string (caller frees).
-static char *emit_style_declarations(out_style_list_t *out, int uid) {
+static char *emit_style_declarations(ncc_xform_ctx_t *ctx,
+                                     out_style_list_t *out, int uid) {
   ncc_buffer_t *buf = ncc_buffer_empty();
+  const char *text_style_type   = get_rstr_text_style_type(ctx);
+  const char *style_record_type = get_rstr_style_record_type(ctx);
 
   for (int i = 0; i < out->count; i++) {
-    emit_style_var(buf, &out->items[i], i, uid);
+    emit_style_var(buf, &out->items[i], i, uid, text_style_type);
   }
 
   ncc_buffer_printf(buf,
                     "static struct{"
                     "int64_t num_styles;"
-                    "ncc_text_style_t*base_style;"
-                    "ncc_style_record_t styles[%d];"
+                    "%s*base_style;"
+                    "%s styles[%d];"
                     "}_ncc_rs_%d_si={",
-                    out->count, uid);
-  ncc_buffer_printf(buf, ".num_styles=%d,.base_style=((ncc_text_style_t*)0),",
-                    out->count);
+                    text_style_type, style_record_type, out->count, uid);
+  ncc_buffer_printf(buf, ".num_styles=%d,.base_style=((%s*)0),",
+                    out->count, text_style_type);
   ncc_buffer_puts(buf, ".styles={");
 
   for (int i = 0; i < out->count; i++) {
@@ -680,7 +741,7 @@ static char *emit_style_declarations(out_style_list_t *out, int uid) {
     ncc_buffer_putc(buf, '{');
 
     if (os->kind == PSTYLE_NAMED || os->kind == PSTYLE_ROLE) {
-      ncc_buffer_puts(buf, ".info=((ncc_text_style_t*)0),.tag=\"");
+      ncc_buffer_printf(buf, ".info=((%s*)0),.tag=\"", text_style_type);
       emit_escaped_string(buf, os->field_name, (int)strlen(os->field_name));
       ncc_buffer_putc(buf, '"');
     } else {
@@ -876,6 +937,137 @@ static const char *rstr_get_callee_name(ncc_parse_tree_t *node) {
   return ncc_xform_leaf_text(callee);
 }
 
+static ncc_parse_tree_t *find_rstr_call(ncc_parse_tree_t *node) {
+  if (!node) {
+    return nullptr;
+  }
+
+  if (!ncc_tree_is_leaf(node) && ncc_xform_nt_name_is(node, "postfix_expression")) {
+    size_t nc = ncc_tree_num_children(node);
+    if (nc >= 3 && ncc_xform_leaf_text_eq(ncc_tree_child(node, 1), "(")) {
+      const char *name = rstr_get_callee_name(node);
+      if (name && strcmp(name, "__ncc_rstr") == 0) {
+        return node;
+      }
+    }
+  }
+
+  if (ncc_tree_is_leaf(node)) {
+    return nullptr;
+  }
+
+  size_t nc = ncc_tree_num_children(node);
+  for (size_t i = 0; i < nc; i++) {
+    ncc_parse_tree_t *found = find_rstr_call(ncc_tree_child(node, i));
+    if (found) {
+      return found;
+    }
+  }
+
+  return nullptr;
+}
+
+ncc_rstr_static_ref_t ncc_rstr_build_static_ref(ncc_xform_ctx_t *ctx,
+                                                ncc_parse_tree_t *node) {
+  ncc_parse_tree_t *call = find_rstr_call(node);
+  if (!call) {
+    return (ncc_rstr_static_ref_t){0};
+  }
+
+  ncc_parse_tree_t *kid2 = ncc_tree_child(call, 2);
+  if (!kid2 || ncc_xform_leaf_text_eq(kid2, ")")) {
+    fprintf(stderr, "ncc: error: __ncc_rstr() requires a string argument\n");
+    exit(1);
+  }
+
+  int content_len;
+  char *content = extract_rstr_content(kid2, &content_len);
+  if (!content) {
+    fprintf(stderr,
+            "ncc: error: __ncc_rstr() argument must be a string literal\n");
+    exit(1);
+  }
+
+  rstr_seg_list_t sl = {0};
+  ncc_buffer_t *tb = ncc_buffer_empty();
+  parse_rich_markup(content, content_len, &sl, tb);
+
+  out_style_list_t out = {0};
+  build_style_records(&sl, &out);
+  int uid = ctx->unique_id++;
+
+  char var_name[64];
+  snprintf(var_name, sizeof(var_name), "_ncc_rs_%d", uid);
+
+  int64_t cp_count = count_utf8_codepoints(tb->data, (int64_t)tb->byte_len);
+
+  ncc_buffer_t *data_buf = ncc_buffer_empty();
+  ncc_buffer_putc(data_buf, '"');
+  emit_escaped_string(data_buf, tb->data, (int)tb->byte_len);
+  ncc_buffer_putc(data_buf, '"');
+  char *data_str = ncc_buffer_take(data_buf);
+
+  char bytes_str[32];
+  snprintf(bytes_str, sizeof(bytes_str), "%zu", tb->byte_len);
+
+  char cp_str[32];
+  snprintf(cp_str, sizeof(cp_str), "%lld", (long long)cp_count);
+
+  uint64_t str_typehash = ncc_type_hash_u64(get_rstr_string_type(ctx));
+  char typehash_str[32];
+  snprintf(typehash_str, sizeof(typehash_str), "%" PRIu64 "ULL",
+           str_typehash);
+
+  char wrapper_var[64];
+  snprintf(wrapper_var, sizeof(wrapper_var), "_ncc_rsh_%d", uid);
+
+  char *decl_str = nullptr;
+  char *expr_str = nullptr;
+
+  if (out.count > 0) {
+    char *style_decls = emit_style_declarations(ctx, &out, uid);
+
+    char styling_str[64];
+    snprintf(styling_str, sizeof(styling_str), "&_ncc_rs_%d_si", uid);
+
+    // Slot layout mirrors the main styled r-string template:
+    // $0=style_decls $1=var $2=bytes $3=data $4=codepoints
+    // $5=styling $6=typehash $7=wrapper_var
+    const char *all_args[] = {
+        style_decls, var_name, bytes_str, data_str,
+        cp_str,      styling_str, typehash_str, wrapper_var,
+    };
+
+    decl_str = expand_rstr_source_template(
+        get_rstr_static_ref_template_styled(ctx), all_args, 8);
+    expr_str = expand_rstr_source_template(
+        get_rstr_static_ref_expr_styled(ctx), all_args, 8);
+    ncc_free(style_decls);
+  } else {
+    // Slot layout mirrors the main plain r-string template:
+    // $0=var $1=bytes $2=data $3=codepoints $4=typehash $5=wrapper_var
+    const char *all_args[] = {
+        var_name, bytes_str, data_str, cp_str, typehash_str, wrapper_var,
+    };
+
+    decl_str = expand_rstr_source_template(
+        get_rstr_static_ref_template_plain(ctx), all_args, 6);
+    expr_str = expand_rstr_source_template(
+        get_rstr_static_ref_expr_plain(ctx), all_args, 6);
+  }
+
+  ncc_free(content);
+  ncc_free(data_str);
+  ncc_free(sl.segs);
+  ncc_buffer_free(tb);
+  ncc_free(out.items);
+
+  return (ncc_rstr_static_ref_t){
+      .decl = decl_str,
+      .expr = expr_str,
+  };
+}
+
 // =========================================================================
 // Main transform
 // =========================================================================
@@ -981,7 +1173,7 @@ static ncc_parse_tree_t *xform_rstr(ncc_xform_ctx_t *ctx,
     // Styled template.
     // Slot layout: $0=style_decls $1=var $2=bytes $3=data
     //              $4=codepoints $5=styling $6=typehash $7=wrapper_var
-    char *style_decls = emit_style_declarations(&out, uid);
+    char *style_decls = emit_style_declarations(ctx, &out, uid);
 
     char styling_str[64];
     snprintf(styling_str, sizeof(styling_str), "&_ncc_rs_%d_si", uid);

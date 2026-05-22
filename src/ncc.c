@@ -64,6 +64,7 @@ extern void ncc_register_constexpr_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_constexpr_paste_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_kargs_vargs_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_option_xform(ncc_xform_registry_t *reg);
+extern void ncc_register_array_literal_xform(ncc_xform_registry_t *reg);
 #include "scanner/scan_builtins.h"
 #include "scanner/scanner.h"
 #include "scanner/token_stream.h"
@@ -151,6 +152,64 @@ forward_process_output(const char *label, const char *data, size_t len,
     fwrite(data, 1, len, stream);
 }
 
+static bool
+token_text_is(ncc_token_info_t *tok, const char *text)
+{
+    if (!tok || !text || !ncc_option_is_set(tok->value)) {
+        return false;
+    }
+
+    ncc_string_t value = ncc_option_get(tok->value);
+    size_t       len   = strlen(text);
+    return value.data && value.u8_bytes == len
+        && memcmp(value.data, text, len) == 0;
+}
+
+static bool
+array_literal_hint_context(ncc_token_stream_t *ts, int32_t index)
+{
+    if (index == 0) {
+        return true;
+    }
+
+    ncc_token_info_t *prev = ts->tokens[index - 1];
+    return token_text_is(prev, "{") || token_text_is(prev, ";")
+        || token_text_is(prev, "(") || token_text_is(prev, "=")
+        || token_text_is(prev, ",") || token_text_is(prev, "return");
+}
+
+static void
+maybe_print_array_literal_parse_hint(ncc_token_stream_t *ts)
+{
+    if (!ts) {
+        return;
+    }
+
+    for (int32_t i = 0; i < ts->token_count; i++) {
+        ncc_token_info_t *tok = ts->tokens[i];
+        if (!token_text_is(tok, "[")) {
+            continue;
+        }
+
+        if (i + 1 < ts->token_count && token_text_is(ts->tokens[i + 1],
+                                                     "[")) {
+            continue;
+        }
+
+        if (!array_literal_hint_context(ts, i)) {
+            continue;
+        }
+
+        fprintf(stderr,
+                "ncc: hint: '[' at line %u, col %u looks like an array "
+                "literal, but array literals are currently supported only "
+                "as ncc_array_t(T) or n00b_array_t(T) declaration "
+                "initializers; block-scope declarations must be const\n",
+                tok ? tok->line : 0, tok ? tok->column : 0);
+        return;
+    }
+}
+
 // ============================================================================
 // Parsed command-line state
 // ============================================================================
@@ -181,11 +240,19 @@ typedef struct {
     // rstr template overrides (CLI > meson define > default).
     const char  *rstr_template_styled;
     const char  *rstr_template_plain;
+    const char  *rstr_static_ref_template_styled;
+    const char  *rstr_static_ref_template_plain;
+    const char  *rstr_static_ref_expr_styled;
+    const char  *rstr_static_ref_expr_plain;
+    const char  *array_literal_data_template;
+    const char  *array_literal_data_expr;
 
     // vargs/once/rstr overrides (CLI > meson define > default).
     const char  *vargs_type;
     const char  *once_prefix;
     const char  *rstr_string_type;
+    const char  *rstr_text_style_type;
+    const char  *rstr_style_record_type;
 
     // Grammar file override (CLI > env > embedded).
     const char  *grammar_file;
@@ -428,6 +495,57 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
             opts->rstr_template_plain = arg + 26;
             continue;
         }
+        {
+            static const char prefix[] =
+                "--ncc-rstr-static-ref-template-styled=";
+            if (strncmp(arg, prefix, sizeof(prefix) - 1) == 0) {
+                opts->rstr_static_ref_template_styled =
+                    arg + sizeof(prefix) - 1;
+                continue;
+            }
+        }
+        {
+            static const char prefix[] =
+                "--ncc-rstr-static-ref-template-plain=";
+            if (strncmp(arg, prefix, sizeof(prefix) - 1) == 0) {
+                opts->rstr_static_ref_template_plain =
+                    arg + sizeof(prefix) - 1;
+                continue;
+            }
+        }
+        {
+            static const char prefix[] =
+                "--ncc-rstr-static-ref-expr-styled=";
+            if (strncmp(arg, prefix, sizeof(prefix) - 1) == 0) {
+                opts->rstr_static_ref_expr_styled =
+                    arg + sizeof(prefix) - 1;
+                continue;
+            }
+        }
+        {
+            static const char prefix[] =
+                "--ncc-rstr-static-ref-expr-plain=";
+            if (strncmp(arg, prefix, sizeof(prefix) - 1) == 0) {
+                opts->rstr_static_ref_expr_plain = arg + sizeof(prefix) - 1;
+                continue;
+            }
+        }
+        {
+            static const char prefix[] =
+                "--ncc-array-literal-data-template=";
+            if (strncmp(arg, prefix, sizeof(prefix) - 1) == 0) {
+                opts->array_literal_data_template =
+                    arg + sizeof(prefix) - 1;
+                continue;
+            }
+        }
+        {
+            static const char prefix[] = "--ncc-array-literal-data-expr=";
+            if (strncmp(arg, prefix, sizeof(prefix) - 1) == 0) {
+                opts->array_literal_data_expr = arg + sizeof(prefix) - 1;
+                continue;
+            }
+        }
         if (strncmp(arg, "--ncc-vargs-type=", 17) == 0) {
             opts->vargs_type = arg + 17;
             continue;
@@ -439,6 +557,20 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
         if (strncmp(arg, "--ncc-rstr-string-type=", 23) == 0) {
             opts->rstr_string_type = arg + 23;
             continue;
+        }
+        {
+            static const char prefix[] = "--ncc-rstr-text-style-type=";
+            if (strncmp(arg, prefix, sizeof(prefix) - 1) == 0) {
+                opts->rstr_text_style_type = arg + sizeof(prefix) - 1;
+                continue;
+            }
+        }
+        {
+            static const char prefix[] = "--ncc-rstr-style-record-type=";
+            if (strncmp(arg, prefix, sizeof(prefix) - 1) == 0) {
+                opts->rstr_style_record_type = arg + sizeof(prefix) - 1;
+                continue;
+            }
         }
 
         // Standard compiler flags we track.
@@ -588,6 +720,20 @@ print_help(void)
         "                       Overrides NCC_CONSTEXPR_HEADERS env var\n"
         "  --ncc-grammar FILE   Use external grammar file instead of built-in\n"
         "                       Overrides NCC_GRAMMAR env var\n"
+        "  --ncc-rstr-text-style-type TYPE\n"
+        "                       Override styled r-string text style type\n"
+        "  --ncc-rstr-style-record-type TYPE\n"
+        "                       Override styled r-string style record type\n"
+        "  --ncc-rstr-static-ref-template-{plain,styled}=TMPL\n"
+        "                       Override r-string declaration templates used by\n"
+        "                       array literal static initializers\n"
+        "  --ncc-rstr-static-ref-expr-{plain,styled}=EXPR\n"
+        "                       Override r-string address expressions used by\n"
+        "                       array literal static initializers\n"
+        "  --ncc-array-literal-data-template=TMPL\n"
+        "                       Override array literal backing storage template\n"
+        "  --ncc-array-literal-data-expr=EXPR\n"
+        "                       Override expression used as array .data pointer\n"
         "\n"
         "Standard flags:\n"
         "  -E                   Preprocess + transform, emit C to stdout\n"
@@ -1638,6 +1784,7 @@ compile_file(ncc_opts_t *opts)
     if (!ok) {
         int32_t ntokens = ts->token_count;
         fprintf(stderr, "ncc: parse FAILED (%d tokens produced)\n", ntokens);
+        maybe_print_array_literal_parse_hint(ts);
 
         int32_t show = 10;
         if (ntokens > 0) {
@@ -1730,6 +1877,7 @@ compile_file(ncc_opts_t *opts)
     ncc_verbose("registering transforms");
     ncc_xform_registry_t xreg;
     ncc_xform_registry_init(&xreg, g);
+    ncc_register_array_literal_xform(&xreg);
     // rpc must run first — its synthesized bodies reference the
     // type-mangled identifiers that typeid / option / generic_struct /
     // kargs_vargs produce; running after any of those would see the
@@ -1758,10 +1906,32 @@ compile_file(ncc_opts_t *opts)
     static const char *default_rstr_plain =
         "({static ncc_string_t $0={.u8_bytes=$1,.data=$2,"
         ".codepoints=$3,.styling=((void*)0)};&$0;})";
+    static const char *default_rstr_static_ref_styled =
+        "$0 static ncc_string_t $1={.u8_bytes=$2,.data=$3,"
+        ".codepoints=$4,.styling=$5};";
+    static const char *default_rstr_static_ref_plain =
+        "static ncc_string_t $0={.u8_bytes=$1,.data=$2,"
+        ".codepoints=$3,.styling=((void*)0)};";
+    static const char *default_rstr_static_ref_expr_styled = "&$1";
+    static const char *default_rstr_static_ref_expr_plain  = "&$0";
+    static const char *default_array_literal_data_template =
+        "static $0 $1[]={$3};";
+    static const char *default_array_literal_data_expr = "$1";
 
     // Resolution order: CLI flag > meson define > built-in default.
     const char *rstr_styled = default_rstr_styled;
     const char *rstr_plain  = default_rstr_plain;
+    const char *rstr_static_ref_styled =
+        default_rstr_static_ref_styled;
+    const char *rstr_static_ref_plain =
+        default_rstr_static_ref_plain;
+    const char *rstr_static_ref_expr_styled =
+        default_rstr_static_ref_expr_styled;
+    const char *rstr_static_ref_expr_plain =
+        default_rstr_static_ref_expr_plain;
+    const char *array_literal_data_template =
+        default_array_literal_data_template;
+    const char *array_literal_data_expr = default_array_literal_data_expr;
 
 #ifdef NCC_RSTR_TEMPLATE_STYLED
     rstr_styled = NCC_RSTR_TEMPLATE_STYLED;
@@ -1769,12 +1939,48 @@ compile_file(ncc_opts_t *opts)
 #ifdef NCC_RSTR_TEMPLATE_PLAIN
     rstr_plain = NCC_RSTR_TEMPLATE_PLAIN;
 #endif
+#ifdef NCC_RSTR_STATIC_REF_TEMPLATE_STYLED
+    rstr_static_ref_styled = NCC_RSTR_STATIC_REF_TEMPLATE_STYLED;
+#endif
+#ifdef NCC_RSTR_STATIC_REF_TEMPLATE_PLAIN
+    rstr_static_ref_plain = NCC_RSTR_STATIC_REF_TEMPLATE_PLAIN;
+#endif
+#ifdef NCC_RSTR_STATIC_REF_EXPR_STYLED
+    rstr_static_ref_expr_styled = NCC_RSTR_STATIC_REF_EXPR_STYLED;
+#endif
+#ifdef NCC_RSTR_STATIC_REF_EXPR_PLAIN
+    rstr_static_ref_expr_plain = NCC_RSTR_STATIC_REF_EXPR_PLAIN;
+#endif
+#ifdef NCC_ARRAY_LITERAL_DATA_TEMPLATE
+    array_literal_data_template = NCC_ARRAY_LITERAL_DATA_TEMPLATE;
+#endif
+#ifdef NCC_ARRAY_LITERAL_DATA_EXPR
+    array_literal_data_expr = NCC_ARRAY_LITERAL_DATA_EXPR;
+#endif
 
     if (opts->rstr_template_styled) {
         rstr_styled = opts->rstr_template_styled;
     }
     if (opts->rstr_template_plain) {
         rstr_plain = opts->rstr_template_plain;
+    }
+    if (opts->rstr_static_ref_template_styled) {
+        rstr_static_ref_styled = opts->rstr_static_ref_template_styled;
+    }
+    if (opts->rstr_static_ref_template_plain) {
+        rstr_static_ref_plain = opts->rstr_static_ref_template_plain;
+    }
+    if (opts->rstr_static_ref_expr_styled) {
+        rstr_static_ref_expr_styled = opts->rstr_static_ref_expr_styled;
+    }
+    if (opts->rstr_static_ref_expr_plain) {
+        rstr_static_ref_expr_plain = opts->rstr_static_ref_expr_plain;
+    }
+    if (opts->array_literal_data_template) {
+        array_literal_data_template = opts->array_literal_data_template;
+    }
+    if (opts->array_literal_data_expr) {
+        array_literal_data_expr = opts->array_literal_data_expr;
     }
 
     ncc_template_register(&tmpl_reg, "rstr_styled",
@@ -1820,10 +2026,13 @@ compile_file(ncc_opts_t *opts)
     ncc_template_register(&tmpl_reg, "rpc_bidi", "translation_unit",
                           rpc_bidi_tmpl);
 
-    // Resolve vargs_type, once_prefix, rstr_string_type: CLI > meson define > default.
-    const char *vargs_type      = "ncc_vargs_t";
-    const char *once_prefix     = "__ncc_";
-    const char *rstr_string_type = "ncc_string_t*";
+    // Resolve vargs_type, once_prefix, rstr types:
+    // CLI > meson define > default.
+    const char *vargs_type             = "ncc_vargs_t";
+    const char *once_prefix            = "__ncc_";
+    const char *rstr_string_type       = "ncc_string_t*";
+    const char *rstr_text_style_type   = "ncc_text_style_t";
+    const char *rstr_style_record_type = "ncc_style_record_t";
 
 #ifdef NCC_VARGS_TYPE
     vargs_type = NCC_VARGS_TYPE;
@@ -1834,6 +2043,12 @@ compile_file(ncc_opts_t *opts)
 #ifdef NCC_RSTR_STRING_TYPE
     rstr_string_type = NCC_RSTR_STRING_TYPE;
 #endif
+#ifdef NCC_RSTR_TEXT_STYLE_TYPE
+    rstr_text_style_type = NCC_RSTR_TEXT_STYLE_TYPE;
+#endif
+#ifdef NCC_RSTR_STYLE_RECORD_TYPE
+    rstr_style_record_type = NCC_RSTR_STYLE_RECORD_TYPE;
+#endif
 
     if (opts->vargs_type) {
         vargs_type = opts->vargs_type;
@@ -1843,6 +2058,12 @@ compile_file(ncc_opts_t *opts)
     }
     if (opts->rstr_string_type) {
         rstr_string_type = opts->rstr_string_type;
+    }
+    if (opts->rstr_text_style_type) {
+        rstr_text_style_type = opts->rstr_text_style_type;
+    }
+    if (opts->rstr_style_record_type) {
+        rstr_style_record_type = opts->rstr_style_record_type;
     }
 
     ncc_xform_ctx_t xctx;
@@ -1855,12 +2076,22 @@ compile_file(ncc_opts_t *opts)
         .vargs_type        = vargs_type,
         .once_prefix       = once_prefix,
         .rstr_string_type  = rstr_string_type,
+        .rstr_text_style_type   = rstr_text_style_type,
+        .rstr_style_record_type = rstr_style_record_type,
+        .rstr_static_ref_template_styled = rstr_static_ref_styled,
+        .rstr_static_ref_template_plain  = rstr_static_ref_plain,
+        .rstr_static_ref_expr_styled = rstr_static_ref_expr_styled,
+        .rstr_static_ref_expr_plain  = rstr_static_ref_expr_plain,
+        .array_literal_data_template = array_literal_data_template,
+        .array_literal_data_expr     = array_literal_data_expr,
     };
     ncc_dict_init(&xdata.option_meta,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
     ncc_dict_init(&xdata.option_decls,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
     ncc_dict_init(&xdata.generic_struct_decls,
+                            ncc_hash_cstring, ncc_dict_cstr_eq);
+    ncc_dict_init(&xdata.array_types,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
     xctx.user_data = &xdata;
     ncc_verbose("applying transforms");
@@ -1877,6 +2108,7 @@ compile_file(ncc_opts_t *opts)
     ncc_dict_free(&xdata.option_meta);
     ncc_dict_free(&xdata.option_decls);
     ncc_dict_free(&xdata.generic_struct_decls);
+    ncc_dict_free(&xdata.array_types);
     ncc_template_registry_free(&tmpl_reg);
     ncc_xform_registry_free(&xreg);
 
