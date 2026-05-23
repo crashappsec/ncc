@@ -4,6 +4,7 @@
 #include "lib/buffer.h"
 #include "xform/xform_data.h"
 #include "xform/xform_helpers.h"
+#include "xform/xform_type_layout.h"
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -103,25 +104,9 @@ cstr_has_prefix(const char *s, const char *prefix)
     return s && prefix && strncmp(s, prefix, strlen(prefix)) == 0;
 }
 
-typedef struct {
-    ncc_parse_tree_t **data;
-    size_t             len;
-    size_t             cap;
-} parse_tree_list_t;
-
-typedef struct {
-    uint64_t *data;
-    size_t    len;
-    size_t    cap;
-} uint64_list_t;
-
-typedef struct {
-    char             *key;
-    ncc_parse_tree_t *specifier;
-    char             *offset_type;
-    bool              is_atomic;
-    bool              is_union;
-} aggregate_type_info_t;
+typedef ncc_layout_parse_tree_list_t parse_tree_list_t;
+typedef ncc_layout_uint64_list_t uint64_list_t;
+typedef ncc_layout_aggregate_type_info_t aggregate_type_info_t;
 
 static void
 parse_tree_list_push(parse_tree_list_t *list, ncc_parse_tree_t *node)
@@ -1241,15 +1226,6 @@ struct_or_union_kind_text(ncc_parse_tree_t *su)
     return kind ? node_text(kind) : nullptr;
 }
 
-static bool
-struct_or_union_is_union(ncc_parse_tree_t *su)
-{
-    char *kind = struct_or_union_kind_text(su);
-    bool  r    = kind && strcmp(kind, "union") == 0;
-    ncc_free(kind);
-    return r;
-}
-
 static char *
 aggregate_key_from_specifier(ncc_parse_tree_t *su)
 {
@@ -1290,25 +1266,6 @@ lookup_aggregate_type(ncc_xform_ctx_t *ctx, const char *key)
     bool found = false;
     aggregate_type_info_t *info = ncc_dict_get(types, (void *)key, &found);
     return found ? info : nullptr;
-}
-
-static void
-record_aggregate_type(ncc_xform_ctx_t *ctx, const char *key,
-                      ncc_parse_tree_t *specifier, bool is_atomic,
-                      const char *offset_type)
-{
-    ncc_dict_t *types = gc_aggregate_types(ctx);
-    if (!types || !key || !specifier) {
-        return;
-    }
-
-    aggregate_type_info_t *info = ncc_alloc(aggregate_type_info_t);
-    info->key         = copy_cstr(key);
-    info->specifier   = specifier;
-    info->offset_type = copy_cstr(offset_type ? offset_type : key);
-    info->is_atomic   = is_atomic;
-    info->is_union    = struct_or_union_is_union(specifier);
-    ncc_dict_put(types, info->key, info);
 }
 
 static ncc_parse_tree_t *
@@ -1607,17 +1564,6 @@ pointer_depth_for_declarator(ncc_xform_ctx_t *ctx,
          + pointer_depth_for_specs(ctx, specs);
 }
 
-static void
-record_pointer_typedef(ncc_xform_ctx_t *ctx, const char *name)
-{
-    ncc_dict_t *ptrs = gc_pointer_typedefs(ctx);
-    if (!ptrs || !name || !*name) {
-        return;
-    }
-
-    ncc_dict_put(ptrs, copy_cstr(name), (void *)(uintptr_t)1);
-}
-
 static uint64_t
 count_top_level_initializers(ncc_parse_tree_t *list)
 {
@@ -1722,101 +1668,9 @@ num_words_expr_for_pointer_array(ncc_parse_tree_t *declarator,
 }
 
 static void
-collect_aggregate_definitions(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *node)
-{
-    if (!node || ncc_tree_is_leaf(node)) {
-        return;
-    }
-
-    if (ncc_xform_nt_name_is(node, "struct_or_union_specifier")
-        && aggregate_specifier_has_members(node)) {
-        if (!node_starts_in_system_header(node)) {
-            char *key = aggregate_key_from_specifier(node);
-            if (key) {
-                record_aggregate_type(ctx, key, node, false, key);
-                ncc_free(key);
-            }
-        }
-    }
-
-    size_t nc = ncc_tree_num_children(node);
-    for (size_t i = 0; i < nc; i++) {
-        collect_aggregate_definitions(ctx, ncc_tree_child(node, i));
-    }
-}
-
-static void
-collect_typedef_aliases_from_decl(ncc_xform_ctx_t *ctx,
-                                  ncc_parse_tree_t *decl)
-{
-    ncc_parse_tree_t *decl_specs = ncc_xform_find_child_nt(
-        decl, "declaration_specifiers");
-    ncc_parse_tree_t *list = ncc_xform_find_child_nt(decl,
-                                                     "init_declarator_list");
-    if (!decl_specs || !list || !contains_leaf_text(decl_specs, "typedef")) {
-        return;
-    }
-
-    parse_tree_list_t inits = {0};
-    collect_nt_children(list, "init_declarator", &inits);
-
-    for (size_t i = 0; i < inits.len; i++) {
-        ncc_parse_tree_t *declarator = ncc_xform_find_child_nt(
-            inits.data[i], "declarator");
-        char *name = declarator_name(declarator);
-        if (!name) {
-            continue;
-        }
-
-        if (pointer_depth_in_declarator(declarator) > 0
-            || decl_specs_use_pointer_typedef(ctx, decl_specs)) {
-            record_pointer_typedef(ctx, name);
-            ncc_free(name);
-            continue;
-        }
-
-        ncc_parse_tree_t *aggregate = aggregate_spec_from_specs(ctx,
-                                                                decl_specs);
-        if (aggregate) {
-            bool  is_atomic   = specs_have_atomic_type_wrapper(decl_specs);
-            char *offset_type = is_atomic
-                                  ? aggregate_offset_type_from_specs(ctx,
-                                                                     decl_specs)
-                                  : nullptr;
-            record_aggregate_type(ctx, name, aggregate, is_atomic,
-                                  offset_type ? offset_type : name);
-            ncc_free(offset_type);
-        }
-
-        ncc_free(name);
-    }
-
-    ncc_free(inits.data);
-}
-
-static void
-collect_typedef_aliases(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *node)
-{
-    if (!node || ncc_tree_is_leaf(node)) {
-        return;
-    }
-
-    if (ncc_xform_nt_name_is(node, "declaration")
-        && !node_starts_in_system_header(node)) {
-        collect_typedef_aliases_from_decl(ctx, node);
-    }
-
-    size_t nc = ncc_tree_num_children(node);
-    for (size_t i = 0; i < nc; i++) {
-        collect_typedef_aliases(ctx, ncc_tree_child(node, i));
-    }
-}
-
-static void
 collect_gc_type_info(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu)
 {
-    collect_aggregate_definitions(ctx, tu);
-    collect_typedef_aliases(ctx, tu);
+    ncc_layout_collect_type_info(ctx, tu);
 }
 
 static ncc_gc_stack_root_t *

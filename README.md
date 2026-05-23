@@ -588,6 +588,43 @@ support. These templates should emit ordinary C declarations, not macro
 calls that depend on source preprocessor definitions, because ncc
 inserts generated code after preprocessing.
 
+### Static Image Initializers
+
+`ncc_static_image(...)` is the constructor-backed static object escape hatch
+for runtime types whose layout should be produced by the embedding runtime,
+not reimplemented in ncc:
+
+```c
+const n00b_buffer_t *raw = ncc_static_image("payload");
+const n00b_buffer_t *hex = ncc_static_image(.hex = "6869");
+const n00b_buffer_t *buf = ncc_static_image(.raw = "raw", .length = 3);
+const n00b_buffer_t *lit = b"payload";
+```
+
+The transform is declaration-initializer only. The target must be a pointer
+type. Block-scope mutable targets are rejected; use a `const` target locally or
+move mutable static-image objects to file scope. Arguments must currently be
+string-literal byte payloads, integer literals, or boolean literals. Keyword
+arguments use the ncc keyword-argument syntax (`.name = literal`) and are
+passed to the runtime static initializer helper.
+
+`b"..."` is the shorthand literal for readonly static `n00b_buffer_t` objects.
+It supports ordinary C string escapes and adjacent ordinary string literal
+concatenation, and has the same declaration/lifetime restrictions as
+`ncc_static_image(...)`. Unlike the generic call form, `b"..."` must target
+`n00b_buffer_t *`.
+
+ncc does not construct these objects at program startup. Instead it sends a
+build-time request to the helper named by `--ncc-static-init-helper=PATH`.
+The helper validates the registered type policy, emits ordinary C declarations
+for the static object, payload descriptors, dependency metadata, and response
+metadata, and returns the initializer expression that should replace the
+`ncc_static_image(...)` call.
+
+Generated helper output must be valid after preprocessing. In practice that
+means emitting concrete constants or enum names, not private macros that only
+existed while ncc was preprocessing the original source.
+
 ### n00b GC Stack Maps
 
 ncc can emit n00b-compatible exact stack-map metadata for stack roots:

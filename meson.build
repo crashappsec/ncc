@@ -186,7 +186,9 @@ src_xform = files(
   'src/xform/xform_option.c',
   'src/xform/xform_rpc.c',
   'src/xform/xform_rstr.c',
+  'src/xform/xform_static_image.c',
   'src/xform/xform_static_object.c',
+  'src/xform/xform_type_layout.c',
   'src/xform/xform_typeid.c',
   'src/xform/xform_typestr.c',
   'src/xform/xform_typehash.c',
@@ -246,6 +248,15 @@ ncc_exe = executable('ncc',
 
 test_runner = find_program('test/run_test.sh')
 test_dir    = meson.current_source_dir() / 'test'
+
+static_image_helper = executable('test_static_image_helper',
+  'test/static_image_helper.c',
+  c_args : c_args + coverage_args,
+  link_args : coverage_link_args,
+)
+static_image_helper_flags = [
+  '--ncc-static-init-helper=' + static_image_helper.full_path(),
+]
 
 # Library-level tests (link against libncc directly)
 test_pwz = executable('test_pwz',
@@ -348,6 +359,7 @@ ncc_static_descriptor_flags = [
 ncc_compile_tests = {
   'bang':          ['compile_run',  test_dir / 'test_bang.c'],
   'array_literal': ['compile_run',  test_dir / 'test_array_literal.c'],
+  'static_image': ['compile_run', test_dir / 'test_static_image.c'],
   'constexpr':    ['compile_run',  test_dir / 'test_constexpr.c'],
   'kargs':        ['compile_run',  test_dir / 'test_kargs.c'],
   'kargs_vargs':  ['compile_run',  test_dir / 'test_kargs_vargs.c'],
@@ -372,10 +384,16 @@ ncc_compile_tests = {
 }
 
 foreach name, params : ncc_compile_tests
+  extra_args = []
+  test_deps = [ncc_exe]
+  if name == 'static_image'
+    extra_args = static_image_helper_flags
+    test_deps += [static_image_helper]
+  endif
   test('ncc_' + name, test_runner,
-    args : [ncc_exe, params[0], params[1]] + ncc_test_flags,
+    args : [ncc_exe, params[0], params[1]] + ncc_test_flags + extra_args,
     suite : 'ncc',
-    depends : ncc_exe,
+    depends : test_deps,
   )
 endforeach
 
@@ -423,6 +441,24 @@ test('ncc_static_object_descriptors_nested_scan', test_runner,
   depends : ncc_exe,
 )
 
+test('ncc_static_object_descriptors_sparse_scan', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_static_object_descriptors.c',
+          'n00b_gc_scan_cb_struct_layout']
+         + ncc_test_flags + ncc_static_descriptor_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_static_object_descriptors_sparse_offset', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_static_object_descriptors.c',
+          '__builtin_offsetof (descriptor_sparse_item_t, left)']
+         + ncc_test_flags + ncc_static_descriptor_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 test('ncc_static_object_descriptors_entry_attr', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
@@ -430,6 +466,24 @@ test('ncc_static_object_descriptors_entry_attr', test_runner,
          + ncc_test_flags + ncc_static_descriptor_flags,
   suite : 'ncc',
   depends : ncc_exe,
+)
+
+test('ncc_static_image_response_contract', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_static_image.c',
+          'n00b_static_image_response_t __ncc_static_image_']
+         + ncc_test_flags + static_image_helper_flags,
+  suite : 'ncc',
+  depends : [ncc_exe, static_image_helper],
+)
+
+test('ncc_static_image_dependency_contract', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_static_image.c',
+          '.dependency_count = 1']
+         + ncc_test_flags + static_image_helper_flags,
+  suite : 'ncc',
+  depends : [ncc_exe, static_image_helper],
 )
 
 if host_machine.system() != 'windows' and cc.has_header('pthread.h')
@@ -897,6 +951,48 @@ ncc_error_contains_tests = {
     test_dir / 'err_array_literal_unsupported_elem.c',
     'is not supported for static initialization yet',
   ],
+  'err_array_literal_union_pointer': [
+    test_dir / 'err_array_literal_union_pointer.c',
+    'precise active-member static layout is not supported yet',
+  ],
+  'err_array_literal_transient_field': [
+    test_dir / 'err_array_literal_transient_field.c',
+    'transient type',
+  ],
+  'err_array_literal_field_bound_expr': [
+    test_dir / 'err_array_literal_field_bound_expr.c',
+    'non-numeric bounds',
+  ],
+  'err_array_literal_missing_field_policy': [
+    test_dir / 'err_array_literal_missing_field_policy.c',
+    'no static-layout policy',
+  ],
+  'err_static_image_bad_payload': [
+    test_dir / 'err_static_image_bad_payload.c',
+    'requires a string payload',
+    '--ncc-static-init-helper=' + static_image_helper.full_path(),
+  ],
+  'err_static_image_non_pointer': [
+    test_dir / 'err_static_image_non_pointer.c',
+    'must target a pointer',
+  ],
+  'err_static_image_local_mutable': [
+    test_dir / 'err_static_image_local_mutable.c',
+    'must be declared at file scope',
+  ],
+  'err_static_image_not_initializer': [
+    test_dir / 'err_static_image_not_initializer.c',
+    'must be used as the whole initializer expression',
+  ],
+  'err_static_image_unsupported_target': [
+    test_dir / 'err_static_image_unsupported_target.c',
+    'not supported',
+    '--ncc-static-init-helper=' + static_image_helper.full_path(),
+  ],
+  'err_buffer_literal_target': [
+    test_dir / 'err_buffer_literal_target.c',
+    'buffer literal initializer must target n00b_buffer_t *',
+  ],
   'err_gc_stack_maps_unnamed_param': [
     test_dir / 'err_gc_stack_maps_unnamed_param.c',
     'pointer or aggregate parameter has no name',
@@ -923,6 +1019,6 @@ foreach name, params : ncc_error_contains_tests
     args : [ncc_exe, 'expect_error_contains', params[0], params[1]]
            + ncc_test_flags + extra_args,
     suite : 'ncc',
-    depends : ncc_exe,
+    depends : [ncc_exe, static_image_helper],
   )
 endforeach
