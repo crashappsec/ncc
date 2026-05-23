@@ -664,6 +664,69 @@ test('ncc_gc_stack_maps_thread_runtime_skipped', test_runner,
   depends : ncc_exe,
 )
 
+test('ncc_gc_stack_maps_setjmp_diagnostic', test_runner,
+  args : [ncc_exe, 'expect_error_contains',
+          test_dir / 'err_gc_stack_maps_setjmp.c',
+          'unsafe non-local exit call']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_setjmp_spoof_diagnostic', test_runner,
+  args : [ncc_exe, 'expect_error_contains',
+          test_dir / 'err_gc_stack_maps_setjmp_spoof.c',
+          'unsafe non-local exit call']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_longjmp_diagnostic', test_runner,
+  args : [ncc_exe, 'expect_error_contains',
+          test_dir / 'err_gc_stack_maps_longjmp.c',
+          'unsafe non-local exit call']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_stw_macro_allowed', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_stw_macro.c',
+          'n00b_gc_stack_push']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_nonlocal_api_allowed', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_nonlocal_api.c',
+          'n00b_gc_stack_push']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_nonlocal_runtime_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_nonlocal_runtime_skip.c',
+          'n00b_gc_stack_push']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_collect_runtime_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_collect_skip.c',
+          'n00b_gc_stack_push']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 test('ncc_gc_stack_maps_runtime_compile', test_runner,
   args : [ncc_exe, 'compile_run', test_dir / 'test_gc_stack_maps_runtime.c']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],

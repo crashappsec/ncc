@@ -630,9 +630,20 @@ publication unsafe or recursive: the generated/manual `n00b_gc_stack_*`
 API, n00b thread/safepoint/futex helpers, computed-goto functions,
 functions declared in system headers, selected runtime helpers, and functions that
 manually call `n00b_gc_stack_push()` or `n00b_gc_stack_pop()`. Exact-only
-collection across arbitrary uninstrumented C boundaries, non-local exits,
-minimal last-use liveness, and active-member precision for unions remain
-future work.
+collection across arbitrary uninstrumented C boundaries, minimal last-use
+liveness, and active-member precision for unions remain future work.
+
+Raw `setjmp`, `sigsetjmp`, `longjmp`, and `siglongjmp`-style non-local exits
+are rejected when stack-map emission is enabled because they can bypass
+cleanup-backed frame pops. Use ordinary error propagation, compile the function
+without stack maps, or use the n00b non-local-exit API
+(`n00b_setjmp()` / `n00b_longjmp()`), which saves and restores the published
+GC stack-map chain around the jump. The allowed `setjmp` form must be the
+supported n00b checkpoint expansion, not an ad hoc raw call that merely invokes
+the checkpoint helper. ncc also recognizes the n00b STW/blocking
+macro shape and selected GC/STW runtime primitives as reserved runtime
+mechanics; ordinary parser/error unwinds through raw libc calls are not
+accepted.
 
 
 ## Customization
