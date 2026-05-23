@@ -186,6 +186,7 @@ src_xform = files(
   'src/xform/xform_option.c',
   'src/xform/xform_rpc.c',
   'src/xform/xform_rstr.c',
+  'src/xform/xform_static_object.c',
   'src/xform/xform_typeid.c',
   'src/xform/xform_typestr.c',
   'src/xform/xform_typehash.c',

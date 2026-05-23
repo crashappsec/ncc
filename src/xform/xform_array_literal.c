@@ -7,9 +7,9 @@
 #include "xform/xform_data.h"
 #include "xform/xform_helpers.h"
 #include "xform/xform_rstr.h"
+#include "xform/xform_static_object.h"
 
 #include <ctype.h>
-#include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +25,18 @@ typedef struct {
     int    count;
     int    cap;
 } string_list_t;
+
+typedef struct {
+    const char *scan_kind;
+    const char *scan_cb;
+    const char *scan_user;
+    const char *no_scan;
+    char        ptr_words[32];
+    char        shape_name[64];
+    char        stride_words[128];
+    char       *shape_decl;
+    char       *owned_scan_user;
+} array_scan_plan_t;
 
 static ncc_dict_t *
 array_types(ncc_xform_ctx_t *ctx)
@@ -42,58 +54,6 @@ static const char *
 get_array_literal_data_expr(ncc_xform_ctx_t *ctx)
 {
     return ncc_xform_get_data(ctx)->array_literal_data_expr;
-}
-
-static const char *
-get_static_object_entry_attr(ncc_xform_ctx_t *ctx)
-{
-    const char *attr = ncc_xform_get_data(ctx)->static_object_entry_attr;
-    return attr ? attr : "";
-}
-
-static void
-build_array_static_object_names(const char *data_name, char *desc_name,
-                                size_t desc_size, char *entry_name,
-                                size_t entry_size, char *object_id,
-                                size_t object_id_size)
-{
-    snprintf(desc_name, desc_size, "%s_desc", data_name);
-    snprintf(entry_name, entry_size, "%s_entry", data_name);
-
-    uint64_t id = ncc_type_hash_u64(desc_name);
-    snprintf(object_id, object_id_size, "%" PRIu64 "ULL", id);
-}
-
-static char *
-expand_source_template(const char *tmpl, const char **args, int nargs)
-{
-    ncc_buffer_t *buf = ncc_buffer_empty();
-
-    for (const char *p = tmpl; p && *p;) {
-        if (*p != '$' || !isdigit((unsigned char)p[1])) {
-            ncc_buffer_putc(buf, *p++);
-            continue;
-        }
-
-        p++;
-        int slot = 0;
-        while (isdigit((unsigned char)*p)) {
-            slot = slot * 10 + (*p - '0');
-            p++;
-        }
-
-        if (slot < 0 || slot >= nargs) {
-            fprintf(stderr,
-                    "ncc: error: array literal data template references "
-                    "unavailable slot $%d\n",
-                    slot);
-            exit(1);
-        }
-
-        ncc_buffer_puts(buf, args[slot] ? args[slot] : "");
-    }
-
-    return ncc_buffer_take(buf);
 }
 
 static bool
@@ -795,6 +755,64 @@ data_pointer_type_name(const char *elem_type)
     return result;
 }
 
+static void
+array_scan_plan_init(array_scan_plan_t *plan, ncc_xform_ctx_t *ctx,
+                     array_type_info_t *type, array_type_info_t *elem_array,
+                     const char *data_name, int count, bool emit_shape_decl)
+{
+    bool elem_is_pointer = strchr(type->elem_type, '*') != nullptr
+                         || is_rstr_element_type(ctx, type->elem_type);
+    bool elem_is_nested  = elem_array != nullptr;
+
+    snprintf(plan->ptr_words, sizeof(plan->ptr_words), "%d",
+             elem_is_pointer && !elem_is_nested ? count : 0);
+    snprintf(plan->shape_name, sizeof(plan->shape_name),
+             "__ncc_arraylit_%s_shape", data_name);
+    snprintf(plan->stride_words, sizeof(plan->stride_words),
+             "(sizeof(%s)/sizeof(void*))", type->elem_type);
+
+    plan->scan_kind  = "1";
+    plan->scan_cb    = "nullptr";
+    plan->scan_user  = "nullptr";
+    plan->no_scan    = "true";
+    plan->shape_decl = copy_cstr("");
+
+    if (elem_is_nested) {
+        plan->scan_kind = "4";
+        plan->scan_cb   = "n00b_gc_scan_cb_struct_field";
+        plan->no_scan   = "false";
+
+        if (emit_shape_decl) {
+            ncc_buffer_t *shape = ncc_buffer_empty();
+            ncc_buffer_printf(shape,
+                              "static n00b_gc_struct_array_t %s={.stride=%s,"
+                              ".offset=0,.count=%d};",
+                              plan->shape_name, plan->stride_words, count);
+            ncc_free(plan->shape_decl);
+            plan->shape_decl = ncc_buffer_take(shape);
+
+            ncc_buffer_t *shape_ref = ncc_buffer_empty();
+            ncc_buffer_printf(shape_ref, "&%s", plan->shape_name);
+            plan->owned_scan_user = ncc_buffer_take(shape_ref);
+            plan->scan_user       = plan->owned_scan_user;
+        }
+        else {
+            plan->scan_user = "__unused_shape";
+        }
+    }
+    else if (elem_is_pointer) {
+        plan->scan_kind = "2";
+        plan->no_scan   = "false";
+    }
+}
+
+static void
+array_scan_plan_free(array_scan_plan_t *plan)
+{
+    ncc_free(plan->owned_scan_user);
+    ncc_free(plan->shape_decl);
+}
+
 static char *
 build_array_data_decl(ncc_xform_ctx_t *ctx, array_type_info_t *type,
                       array_type_info_t *elem_array, const char *data_name,
@@ -806,76 +824,36 @@ build_array_data_decl(ncc_xform_ctx_t *ctx, array_type_info_t *type,
     char *items = join_initializer_exprs(exprs);
 
     char *ptr_type = data_pointer_type_name(type->elem_type);
-    uint64_t typehash = ncc_type_hash_u64(ptr_type);
-    char typehash_str[32];
-    snprintf(typehash_str, sizeof(typehash_str), "%" PRIu64 "ULL",
-             typehash);
+    char *typehash_str = ncc_static_object_typehash_expr(ptr_type);
     ncc_free(ptr_type);
 
-    bool elem_is_pointer = strchr(type->elem_type, '*') != nullptr
-                         || is_rstr_element_type(ctx, type->elem_type);
-    bool elem_is_nested  = elem_array != nullptr;
+    array_scan_plan_t scan_plan = {0};
+    array_scan_plan_init(&scan_plan, ctx, type, elem_array, data_name,
+                         exprs->count, true);
 
-    char ptr_words_str[32];
-    snprintf(ptr_words_str, sizeof(ptr_words_str), "%d",
-             elem_is_pointer && !elem_is_nested ? exprs->count : 0);
+    ncc_static_object_names_t names;
+    ncc_static_object_names_for_array(&names, data_name);
 
-    const char *scan_kind = "1";
-    const char *scan_cb   = "nullptr";
-    const char *scan_user = "nullptr";
-    const char *no_scan   = "true";
-
-    char shape_name[64];
-    char shape_ref[80];
-    char stride_words[128];
-    char *shape_decl = copy_cstr("");
-
-    snprintf(shape_name, sizeof(shape_name), "__ncc_arraylit_%s_shape",
-             data_name);
-    snprintf(shape_ref, sizeof(shape_ref), "&%s", shape_name);
-    snprintf(stride_words, sizeof(stride_words), "(sizeof(%s)/sizeof(void*))",
-             type->elem_type);
-
-    if (elem_is_nested) {
-        ncc_buffer_t *shape = ncc_buffer_empty();
-        ncc_buffer_printf(shape,
-                          "static n00b_gc_struct_array_t %s={.stride=%s,"
-                          ".offset=0,.count=%d};",
-                          shape_name, stride_words, exprs->count);
-        ncc_free(shape_decl);
-        shape_decl = ncc_buffer_take(shape);
-        scan_kind  = "4";
-        scan_cb    = "n00b_gc_scan_cb_struct_field";
-        scan_user  = shape_ref;
-        no_scan    = "false";
-    }
-    else if (elem_is_pointer) {
-        scan_kind = "2";
-        no_scan   = "false";
-    }
-
-    char desc_name[128];
-    char entry_name[128];
-    char object_id_str[32];
-    build_array_static_object_names(data_name, desc_name, sizeof(desc_name),
-                                    entry_name, sizeof(entry_name),
-                                    object_id_str, sizeof(object_id_str));
-
-    const char *static_flags = "2";
-    const char *entry_attr   = get_static_object_entry_attr(ctx);
+    ncc_static_object_slots_t stobj;
+    ncc_static_object_slots_init(&stobj, ctx, &names, typehash_str, "2",
+                                 scan_plan.scan_kind, scan_plan.scan_cb,
+                                 scan_plan.scan_user);
 
     const char *all_args[] = {
-        type->elem_type, data_name, count_str, items, typehash_str,
-        ptr_words_str, scan_kind, scan_cb, scan_user, wrapper_name,
-        shape_name, stride_words, "0", shape_decl, no_scan,
-        desc_name, entry_name, object_id_str, static_flags, entry_attr,
+        type->elem_type, data_name, count_str, items, stobj.typehash,
+        scan_plan.ptr_words, stobj.scan_kind, stobj.scan_cb, stobj.scan_user,
+        wrapper_name, scan_plan.shape_name, scan_plan.stride_words, "0",
+        scan_plan.shape_decl, scan_plan.no_scan, stobj.desc_name,
+        stobj.entry_name, stobj.object_id, stobj.flags, stobj.entry_attr,
     };
 
-    char *result = expand_source_template(get_array_literal_data_template(ctx),
-                                          all_args, 20);
+    char *result = ncc_static_object_expand_template(
+        "array literal data", get_array_literal_data_template(ctx),
+        all_args, 20);
 
     ncc_free(items);
-    ncc_free(shape_decl);
+    ncc_free(typehash_str);
+    array_scan_plan_free(&scan_plan);
     return result;
 }
 
@@ -888,45 +866,36 @@ build_array_data_expr(ncc_xform_ctx_t *ctx, array_type_info_t *type,
     snprintf(count_str, sizeof(count_str), "%d", count);
 
     char *ptr_type = data_pointer_type_name(type->elem_type);
-    uint64_t typehash = ncc_type_hash_u64(ptr_type);
-    char typehash_str[32];
-    snprintf(typehash_str, sizeof(typehash_str), "%" PRIu64 "ULL",
-             typehash);
+    char *typehash_str = ncc_static_object_typehash_expr(ptr_type);
     ncc_free(ptr_type);
 
-    bool elem_is_pointer = strchr(type->elem_type, '*') != nullptr
-                         || is_rstr_element_type(ctx, type->elem_type);
-    bool elem_is_nested  = elem_array != nullptr;
+    array_scan_plan_t scan_plan = {0};
+    array_scan_plan_init(&scan_plan, ctx, type, elem_array, data_name,
+                         count, false);
 
-    char ptr_words_str[32];
-    snprintf(ptr_words_str, sizeof(ptr_words_str), "%d",
-             elem_is_pointer && !elem_is_nested ? count : 0);
+    ncc_static_object_names_t names;
+    ncc_static_object_names_for_array(&names, data_name);
 
-    const char *scan_kind = elem_is_nested ? "4" : elem_is_pointer ? "2" : "1";
-    const char *scan_cb = elem_is_nested ? "n00b_gc_scan_cb_struct_field"
-                                         : "nullptr";
-    const char *scan_user = elem_is_nested ? "__unused_shape" : "nullptr";
-    const char *no_scan = elem_is_nested || elem_is_pointer ? "false" : "true";
-
-    char desc_name[128];
-    char entry_name[128];
-    char object_id_str[32];
-    build_array_static_object_names(data_name, desc_name, sizeof(desc_name),
-                                    entry_name, sizeof(entry_name),
-                                    object_id_str, sizeof(object_id_str));
-
-    const char *static_flags = "2";
-    const char *entry_attr   = get_static_object_entry_attr(ctx);
+    ncc_static_object_slots_t stobj;
+    ncc_static_object_slots_init(&stobj, ctx, &names, typehash_str, "2",
+                                 scan_plan.scan_kind, scan_plan.scan_cb,
+                                 scan_plan.scan_user);
 
     const char *all_args[] = {
-        type->elem_type, data_name, count_str, "", typehash_str,
-        ptr_words_str, scan_kind, scan_cb, scan_user, wrapper_name,
-        "__unused_shape", "0", "0", "", no_scan,
-        desc_name, entry_name, object_id_str, static_flags, entry_attr,
+        type->elem_type, data_name, count_str, "", stobj.typehash,
+        scan_plan.ptr_words, stobj.scan_kind, stobj.scan_cb, stobj.scan_user,
+        wrapper_name, "__unused_shape", "0", "0", "",
+        scan_plan.no_scan, stobj.desc_name, stobj.entry_name,
+        stobj.object_id, stobj.flags, stobj.entry_attr,
     };
 
-    return expand_source_template(get_array_literal_data_expr(ctx),
-                                  all_args, 20);
+    char *result = ncc_static_object_expand_template(
+        "array literal data expression", get_array_literal_data_expr(ctx),
+        all_args, 20);
+
+    ncc_free(typehash_str);
+    array_scan_plan_free(&scan_plan);
+    return result;
 }
 
 static char *
