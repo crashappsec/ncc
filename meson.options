@@ -33,11 +33,11 @@ option('rstr_static_ref_expr_plain',
 option('array_literal_data_template',
        type: 'string',
        value: '',
-       description: 'Override the array literal backing storage declaration template')
+       description: 'Legacy compatibility option; helper-backed array literals ignore this')
 option('array_literal_data_expr',
        type: 'string',
        value: '',
-       description: 'Override the expression used as the array literal data pointer')
+       description: 'Legacy compatibility option; helper-backed array literals ignore this')
 option('static_object_entry_attr',
        type: 'string',
        value: '',

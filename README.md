@@ -551,42 +551,54 @@ The `r""` prefix triggers compile-time parsing of markup tags. The
 transform emits a static compound literal with pre-computed styling
 data, so there is zero runtime parsing cost.
 
-### Static Array Literals (`[...]`)
+### Static Container Literals
 
-Array literals initialize `ncc_array_t(T)` or an embedding runtime's
-compatible array type from compile-time data:
+Static container literals initialize compatible array and list objects from
+compile-time data:
+
+```c
+ncc_array_t(int) xs = [1, 2, 3];    // compatibility array spelling
+ncc_array_t(int) ys = a{4, 5, 6};   // explicit array spelling
+n00b_list_t(int) zs = l{7, 8, 9};   // n00b list spelling
+n00b_list_t(int) *ps = l{10, 11};   // pointer to generated static list object
+```
+
+`[...]` and `a{...}` both target `ncc_array_t(T)` or an embedding runtime's
+compatible array type. `l{...}` targets `n00b_list_t(T)` values or pointers.
+Arrays and lists are distinct; `a{...}` used with a list target, or `l{...}`
+used with an array/non-list target, is rejected.
+
+Examples:
 
 ```c
 ncc_array_t(int) xs = [1, 2, 3];
+const ncc_array_t(int) ys = a{4, 5, 6};
 const ncc_array_t(ncc_array_t(int)) rows = [[1, 2], [3, 4, 5]];
 ncc_array_t(ncc_string_t *) words = [r"one", r"<b>two</b>"];
+n00b_list_t(ncc_string_t *) names = l{r"one", r"two"};
 ```
 
-The v1 transform is intentionally limited to declaration
-initializers, where the declared target type and storage context are
-known. Module-scope declarations may be mutable or `const`; block-scope
-declarations must be `const`. A mutable local declaration such as
-`ncc_array_t(int) xs = [1, 2, 3];` inside a function is rejected because
-ncc does not yet perform the lifetime analysis needed for mutable local
-objects with static backing storage.
+The transform is intentionally limited to declaration initializers, where the
+declared target type and storage context are known. Module-scope declarations
+may be mutable or `const`; block-scope declarations must be `const`. A mutable
+local declaration such as `ncc_array_t(int) xs = [1, 2, 3];` or
+`n00b_list_t(int) xs = l{1, 2, 3};` inside a function is rejected because ncc
+does not yet perform the lifetime analysis needed for mutable local objects
+with static backing storage.
 
 Supported element types are static-initialization-safe scalars,
-pointers, rich-string pointers matching the configured rich-string
-type, and nested compatible array values. Unknown structs, runtime
-containers, dictionaries, lock-bearing values, allocator-owned values,
-and callback-heavy types are rejected until they opt in through a
-future static-literal type policy. Literal lists and dictionaries are
-reserved for a later literal modifier design and are not implemented by
-this syntax.
+pointers, rich-string pointers matching the configured rich-string type,
+compatible `b"..."` buffer pointers in list literals, aggregate values with
+static-layout policy, and nested compatible array/list values. Unknown structs,
+runtime containers, dictionaries, lock-bearing values, allocator-owned values,
+and callback-heavy types are rejected until they opt in through a future
+static-literal type policy.
 
-The generated C uses static backing storage and initializes the array
-value with `.data`, `.len`, `.cap`, `.lock`, `.allocator`,
-`.scan_kind`, `.scan_cb`, and `.scan_user`. Embedding runtimes can
-override the backing-storage templates to emit static-object descriptor
-records next to the generated storage for GC and memory-introspection
-support. These templates should emit ordinary C declarations, not macro
-calls that depend on source preprocessor definitions, because ncc
-inserts generated code after preprocessing.
+Nonempty static container literals require the build-time helper named by
+`--ncc-static-init-helper=PATH`. The helper owns the generated backing storage,
+static-object descriptors, portable identities, and list lock images. Empty
+array literals do not need helper output because their `.data` field is null.
+Generated helper output must be valid after preprocessing.
 
 ### Static Image Initializers
 
@@ -707,8 +719,8 @@ Pass these with `meson setup -Doption=value`:
 | `rstr_static_ref_template_plain` | (built-in) | Declaration template for plain `r""` literals embedded in static array literal initializers |
 | `rstr_static_ref_expr_styled` | (built-in) | Address expression template for styled `r""` literals embedded in static array literal initializers |
 | `rstr_static_ref_expr_plain` | (built-in) | Address expression template for plain `r""` literals embedded in static array literal initializers |
-| `array_literal_data_template` | (built-in) | Declaration template for array literal backing storage |
-| `array_literal_data_expr` | (built-in) | Expression used as the generated array `.data` pointer |
+| `array_literal_data_template` | (legacy compatibility) | Accepted but ignored after array helper migration |
+| `array_literal_data_expr` | (legacy compatibility) | Accepted but ignored after array helper migration |
 | `static_object_entry_attr` | empty | Attribute text emitted on static-object descriptor entry declarations |
 | `gc_stack_maps` | `false` | Enable n00b GC stack-map emission by default for this ncc binary |
 | `coverage` | `false` | Enable clang source-based code coverage |
@@ -735,8 +747,8 @@ arguments reach clang.
 | `--ncc-rstr-static-ref-template-plain=TMPL` | Override plain rstr declaration template for static array literal initializers |
 | `--ncc-rstr-static-ref-expr-styled=EXPR` | Override styled rstr address expression for static array literal initializers |
 | `--ncc-rstr-static-ref-expr-plain=EXPR` | Override plain rstr address expression for static array literal initializers |
-| `--ncc-array-literal-data-template=TMPL` | Override array literal backing storage declaration template |
-| `--ncc-array-literal-data-expr=EXPR` | Override expression used as the generated array `.data` pointer |
+| `--ncc-array-literal-data-template=TMPL` | Legacy compatibility flag; accepted but ignored after array helper migration |
+| `--ncc-array-literal-data-expr=EXPR` | Legacy compatibility flag; accepted but ignored after array helper migration |
 | `--ncc-static-object-entry-attr=ATTR` | Attribute text emitted on static-object descriptor entry declarations |
 | `--ncc-gc-stack-maps` | Emit n00b GC stack-map metadata in strict mode |
 | `--ncc-gc-stack-maps-relaxed` | Emit n00b GC stack maps while skipping unsupported local roots |
@@ -830,38 +842,16 @@ array literals use the same slot layout as the primary rich-string
 templates. Template expansion fails with a diagnostic if a template
 references a slot beyond the supported range.
 
-### Array Literal Templates
+### Static Container Helper
 
-`array_literal_data_template` emits the static backing storage for a
-non-empty array literal. `array_literal_data_expr` emits the expression
-used for the generated array value's `.data` field. Both templates use
-the same slot layout:
-
-| Slot | Content |
-|------|---------|
-| `$0` | Element type |
-| `$1` | Backing data variable name |
-| `$2` | Element count |
-| `$3` | Comma-joined initializer items |
-| `$4` | Type hash for `element_type *` |
-| `$5` | Pointer word count for pointer element arrays |
-| `$6` | GC scan kind (`1` none, `2` all pointers, `4` callback) |
-| `$7` | GC scan callback |
-| `$8` | GC scan user data |
-| `$9` | Reserved wrapper/static name |
-| `$10` | Nested-array shape variable name |
-| `$11` | Nested-array stride in words |
-| `$12` | Reserved |
-| `$13` | Nested-array shape declaration, or empty |
-| `$14` | `true` when the storage has no pointer scan needs |
-| `$15` | Static-object descriptor variable name |
-| `$16` | Static-object descriptor entry variable name |
-| `$17` | Static-object object id |
-| `$18` | Static-object flags (`2` for mutable in the current transform) |
-| `$19` | Static-object entry attribute text |
-
-The descriptor slots are intended for runtimes that publish generated
-static storage through linker sections or equivalent platform metadata.
+Static array/list literals now use `--ncc-static-init-helper=PATH` for
+nonempty generated storage. ncc sends the helper typed C initializer records,
+target ABI facts, scan metadata, descriptor attributes, and portable identity
+keys. The helper emits ordinary C declarations and returns the initializer
+expression that ncc should place in the original declaration. Legacy
+`array_literal_data_template` and `array_literal_data_expr` settings are still
+accepted for compatibility with older build files, but the helper path no
+longer consults them.
 
 ## Environment Variables
 

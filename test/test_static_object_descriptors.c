@@ -5,7 +5,7 @@
 #include "ncc_runtime.h"
 #include "lib/array.h"
 
-typedef void (*n00b_static_scan_cb_t)(void *, void *);
+typedef ncc_gc_scan_cb_t n00b_static_scan_cb_t;
 
 #define N00B_STATIC_IDENTITY_VERSION 1u
 
@@ -50,14 +50,14 @@ typedef struct {
 } n00b_static_object_desc_t;
 
 static void
-n00b_gc_scan_cb_struct_field(void *map, void *range)
+n00b_gc_scan_cb_struct_field(ncc_gc_map_t *map, void *range)
 {
     (void)map;
     (void)range;
 }
 
 static void
-n00b_gc_scan_cb_struct_layout(void *map, void *range)
+n00b_gc_scan_cb_struct_layout(ncc_gc_map_t *map, void *range)
 {
     (void)map;
     (void)range;

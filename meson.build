@@ -359,6 +359,7 @@ ncc_static_descriptor_flags = [
 ncc_compile_tests = {
   'bang':          ['compile_run',  test_dir / 'test_bang.c'],
   'array_literal': ['compile_run',  test_dir / 'test_array_literal.c'],
+  'list_literal':  ['compile_run',  test_dir / 'test_list_literal.c'],
   'static_image': ['compile_run', test_dir / 'test_static_image.c'],
   'constexpr':    ['compile_run',  test_dir / 'test_constexpr.c'],
   'kargs':        ['compile_run',  test_dir / 'test_kargs.c'],
@@ -386,7 +387,7 @@ ncc_compile_tests = {
 foreach name, params : ncc_compile_tests
   extra_args = []
   test_deps = [ncc_exe]
-  if name == 'static_image'
+  if name == 'static_image' or name == 'list_literal' or name == 'array_literal'
     extra_args = static_image_helper_flags
     test_deps += [static_image_helper]
   endif
@@ -400,72 +401,72 @@ endforeach
 test('ncc_static_object_descriptors', test_runner,
   args : [ncc_exe, 'compile_run',
           test_dir / 'test_static_object_descriptors.c']
-         + ncc_test_flags + ncc_static_descriptor_flags,
+         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
   suite : 'ncc',
-  depends : ncc_exe,
+  depends : [ncc_exe, static_image_helper],
 )
 
 test('ncc_static_object_descriptors_array_desc', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
           'n00b_static_object_desc_t __ncc_arraylit_']
-         + ncc_test_flags + ncc_static_descriptor_flags,
+         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
   suite : 'ncc',
-  depends : ncc_exe,
+  depends : [ncc_exe, static_image_helper],
 )
 
 test('ncc_static_object_descriptors_rstr_desc', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
           'n00b_static_object_desc_t _ncc_rsd_']
-         + ncc_test_flags + ncc_static_descriptor_flags,
+         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
   suite : 'ncc',
-  depends : ncc_exe,
+  depends : [ncc_exe, static_image_helper],
 )
 
 test('ncc_static_object_descriptors_pointer_scan', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
           '.scan_kind = 2']
-         + ncc_test_flags + ncc_static_descriptor_flags,
+         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
   suite : 'ncc',
-  depends : ncc_exe,
+  depends : [ncc_exe, static_image_helper],
 )
 
 test('ncc_static_object_descriptors_nested_scan', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
           'n00b_gc_scan_cb_struct_field']
-         + ncc_test_flags + ncc_static_descriptor_flags,
+         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
   suite : 'ncc',
-  depends : ncc_exe,
+  depends : [ncc_exe, static_image_helper],
 )
 
 test('ncc_static_object_descriptors_sparse_scan', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
           'n00b_gc_scan_cb_struct_layout']
-         + ncc_test_flags + ncc_static_descriptor_flags,
+         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
   suite : 'ncc',
-  depends : ncc_exe,
+  depends : [ncc_exe, static_image_helper],
 )
 
 test('ncc_static_object_descriptors_sparse_offset', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
           '__builtin_offsetof (descriptor_sparse_item_t, left)']
-         + ncc_test_flags + ncc_static_descriptor_flags,
+         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
   suite : 'ncc',
-  depends : ncc_exe,
+  depends : [ncc_exe, static_image_helper],
 )
 
 test('ncc_static_object_descriptors_entry_attr', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
           '__attribute__ ((used))']
-         + ncc_test_flags + ncc_static_descriptor_flags,
+         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
   suite : 'ncc',
-  depends : ncc_exe,
+  depends : [ncc_exe, static_image_helper],
 )
 
 test('ncc_static_image_response_contract', test_runner,
@@ -931,6 +932,10 @@ ncc_error_contains_tests = {
     test_dir / 'err_array_literal_non_array_target.c',
     'requires an ncc_array_t(T) or n00b_array_t(T) object target',
   ],
+  'err_array_literal_explicit_non_array_target': [
+    test_dir / 'err_array_literal_explicit_non_array_target.c',
+    'requires an ncc_array_t(T) or n00b_array_t(T) object target',
+  ],
   'err_array_literal_pointer_target': [
     test_dir / 'err_array_literal_pointer_target.c',
     'must target an array object, not a pointer',
@@ -966,6 +971,26 @@ ncc_error_contains_tests = {
   'err_array_literal_missing_field_policy': [
     test_dir / 'err_array_literal_missing_field_policy.c',
     'no static-layout policy',
+  ],
+  'err_array_literal_missing_helper': [
+    test_dir / 'err_array_literal_missing_helper.c',
+    'requires --ncc-static-init-helper=PATH',
+  ],
+  'err_list_literal_non_list_target': [
+    test_dir / 'err_list_literal_non_list_target.c',
+    'list literal initializer',
+  ],
+  'err_list_literal_local_mutable': [
+    test_dir / 'err_list_literal_local_mutable.c',
+    'non-const local list literal',
+  ],
+  'err_list_literal_bstr_type': [
+    test_dir / 'err_list_literal_bstr_type.c',
+    'b-string list element requires element type',
+  ],
+  'err_list_literal_missing_helper': [
+    test_dir / 'err_list_literal_missing_helper.c',
+    'requires --ncc-static-init-helper=PATH',
   ],
   'err_static_image_bad_payload': [
     test_dir / 'err_static_image_bad_payload.c',

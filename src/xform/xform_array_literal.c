@@ -9,6 +9,7 @@
 #include "xform/xform_rstr.h"
 #include "xform/xform_static_object.h"
 #include "xform/xform_type_layout.h"
+#include "util/platform.h"
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -20,6 +21,8 @@ typedef struct {
     char *object_type;
     char *elem_type;
 } array_type_info_t;
+
+typedef array_type_info_t list_type_info_t;
 
 typedef struct {
     char **items;
@@ -50,16 +53,10 @@ array_types(ncc_xform_ctx_t *ctx)
     return &ncc_xform_get_data(ctx)->array_types;
 }
 
-static const char *
-get_array_literal_data_template(ncc_xform_ctx_t *ctx)
+static ncc_dict_t *
+list_types(ncc_xform_ctx_t *ctx)
 {
-    return ncc_xform_get_data(ctx)->array_literal_data_template;
-}
-
-static const char *
-get_array_literal_data_expr(ncc_xform_ctx_t *ctx)
-{
-    return ncc_xform_get_data(ctx)->array_literal_data_expr;
+    return &ncc_xform_get_data(ctx)->list_types;
 }
 
 static bool
@@ -263,6 +260,40 @@ lookup_array_type(ncc_xform_ctx_t *ctx, const char *key)
     return found ? info : nullptr;
 }
 
+static void
+record_list_type(ncc_xform_ctx_t *ctx, const char *key,
+                 const char *object_type, const char *elem_type)
+{
+    if (!key || !*key || !object_type || !*object_type || !elem_type
+        || !*elem_type) {
+        return;
+    }
+
+    bool found = false;
+    ncc_dict_get(list_types(ctx), (void *)key, &found);
+    if (found) {
+        return;
+    }
+
+    list_type_info_t *info = ncc_alloc(list_type_info_t);
+    info->object_type      = copy_cstr(object_type);
+    info->elem_type        = copy_cstr(elem_type);
+    ncc_dict_put(list_types(ctx), copy_cstr(key), info);
+}
+
+static list_type_info_t *
+lookup_list_type(ncc_xform_ctx_t *ctx, const char *key)
+{
+    if (!key || !*key) {
+        return nullptr;
+    }
+
+    bool              found = false;
+    list_type_info_t *info  = ncc_dict_get(list_types(ctx), (void *)key,
+                                           &found);
+    return found ? info : nullptr;
+}
+
 static char *
 tag_runtime_name(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tag_node)
 {
@@ -297,6 +328,23 @@ tag_is_array_type(ncc_parse_tree_t *tag_node)
         result = true;
     }
     else if (strstr(tag, "typeid") && strstr(tag, "\"array\"")) {
+        result = true;
+    }
+
+    ncc_free(tag);
+    return result;
+}
+
+static bool
+tag_is_list_type(ncc_parse_tree_t *tag_node)
+{
+    char *tag = node_text(tag_node);
+    bool  result = false;
+
+    if (strncmp(tag, "n00b_list_", 10) == 0) {
+        result = true;
+    }
+    else if (strstr(tag, "typeid") && strstr(tag, "\"n00b_list\"")) {
         result = true;
     }
 
@@ -428,6 +476,41 @@ array_type_from_struct_spec(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *su)
     return result;
 }
 
+static list_type_info_t *
+list_type_from_struct_spec(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *su)
+{
+    ncc_parse_tree_t *tag = ncc_xform_find_child_nt(su, "tag_name");
+    if (!tag) {
+        return nullptr;
+    }
+
+    char *runtime_tag = tag_runtime_name(ctx, tag);
+
+    ncc_buffer_t *obj_buf = ncc_buffer_empty();
+    ncc_buffer_printf(obj_buf, "struct %s", runtime_tag);
+    char *object_type = ncc_buffer_take(obj_buf);
+
+    char *elem_type = array_elem_type_from_struct(ctx, su);
+    bool  is_list   = elem_type && tag_is_list_type(tag);
+
+    if (!is_list) {
+        list_type_info_t *known = lookup_list_type(ctx, object_type);
+        ncc_free(runtime_tag);
+        ncc_free(object_type);
+        ncc_free(elem_type);
+        return known;
+    }
+
+    record_list_type(ctx, object_type, object_type, elem_type);
+    record_list_type(ctx, runtime_tag, object_type, elem_type);
+
+    list_type_info_t *result = lookup_list_type(ctx, object_type);
+    ncc_free(runtime_tag);
+    ncc_free(object_type);
+    ncc_free(elem_type);
+    return result;
+}
+
 static char *
 decl_specs_typedef_name(ncc_parse_tree_t *node)
 {
@@ -490,6 +573,24 @@ array_type_from_decl_specs(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl_specs)
     return info;
 }
 
+static list_type_info_t *
+list_type_from_decl_specs(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl_specs)
+{
+    ncc_parse_tree_t *su = first_descendant_nt(decl_specs,
+                                               "struct_or_union_specifier");
+    if (su) {
+        list_type_info_t *info = list_type_from_struct_spec(ctx, su);
+        if (info) {
+            return info;
+        }
+    }
+
+    char *name = decl_specs_typedef_name(decl_specs);
+    list_type_info_t *info = lookup_list_type(ctx, name);
+    ncc_free(name);
+    return info;
+}
+
 static char *
 declarator_name(ncc_parse_tree_t *node)
 {
@@ -539,12 +640,77 @@ collect_nt_children(ncc_parse_tree_t *node, const char *name,
 }
 
 static ncc_parse_tree_t *
+first_child_leaf(ncc_parse_tree_t *node)
+{
+    if (!node) {
+        return nullptr;
+    }
+    if (ncc_tree_is_leaf(node)) {
+        return node;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        ncc_parse_tree_t *found = first_child_leaf(ncc_tree_child(node, i));
+        if (found) {
+            return found;
+        }
+    }
+    return nullptr;
+}
+
+static ncc_parse_tree_t *
+initializer_modified_literal(ncc_parse_tree_t *initializer)
+{
+    if (!initializer) {
+        return nullptr;
+    }
+    return ncc_xform_find_child_nt(initializer, "modified_literal");
+}
+
+static const char *
+modified_literal_modifier(ncc_parse_tree_t *literal)
+{
+    if (!literal || !ncc_xform_nt_name_is(literal, "modified_literal")) {
+        return nullptr;
+    }
+
+    ncc_parse_tree_t *leaf = first_child_leaf(literal);
+    return leaf ? ncc_xform_leaf_text(leaf) : nullptr;
+}
+
+static bool
+modified_literal_is(ncc_parse_tree_t *literal, const char *modifier)
+{
+    const char *got = modified_literal_modifier(literal);
+    return got && modifier && strcmp(got, modifier) == 0;
+}
+
+static ncc_parse_tree_t *
 initializer_array_literal(ncc_parse_tree_t *initializer)
 {
     if (!initializer) {
         return nullptr;
     }
-    return ncc_xform_find_child_nt(initializer, "array_literal");
+
+    ncc_parse_tree_t *literal = ncc_xform_find_child_nt(initializer,
+                                                        "array_literal");
+    if (literal) {
+        return literal;
+    }
+
+    literal = initializer_modified_literal(initializer);
+    return modified_literal_is(literal, "a") ? literal : nullptr;
+}
+
+static ncc_parse_tree_t *
+initializer_list_literal(ncc_parse_tree_t *initializer)
+{
+    if (!initializer) {
+        return nullptr;
+    }
+    ncc_parse_tree_t *literal = initializer_modified_literal(initializer);
+    return modified_literal_is(literal, "l") ? literal : nullptr;
 }
 
 static void
@@ -1110,6 +1276,19 @@ offset_expr_for_field_path(const char *type_name, const char *field_path)
 }
 
 static char *
+offset_expr_for_pointer_array_item(const char *type_name,
+                                   const char *field_path, uint64_t ix)
+{
+    if (ix == 0) {
+        return offset_expr_for_field_path(type_name, field_path);
+    }
+
+    return format_cstr(
+        "((uint64_t)((__builtin_offsetof(%s,%s)/sizeof(void*))+%lluULL))",
+        type_name, field_path, (unsigned long long)ix);
+}
+
+static char *
 offset_assert_for_field_path(const char *type_name, const char *field_path)
 {
     return format_cstr(
@@ -1136,22 +1315,29 @@ collect_pointer_array_offsets(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *site,
                               const char *elem_type, const char *field_path,
                               ncc_parse_tree_t *declarator,
                               string_list_t *offsets, string_list_t *asserts,
-                              int dim_index, uint64_list_t *dims)
+                              int dim_index, uint64_t linear_ix,
+                              uint64_list_t *dims)
 {
     (void)ctx;
     if ((size_t)dim_index == dims->len) {
-        list_push(offsets, offset_expr_for_field_path(elem_type, field_path));
+        list_push(offsets, offset_expr_for_pointer_array_item(elem_type,
+                                                              field_path,
+                                                              linear_ix));
         list_push(asserts, offset_assert_for_field_path(elem_type,
                                                         field_path));
         return;
     }
 
+    uint64_t stride = 1;
+    for (size_t i = (size_t)dim_index + 1; i < dims->len; i++) {
+        stride *= dims->data[i];
+    }
+
     for (uint64_t i = 0; i < dims->data[dim_index]; i++) {
-        char *indexed = append_index_path(field_path, i);
-        collect_pointer_array_offsets(ctx, site, elem_type, indexed,
+        collect_pointer_array_offsets(ctx, site, elem_type, field_path,
                                       declarator, offsets, asserts,
-                                      dim_index + 1, dims);
-        ncc_free(indexed);
+                                      dim_index + 1,
+                                      linear_ix + i * stride, dims);
     }
 }
 
@@ -1230,7 +1416,7 @@ collect_member_declarator_offsets(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *site,
 
             collect_pointer_array_offsets(ctx, site, elem_type, field_path,
                                           declarator, offsets, asserts, 0,
-                                          &dims);
+                                          0, &dims);
             ncc_free(dims.data);
         }
         else {
@@ -2011,6 +2197,120 @@ array_error(ncc_parse_tree_t *node, const char *msg, const char *detail)
 }
 
 static void
+append_hex(ncc_buffer_t *out, const void *data, size_t len)
+{
+    static const char hex[] = "0123456789abcdef";
+    const unsigned char *bytes = data;
+
+    for (size_t i = 0; i < len; i++) {
+        ncc_buffer_putc(out, hex[bytes[i] >> 4]);
+        ncc_buffer_putc(out, hex[bytes[i] & 0xf]);
+    }
+}
+
+static char *
+hex_string(const void *data, size_t len)
+{
+    ncc_buffer_t *out = ncc_buffer_empty();
+    append_hex(out, data, len);
+    return ncc_buffer_take(out);
+}
+
+static const char *
+static_image_host_endian_value(void)
+{
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) \
+    && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    return "2u";
+#else
+    return "1u";
+#endif
+}
+
+static void
+literal_helper_error(ncc_parse_tree_t *site, const char *literal_kind,
+                     const char *type_name, const char *message,
+                     const char *stderr_data, size_t stderr_len)
+{
+    ncc_buffer_t *buf = ncc_buffer_empty();
+    ncc_buffer_printf(buf, "%s static initializer for '%s' %s",
+                      literal_kind ? literal_kind : "literal",
+                      type_name ? type_name : "<unknown>", message);
+    if (stderr_data && stderr_len) {
+        ncc_buffer_puts(buf, ": ");
+        ncc_buffer_append(buf, stderr_data, stderr_len);
+    }
+
+    char *text = ncc_buffer_take(buf);
+    array_errorf(site, "%s", text);
+}
+
+static void
+run_literal_static_init_helper(ncc_parse_tree_t *site, const char *helper,
+                               const char *literal_kind,
+                               const char *type_name, const char *request,
+                               char **expr_out, char **decls_out)
+{
+    *expr_out  = nullptr;
+    *decls_out = nullptr;
+
+    const char *argv[] = {helper, nullptr};
+    ncc_process_spec_t spec = {
+        .program        = helper,
+        .argv           = argv,
+        .stdin_data     = request,
+        .stdin_len      = strlen(request),
+        .capture_stdout = true,
+        .capture_stderr = true,
+    };
+    ncc_process_result_t proc = {0};
+
+    if (!ncc_process_run(&spec, &proc)) {
+        literal_helper_error(site, literal_kind, type_name,
+                             "could not be launched", proc.stderr_data,
+                             proc.stderr_len);
+    }
+
+    if (proc.exit_code != 0) {
+        literal_helper_error(site, literal_kind, type_name, "failed",
+                             proc.stderr_data, proc.stderr_len);
+    }
+
+    const char prefix[] = "NCC_STATIC_INIT_OK ";
+    if (!proc.stdout_data
+        || proc.stdout_len < sizeof(prefix) - 1
+        || strncmp(proc.stdout_data, prefix, sizeof(prefix) - 1) != 0) {
+        literal_helper_error(site, literal_kind, type_name,
+                             "returned an invalid response", proc.stderr_data,
+                             proc.stderr_len);
+    }
+
+    char *newline = memchr(proc.stdout_data, '\n', proc.stdout_len);
+    if (!newline || newline == proc.stdout_data + sizeof(prefix) - 1) {
+        literal_helper_error(site, literal_kind, type_name,
+                             "returned an invalid response", proc.stderr_data,
+                             proc.stderr_len);
+    }
+
+    size_t expr_len = (size_t)(newline - proc.stdout_data)
+                    - (sizeof(prefix) - 1);
+    char *expr = ncc_alloc_array(char, expr_len + 1);
+    memcpy(expr, proc.stdout_data + sizeof(prefix) - 1, expr_len);
+    expr[expr_len] = '\0';
+
+    size_t decl_len = proc.stdout_len
+                    - (size_t)(newline + 1 - proc.stdout_data);
+    char *decls = ncc_alloc_array(char, decl_len + 1);
+    memcpy(decls, newline + 1, decl_len);
+    decls[decl_len] = '\0';
+
+    *expr_out  = expr;
+    *decls_out = decls;
+
+    ncc_process_result_free(&proc);
+}
+
+static void
 insert_generated_decl(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                       const char *src)
 {
@@ -2077,30 +2377,25 @@ static char *lower_array_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                                  array_type_info_t *type,
                                  string_list_t *decls, bool materialize);
 
+static char *lower_list_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
+                                ncc_parse_tree_t *literal,
+                                list_type_info_t *type, string_list_t *decls,
+                                bool readonly, bool pointer_target);
+
 static char *
-build_array_initializer(const char *data_name, int count)
+build_array_initializer(const char *data_name, int count,
+                        const char *scan_kind, const char *scan_cb,
+                        const char *scan_user)
 {
     ncc_buffer_t *buf = ncc_buffer_empty();
     ncc_buffer_printf(buf,
                       "{.data=%s,.len=%d,.cap=%d,.lock=nullptr,"
-                      ".allocator=nullptr,.scan_kind=0,.scan_cb=nullptr,"
-                      ".scan_user=nullptr}",
-                      data_name ? data_name : "nullptr", count, count);
-    return ncc_buffer_take(buf);
-}
-
-static char *
-join_initializer_exprs(string_list_t *exprs)
-{
-    ncc_buffer_t *buf = ncc_buffer_empty();
-
-    for (int i = 0; i < exprs->count; i++) {
-        if (i > 0) {
-            ncc_buffer_puts(buf, ",");
-        }
-        ncc_buffer_puts(buf, exprs->items[i]);
-    }
-
+                      ".allocator=nullptr,.scan_kind=%s,.scan_cb=%s,"
+                      ".scan_user=%s}",
+                      data_name ? data_name : "nullptr", count, count,
+                      scan_kind ? scan_kind : "1",
+                      scan_cb ? scan_cb : "nullptr",
+                      scan_user ? scan_user : "nullptr");
     return ncc_buffer_take(buf);
 }
 
@@ -2116,6 +2411,20 @@ is_rstr_call_node(ncc_parse_tree_t *node)
 
     const char *name = ncc_xform_get_first_leaf_text(ncc_tree_child(node, 0));
     return name && strcmp(name, "__ncc_rstr") == 0;
+}
+
+static bool
+is_buflit_call_node(ncc_parse_tree_t *node)
+{
+    if (!node || ncc_tree_is_leaf(node)
+        || !ncc_xform_nt_name_is(node, "postfix_expression")
+        || ncc_tree_num_children(node) < 3
+        || !ncc_xform_leaf_text_eq(ncc_tree_child(node, 1), "(")) {
+        return false;
+    }
+
+    const char *name = ncc_xform_get_first_leaf_text(ncc_tree_child(node, 0));
+    return name && strcmp(name, "__ncc_buflit") == 0;
 }
 
 static void
@@ -2139,6 +2448,150 @@ collect_rstr_calls(ncc_parse_tree_t *node,
     for (size_t i = 0; i < nc; i++) {
         collect_rstr_calls(ncc_tree_child(node, i), calls);
     }
+}
+
+static void
+collect_buflit_calls(ncc_parse_tree_t *node,
+                     ncc_array_t(ncc_parse_tree_ptr_t) *calls)
+{
+    if (!node) {
+        return;
+    }
+
+    if (is_buflit_call_node(node)) {
+        parse_tree_array_push(calls, node);
+        return;
+    }
+
+    if (ncc_tree_is_leaf(node)) {
+        return;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        collect_buflit_calls(ncc_tree_child(node, i), calls);
+    }
+}
+
+static bool
+string_literal_leaf(const char *text)
+{
+    size_t len = text ? strlen(text) : 0;
+    return len >= 2 && text[0] == '"' && text[len - 1] == '"';
+}
+
+static void
+decode_string_leaf(ncc_buffer_t *buf, const char *text)
+{
+    const char *p   = text + 1;
+    const char *end = text + strlen(text) - 1;
+
+    while (p < end) {
+        if (*p != '\\' || p + 1 >= end) {
+            ncc_buffer_putc(buf, *p++);
+            continue;
+        }
+
+        p++;
+        switch (*p) {
+        case 'n':
+            ncc_buffer_putc(buf, '\n');
+            p++;
+            break;
+        case 'r':
+            ncc_buffer_putc(buf, '\r');
+            p++;
+            break;
+        case 't':
+            ncc_buffer_putc(buf, '\t');
+            p++;
+            break;
+        case '0':
+            ncc_buffer_putc(buf, '\0');
+            p++;
+            break;
+        case '\\':
+            ncc_buffer_putc(buf, '\\');
+            p++;
+            break;
+        case '"':
+            ncc_buffer_putc(buf, '"');
+            p++;
+            break;
+        case 'a':
+            ncc_buffer_putc(buf, '\a');
+            p++;
+            break;
+        case 'b':
+            ncc_buffer_putc(buf, '\b');
+            p++;
+            break;
+        case 'f':
+            ncc_buffer_putc(buf, '\f');
+            p++;
+            break;
+        case 'v':
+            ncc_buffer_putc(buf, '\v');
+            p++;
+            break;
+        case 'x': {
+            p++;
+            unsigned int val = 0;
+            for (int d = 0; d < 2 && p < end; d++, p++) {
+                unsigned char c = (unsigned char)*p;
+                if (c >= '0' && c <= '9') {
+                    val = val * 16 + (c - '0');
+                }
+                else if (c >= 'a' && c <= 'f') {
+                    val = val * 16 + (c - 'a' + 10);
+                }
+                else if (c >= 'A' && c <= 'F') {
+                    val = val * 16 + (c - 'A' + 10);
+                }
+                else {
+                    break;
+                }
+            }
+            ncc_buffer_putc(buf, (char)val);
+            break;
+        }
+        default:
+            ncc_buffer_putc(buf, '\\');
+            ncc_buffer_putc(buf, *p++);
+            break;
+        }
+    }
+}
+
+static bool
+decode_buflit_call_strings(ncc_parse_tree_t *node, ncc_buffer_t *out,
+                           int *string_count)
+{
+    if (!node) {
+        return true;
+    }
+
+    if (ncc_tree_is_leaf(node)) {
+        const char *text = ncc_xform_leaf_text(node);
+        if (!text) {
+            return true;
+        }
+        if (string_literal_leaf(text)) {
+            decode_string_leaf(out, text);
+            (*string_count)++;
+        }
+        return true;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        if (!decode_buflit_call_strings(ncc_tree_child(node, i), out,
+                                        string_count)) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 static char *
@@ -2207,6 +2660,159 @@ lower_rstrings_in_initializer_expr(ncc_xform_ctx_t *ctx,
         *expr_inout = rewritten;
         ncc_free(call_text);
         ncc_free(rstr.expr);
+    }
+
+    ncc_array_free(calls);
+    return true;
+}
+
+static char *
+build_buffer_literal_helper_request(ncc_xform_ctx_t *ctx,
+                                    ncc_parse_tree_t *call,
+                                    const char *prefix,
+                                    const char *payload,
+                                    size_t payload_len)
+{
+    const char *type_name = "n00b_buffer_t";
+    char *type_hex = hex_string(type_name, strlen(type_name));
+    char *payload_hex = hex_string(payload, payload_len);
+    char *type_hash = ncc_static_object_typehash_expr("n00b_buffer_t*");
+    const char *entry_attr = ncc_static_object_entry_attr(ctx);
+    char *entry_attr_hex = hex_string(entry_attr, strlen(entry_attr));
+    char *identity_namespace =
+        ncc_static_object_identity_namespace(ctx, call);
+    char *identity_object_key =
+        ncc_static_object_identity_key(ctx, "ncc-static-image-object",
+                                       call, type_hash, "1");
+    char *identity_payload_key =
+        ncc_static_object_identity_key(ctx, "ncc-static-image-payload",
+                                       call, "0", "payload");
+    char *identity_namespace_hex =
+        hex_string(identity_namespace, strlen(identity_namespace));
+    char *identity_object_key_hex =
+        hex_string(identity_object_key, strlen(identity_object_key));
+    char *identity_payload_key_hex =
+        hex_string(identity_payload_key, strlen(identity_payload_key));
+
+    ncc_buffer_t *buf = ncc_buffer_empty();
+    ncc_buffer_printf(buf,
+                      "NCC_STATIC_INIT 1\n"
+                      "type_hex %s\n"
+                      "type_hash %s\n"
+                      "prefix %s\n"
+                      "readonly 1\n"
+                      "abi %zu %zu 8 %s\n"
+                      "entry_attr_hex %s\n"
+                      "identity_namespace_hex %s\n"
+                      "identity_object_key_hex %s\n"
+                      "identity_payload_key_hex %s\n"
+                      "arg_count 1\n"
+                      "arg - bytes %zu %s\n"
+                      "end\n",
+                      type_hex, type_hash, prefix, sizeof(void *),
+                      sizeof(size_t), static_image_host_endian_value(),
+                      entry_attr_hex, identity_namespace_hex,
+                      identity_object_key_hex, identity_payload_key_hex,
+                      payload_len, payload_hex);
+
+    ncc_free(type_hex);
+    ncc_free(payload_hex);
+    ncc_free(type_hash);
+    ncc_free(entry_attr_hex);
+    ncc_free(identity_namespace);
+    ncc_free(identity_object_key);
+    ncc_free(identity_payload_key);
+    ncc_free(identity_namespace_hex);
+    ncc_free(identity_object_key_hex);
+    ncc_free(identity_payload_key_hex);
+    return ncc_buffer_take(buf);
+}
+
+static char *
+lower_buffer_literal_ref(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *call,
+                         string_list_t *decls)
+{
+    ncc_buffer_t *payload = ncc_buffer_empty();
+    int string_count = 0;
+    if (!decode_buflit_call_strings(call, payload, &string_count)
+        || string_count == 0) {
+        ncc_buffer_free(payload);
+        array_error(call, "could not decode b-string list element", nullptr);
+    }
+
+    int id = ctx->unique_id++;
+    char prefix[64];
+    snprintf(prefix, sizeof(prefix), "__ncc_buflit_%d", id);
+
+    char *request = build_buffer_literal_helper_request(ctx, call, prefix,
+                                                        payload->data,
+                                                        payload->byte_len);
+    ncc_buffer_free(payload);
+
+    const char *helper = ncc_xform_get_data(ctx)->static_init_helper;
+    if (!helper || !*helper) {
+        ncc_free(request);
+        array_errorf(call,
+                     "b\"...\" buffer list element requires "
+                     "--ncc-static-init-helper=PATH");
+    }
+
+    char *expr_name = nullptr;
+    char *helper_decls = nullptr;
+    run_literal_static_init_helper(call, helper, "buffer literal",
+                                   "n00b_buffer_t", request,
+                                   &expr_name, &helper_decls);
+    list_push(decls, helper_decls);
+    ncc_free(request);
+    return expr_name;
+}
+
+static bool
+is_buffer_pointer_element_type(const char *type)
+{
+    char *compact = compact_type(type);
+    bool  result = strcmp(compact, "n00b_buffer_t*") == 0
+                || strcmp(compact, "n00b_buffer_ptr_t") == 0
+                || strcmp(compact, "n00b_buffer_t_ptr") == 0;
+    ncc_free(compact);
+    return result;
+}
+
+static bool
+lower_buffers_in_initializer_expr(ncc_xform_ctx_t *ctx,
+                                  ncc_parse_tree_t *init,
+                                  string_list_t *decls,
+                                  char **expr_inout)
+{
+    ncc_array_t(ncc_parse_tree_ptr_t) calls =
+        ncc_array_new(ncc_parse_tree_ptr_t, 4);
+    collect_buflit_calls(init, &calls);
+
+    if (calls.len == 0) {
+        ncc_array_free(calls);
+        return false;
+    }
+
+    for (size_t i = 0; i < calls.len; i++) {
+        char *call_text = node_text(calls.data[i]);
+        char *buffer_expr = lower_buffer_literal_ref(ctx, calls.data[i],
+                                                     decls);
+        char *rewritten = replace_first_substr(*expr_inout, call_text,
+                                               buffer_expr);
+        if (!rewritten) {
+            ncc_free(call_text);
+            ncc_free(buffer_expr);
+            ncc_array_free(calls);
+            array_error(init,
+                        "could not splice generated b-string reference into "
+                        "list initializer",
+                        nullptr);
+        }
+
+        ncc_free(*expr_inout);
+        *expr_inout = rewritten;
+        ncc_free(call_text);
+        ncc_free(buffer_expr);
     }
 
     ncc_array_free(calls);
@@ -2335,99 +2941,248 @@ array_scan_plan_free(array_scan_plan_t *plan)
     ncc_free(plan->shape_decl);
 }
 
+static void
+validate_container_scan_plan(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *site,
+                             array_type_info_t *type,
+                             array_type_info_t *elem_container,
+                             const char *prefix, int count)
+{
+    array_scan_plan_t plan = {0};
+    array_scan_plan_init(&plan, ctx, type, elem_container, prefix, count,
+                         false, site);
+    array_scan_plan_free(&plan);
+}
+
+static int
+list_static_capacity(int len)
+{
+    int cap = 16;
+    while (cap < len) {
+        cap <<= 1;
+    }
+    return cap;
+}
+
 static char *
-build_array_data_decl(ncc_xform_ctx_t *ctx, array_type_info_t *type,
-                      array_type_info_t *elem_array, const char *data_name,
-                      const char *wrapper_name, string_list_t *exprs,
-                      ncc_parse_tree_t *site)
+build_list_helper_request(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *site,
+                          list_type_info_t *type, const char *prefix,
+                          bool readonly, bool pointer_target,
+                          string_list_t *exprs)
+{
+    int cap = list_static_capacity(exprs->count);
+
+    char len_str[32];
+    char cap_str[32];
+    snprintf(len_str, sizeof(len_str), "%d", exprs->count);
+    snprintf(cap_str, sizeof(cap_str), "%d", cap);
+
+    char *type_hex = hex_string(type->object_type, strlen(type->object_type));
+    char *elem_hex = hex_string(type->elem_type, strlen(type->elem_type));
+    char *type_hash = ncc_static_object_typehash_expr(type->object_type);
+    char *elem_hash = ncc_static_object_typehash_expr(type->elem_type);
+    char *elem_ptr_type = data_pointer_type_name(type->elem_type);
+    char *data_type_hash = ncc_static_object_typehash_expr(elem_ptr_type);
+    ncc_free(elem_ptr_type);
+
+    const char *entry_attr = ncc_static_object_entry_attr(ctx);
+    char *entry_attr_hex = hex_string(entry_attr, strlen(entry_attr));
+    char *identity_namespace =
+        ncc_static_object_identity_namespace(ctx, site);
+    char *identity_object_key =
+        ncc_static_object_identity_key(ctx, "ncc-static-list-object",
+                                       site, type_hash, len_str);
+    char *identity_payload_key =
+        ncc_static_object_identity_key(ctx, "ncc-static-list-data",
+                                       site, elem_hash, cap_str);
+    char *identity_namespace_hex =
+        hex_string(identity_namespace, strlen(identity_namespace));
+    char *identity_object_key_hex =
+        hex_string(identity_object_key, strlen(identity_object_key));
+    char *identity_payload_key_hex =
+        hex_string(identity_payload_key, strlen(identity_payload_key));
+
+    array_type_info_t *elem_array = lookup_array_type(ctx, type->elem_type);
+    list_type_info_t  *elem_list  = lookup_list_type(ctx, type->elem_type);
+    array_scan_plan_t scan_plan = {0};
+    array_scan_plan_init(&scan_plan, ctx, (array_type_info_t *)type,
+                         elem_array ? elem_array : (array_type_info_t *)elem_list,
+                         prefix, cap, true, site);
+
+    char *scan_cb_hex = hex_string(scan_plan.scan_cb,
+                                   strlen(scan_plan.scan_cb));
+    char *scan_user_hex = hex_string(scan_plan.scan_user,
+                                     strlen(scan_plan.scan_user));
+    char *shape_decl_hex = hex_string(scan_plan.shape_decl,
+                                      strlen(scan_plan.shape_decl));
+
+    ncc_buffer_t *buf = ncc_buffer_empty();
+    ncc_buffer_printf(buf,
+                      "NCC_STATIC_INIT 1\n"
+                      "container_kind list\n"
+                      "container_target %s\n"
+                      "type_hex %s\n"
+                      "type_hash %s\n"
+                      "element_type_hex %s\n"
+                      "element_type_hash %s\n"
+                      "data_type_hash %s\n"
+                      "prefix %s\n"
+                      "readonly %u\n"
+                      "len %s\n"
+                      "cap %s\n"
+                      "abi %zu %zu 8 %s\n"
+                      "entry_attr_hex %s\n"
+                      "identity_namespace_hex %s\n"
+                      "identity_object_key_hex %s\n"
+                      "identity_payload_key_hex %s\n"
+                      "element_scan_kind %s\n"
+                      "element_scan_cb_hex %s\n"
+                      "element_scan_user_hex %s\n"
+                      "element_shape_decl_hex %s\n"
+                      "arg_count %d\n",
+                      pointer_target ? "pointer" : "value",
+                      type_hex, type_hash, elem_hex, elem_hash,
+                      data_type_hash, prefix, readonly ? 1u : 0u,
+                      len_str, cap_str, sizeof(void *), sizeof(size_t),
+                      static_image_host_endian_value(), entry_attr_hex,
+                      identity_namespace_hex, identity_object_key_hex,
+                      identity_payload_key_hex, scan_plan.scan_kind,
+                      scan_cb_hex, scan_user_hex, shape_decl_hex,
+                      exprs->count);
+
+    for (int i = 0; i < exprs->count; i++) {
+        char *expr_hex = hex_string(exprs->items[i], strlen(exprs->items[i]));
+        ncc_buffer_printf(buf, "arg elem cinit %zu %s\n",
+                          strlen(exprs->items[i]), expr_hex);
+        ncc_free(expr_hex);
+    }
+
+    ncc_buffer_puts(buf, "end\n");
+
+    ncc_free(type_hex);
+    ncc_free(elem_hex);
+    ncc_free(type_hash);
+    ncc_free(elem_hash);
+    ncc_free(data_type_hash);
+    ncc_free(entry_attr_hex);
+    ncc_free(identity_namespace);
+    ncc_free(identity_object_key);
+    ncc_free(identity_payload_key);
+    ncc_free(identity_namespace_hex);
+    ncc_free(identity_object_key_hex);
+    ncc_free(identity_payload_key_hex);
+    ncc_free(scan_cb_hex);
+    ncc_free(scan_user_hex);
+    ncc_free(shape_decl_hex);
+    array_scan_plan_free(&scan_plan);
+
+    return ncc_buffer_take(buf);
+}
+
+static char *
+build_array_helper_request(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *site,
+                           array_type_info_t *type,
+                           array_type_info_t *elem_array,
+                           const char *prefix, string_list_t *exprs)
 {
     char count_str[32];
     snprintf(count_str, sizeof(count_str), "%d", exprs->count);
 
-    char *items = join_initializer_exprs(exprs);
+    char *type_hex = hex_string(type->object_type, strlen(type->object_type));
+    char *elem_hex = hex_string(type->elem_type, strlen(type->elem_type));
+    char *type_hash = ncc_static_object_typehash_expr(type->object_type);
+    char *elem_hash = ncc_static_object_typehash_expr(type->elem_type);
+    char *elem_ptr_type = data_pointer_type_name(type->elem_type);
+    char *data_type_hash = ncc_static_object_typehash_expr(elem_ptr_type);
+    ncc_free(elem_ptr_type);
 
-    char *ptr_type = data_pointer_type_name(type->elem_type);
-    char *typehash_str = ncc_static_object_typehash_expr(ptr_type);
-    ncc_free(ptr_type);
+    const char *entry_attr = ncc_static_object_entry_attr(ctx);
+    char *entry_attr_hex = hex_string(entry_attr, strlen(entry_attr));
+    char *identity_namespace =
+        ncc_static_object_identity_namespace(ctx, site);
+    char *identity_object_key =
+        ncc_static_object_identity_key(ctx, "ncc-static-array-object",
+                                       site, type_hash, count_str);
+    char *identity_payload_key =
+        ncc_static_object_identity_key(ctx, "ncc-array-data",
+                                       site, data_type_hash, count_str);
+    char *identity_namespace_hex =
+        hex_string(identity_namespace, strlen(identity_namespace));
+    char *identity_object_key_hex =
+        hex_string(identity_object_key, strlen(identity_object_key));
+    char *identity_payload_key_hex =
+        hex_string(identity_payload_key, strlen(identity_payload_key));
 
     array_scan_plan_t scan_plan = {0};
-    array_scan_plan_init(&scan_plan, ctx, type, elem_array, data_name,
+    array_scan_plan_init(&scan_plan, ctx, type, elem_array, prefix,
                          exprs->count, true, site);
 
-    ncc_static_object_names_t names;
-    ncc_static_object_names_for_array(&names, data_name);
+    char *scan_cb_hex = hex_string(scan_plan.scan_cb,
+                                   strlen(scan_plan.scan_cb));
+    char *scan_user_hex = hex_string(scan_plan.scan_user,
+                                     strlen(scan_plan.scan_user));
+    char *shape_decl_hex = hex_string(scan_plan.shape_decl,
+                                      strlen(scan_plan.shape_decl));
 
-    ncc_static_object_slots_t stobj;
-    ncc_static_object_slots_init(&stobj, ctx, &names, typehash_str, "2",
-                                 scan_plan.scan_kind, scan_plan.scan_cb,
-                                 scan_plan.scan_user,
-                                 "N00B_STATIC_IDENTITY_NCC_ARRAY_DATA",
-                                 "ncc-array-data", site, count_str);
+    ncc_buffer_t *buf = ncc_buffer_empty();
+    ncc_buffer_printf(buf,
+                      "NCC_STATIC_INIT 1\n"
+                      "container_kind array\n"
+                      "container_target data\n"
+                      "type_hex %s\n"
+                      "type_hash %s\n"
+                      "element_type_hex %s\n"
+                      "element_type_hash %s\n"
+                      "data_type_hash %s\n"
+                      "prefix %s\n"
+                      "readonly 0\n"
+                      "len %s\n"
+                      "cap %s\n"
+                      "abi %zu %zu 8 %s\n"
+                      "entry_attr_hex %s\n"
+                      "identity_namespace_hex %s\n"
+                      "identity_object_key_hex %s\n"
+                      "identity_payload_key_hex %s\n"
+                      "element_scan_kind %s\n"
+                      "element_scan_cb_hex %s\n"
+                      "element_scan_user_hex %s\n"
+                      "element_shape_decl_hex %s\n"
+                      "arg_count %d\n",
+                      type_hex, type_hash, elem_hex, elem_hash,
+                      data_type_hash, prefix, count_str, count_str,
+                      sizeof(void *), sizeof(size_t),
+                      static_image_host_endian_value(), entry_attr_hex,
+                      identity_namespace_hex, identity_object_key_hex,
+                      identity_payload_key_hex, scan_plan.scan_kind,
+                      scan_cb_hex, scan_user_hex, shape_decl_hex,
+                      exprs->count);
 
-    const char *all_args[] = {
-        type->elem_type, data_name, count_str, items, stobj.typehash,
-        scan_plan.ptr_words, stobj.scan_kind, stobj.scan_cb, stobj.scan_user,
-        wrapper_name, scan_plan.shape_name, scan_plan.stride_words, "0",
-        scan_plan.shape_decl, scan_plan.no_scan, stobj.desc_name,
-        stobj.entry_name, stobj.object_id, stobj.flags, stobj.entry_attr,
-        stobj.identity_decl, stobj.identity_expr,
-    };
+    for (int i = 0; i < exprs->count; i++) {
+        char *expr_hex = hex_string(exprs->items[i], strlen(exprs->items[i]));
+        ncc_buffer_printf(buf, "arg elem cinit %zu %s\n",
+                          strlen(exprs->items[i]), expr_hex);
+        ncc_free(expr_hex);
+    }
 
-    char *result = ncc_static_object_expand_template(
-        "array literal data", get_array_literal_data_template(ctx),
-        all_args, 22);
+    ncc_buffer_puts(buf, "end\n");
 
-    ncc_static_object_slots_cleanup(&stobj);
-    ncc_free(items);
-    ncc_free(typehash_str);
+    ncc_free(type_hex);
+    ncc_free(elem_hex);
+    ncc_free(type_hash);
+    ncc_free(elem_hash);
+    ncc_free(data_type_hash);
+    ncc_free(entry_attr_hex);
+    ncc_free(identity_namespace);
+    ncc_free(identity_object_key);
+    ncc_free(identity_payload_key);
+    ncc_free(identity_namespace_hex);
+    ncc_free(identity_object_key_hex);
+    ncc_free(identity_payload_key_hex);
+    ncc_free(scan_cb_hex);
+    ncc_free(scan_user_hex);
+    ncc_free(shape_decl_hex);
     array_scan_plan_free(&scan_plan);
-    return result;
-}
 
-static char *
-build_array_data_expr(ncc_xform_ctx_t *ctx, array_type_info_t *type,
-                      array_type_info_t *elem_array, const char *data_name,
-                      const char *wrapper_name, int count,
-                      ncc_parse_tree_t *site)
-{
-    char count_str[32];
-    snprintf(count_str, sizeof(count_str), "%d", count);
-
-    char *ptr_type = data_pointer_type_name(type->elem_type);
-    char *typehash_str = ncc_static_object_typehash_expr(ptr_type);
-    ncc_free(ptr_type);
-
-    array_scan_plan_t scan_plan = {0};
-    array_scan_plan_init(&scan_plan, ctx, type, elem_array, data_name,
-                         count, false, site);
-
-    ncc_static_object_names_t names;
-    ncc_static_object_names_for_array(&names, data_name);
-
-    ncc_static_object_slots_t stobj;
-    ncc_static_object_slots_init(&stobj, ctx, &names, typehash_str, "2",
-                                 scan_plan.scan_kind, scan_plan.scan_cb,
-                                 scan_plan.scan_user,
-                                 "N00B_STATIC_IDENTITY_NCC_ARRAY_DATA",
-                                 "ncc-array-data", site, count_str);
-
-    const char *all_args[] = {
-        type->elem_type, data_name, count_str, "", stobj.typehash,
-        scan_plan.ptr_words, stobj.scan_kind, stobj.scan_cb, stobj.scan_user,
-        wrapper_name, "__unused_shape", "0", "0", "",
-        scan_plan.no_scan, stobj.desc_name, stobj.entry_name,
-        stobj.object_id, stobj.flags, stobj.entry_attr,
-        stobj.identity_decl, stobj.identity_expr,
-    };
-
-    char *result = ncc_static_object_expand_template(
-        "array literal data expression", get_array_literal_data_expr(ctx),
-        all_args, 22);
-
-    ncc_static_object_slots_cleanup(&stobj);
-    ncc_free(typehash_str);
-    array_scan_plan_free(&scan_plan);
-    return result;
+    return ncc_buffer_take(buf);
 }
 
 static char *
@@ -2504,30 +3259,59 @@ lower_array_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
         list_push(&exprs, expr);
     }
 
-    char *data_name = nullptr;
     char *data_expr = nullptr;
+    array_scan_plan_t init_scan_plan = {0};
+    char *owned_init_scan_user = nullptr;
+    const char *init_scan_kind = "1";
+    const char *init_scan_cb = "nullptr";
+    const char *init_scan_user = "nullptr";
     if (exprs.count > 0) {
         int id = ctx->unique_id++;
-        ncc_buffer_t *name = ncc_buffer_empty();
-        ncc_buffer_printf(name, "__ncc_arraylit_%d_data", id);
-        data_name = ncc_buffer_take(name);
+        char prefix[64];
+        snprintf(prefix, sizeof(prefix), "__ncc_arraylit_%d", id);
 
-        char wrapper_name[64];
-        snprintf(wrapper_name, sizeof(wrapper_name), "%s_storage",
-                 data_name);
+        validate_container_scan_plan(ctx, literal, type, elem_array, prefix,
+                                     exprs.count);
 
-        char *data_decl = build_array_data_decl(ctx, type, elem_array,
-                                                data_name, wrapper_name,
-                                                &exprs, literal);
-        list_push(decls, data_decl);
-        data_expr = build_array_data_expr(ctx, type, elem_array, data_name,
-                                          wrapper_name, exprs.count, literal);
+        const char *helper = ncc_xform_get_data(ctx)->static_init_helper;
+        if (!helper || !*helper) {
+            list_free(&exprs);
+            ncc_array_free(elems);
+            array_errorf(literal,
+                         "array literal initializer for '%s' requires "
+                         "--ncc-static-init-helper=PATH",
+                         type->object_type);
+        }
+
+        char *request = build_array_helper_request(ctx, literal, type,
+                                                   elem_array, prefix, &exprs);
+        char *helper_decls = nullptr;
+        run_literal_static_init_helper(literal, helper, "array literal",
+                                       type->object_type, request,
+                                       &data_expr, &helper_decls);
+        list_push(decls, helper_decls);
+        ncc_free(request);
+
+        array_scan_plan_init(&init_scan_plan, ctx, type, elem_array, prefix,
+                             exprs.count, false, literal);
+        init_scan_kind = init_scan_plan.scan_kind;
+        init_scan_cb   = init_scan_plan.scan_cb;
+        init_scan_user = init_scan_plan.scan_user;
+        if (strcmp(init_scan_kind, "4") == 0
+            && strcmp(init_scan_user, "__unused_shape") == 0) {
+            ncc_buffer_t *shape_ref = ncc_buffer_empty();
+            ncc_buffer_printf(shape_ref, "&%s", init_scan_plan.shape_name);
+            owned_init_scan_user = ncc_buffer_take(shape_ref);
+            init_scan_user = owned_init_scan_user;
+        }
     }
 
-    char *init = build_array_initializer(data_expr ? data_expr : data_name,
-                                         exprs.count);
+    char *init = build_array_initializer(data_expr, exprs.count,
+                                         init_scan_kind, init_scan_cb,
+                                         init_scan_user);
     ncc_free(data_expr);
-    ncc_free(data_name);
+    ncc_free(owned_init_scan_user);
+    array_scan_plan_free(&init_scan_plan);
     list_free(&exprs);
     ncc_array_free(elems);
 
@@ -2547,6 +3331,151 @@ lower_array_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
 
     ncc_free(init);
     return obj_name;
+}
+
+static char *
+lower_list_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
+                   ncc_parse_tree_t *literal, list_type_info_t *type,
+                   string_list_t *decls, bool readonly, bool pointer_target)
+{
+    ncc_array_t(ncc_parse_tree_ptr_t) elems =
+        ncc_array_new(ncc_parse_tree_ptr_t, 8);
+    collect_array_elements(literal, &elems);
+
+    string_list_t exprs = {0};
+    array_type_info_t *elem_array = lookup_array_type(ctx, type->elem_type);
+    list_type_info_t  *elem_list  = lookup_list_type(ctx, type->elem_type);
+    array_aggregate_type_info_t *elem_aggregate =
+        elem_array || elem_list ? nullptr
+                                : aggregate_info_from_type_name(ctx,
+                                                                type->elem_type);
+
+    if (!elem_array && !elem_list && !elem_aggregate
+        && !is_supported_scalar_type(ctx, type->elem_type)) {
+        array_errorf(literal,
+                     "list literal element type '%s' is not supported for "
+                     "static initialization yet; allowed element types are "
+                     "scalar numeric/enums, static pointers, r-string "
+                     "pointers, compatible b\"...\" buffer pointers, "
+                     "aggregate types with static layout, and nested "
+                     "ncc/n00b arrays or n00b lists",
+                     type->elem_type);
+    }
+
+    if (elem_aggregate) {
+        validate_static_aggregate_layout(ctx, literal, type->elem_type,
+                                         elem_aggregate->specifier, "", 0);
+    }
+
+    for (size_t i = 0; i < elems.len; i++) {
+        ncc_parse_tree_t *init = elems.data[i];
+        ncc_parse_tree_t *nested_array = initializer_array_literal(init);
+        ncc_parse_tree_t *nested_list  = initializer_list_literal(init);
+
+        if (elem_array) {
+            if (!nested_array) {
+                array_errorf(init,
+                             "nested array element for list element type "
+                             "'%s' must be an array literal like 'a{...}' "
+                             "or '[...]'",
+                             type->elem_type);
+            }
+            char *expr = lower_array_literal(ctx, decl, nested_array,
+                                             elem_array, decls, false);
+            list_push(&exprs, expr);
+            continue;
+        }
+
+        if (elem_list) {
+            if (!nested_list) {
+                array_errorf(init,
+                             "nested list element for list element type '%s' "
+                             "must be a list literal like 'l{...}'",
+                             type->elem_type);
+            }
+            char *expr = lower_list_literal(ctx, decl, nested_list, elem_list,
+                                            decls, readonly, false);
+            list_push(&exprs, expr);
+            continue;
+        }
+
+        if (nested_array) {
+            array_errorf(init,
+                         "list element type '%s' is scalar, so nested array "
+                         "literal is not allowed here",
+                         type->elem_type);
+        }
+        if (nested_list) {
+            array_errorf(init,
+                         "list element type '%s' is not a n00b_list_t(T) "
+                         "value, so nested list literal is not allowed here",
+                         type->elem_type);
+        }
+
+        char *expr = node_text(init);
+        if (strstr(expr, "__ncc_rstr")) {
+            if (!elem_aggregate && !is_rstr_element_type(ctx,
+                                                         type->elem_type)) {
+                array_errorf(init,
+                             "r-string list element requires element type "
+                             "'%s' or a configured r-string pointer type; "
+                             "found '%s'",
+                             ncc_xform_get_data(ctx)->rstr_string_type,
+                             type->elem_type);
+            }
+            (void)lower_rstrings_in_initializer_expr(ctx, init, decls,
+                                                     &expr);
+        }
+        if (strstr(expr, "__ncc_buflit")) {
+            if (!elem_aggregate
+                && !is_buffer_pointer_element_type(type->elem_type)) {
+                array_errorf(init,
+                             "b-string list element requires element type "
+                             "'n00b_buffer_t *' or a configured buffer "
+                             "pointer typedef; found '%s'",
+                             type->elem_type);
+            }
+            (void)lower_buffers_in_initializer_expr(ctx, init, decls,
+                                                    &expr);
+        }
+        list_push(&exprs, expr);
+    }
+
+    int id = ctx->unique_id++;
+    char prefix[64];
+    snprintf(prefix, sizeof(prefix), "__ncc_listlit_%d", id);
+
+    validate_container_scan_plan(ctx, literal, (array_type_info_t *)type,
+                                 elem_array
+                                     ? elem_array
+                                     : (array_type_info_t *)elem_list,
+                                 prefix, list_static_capacity(exprs.count));
+
+    const char *helper = ncc_xform_get_data(ctx)->static_init_helper;
+    if (!helper || !*helper) {
+        list_free(&exprs);
+        ncc_array_free(elems);
+        array_errorf(literal,
+                     "list literal initializer for '%s' requires "
+                     "--ncc-static-init-helper=PATH",
+                     type->object_type);
+    }
+
+    char *request = build_list_helper_request(ctx, literal, type, prefix,
+                                              readonly, pointer_target,
+                                              &exprs);
+    char *expr_name = nullptr;
+    char *helper_decls = nullptr;
+    run_literal_static_init_helper(literal, helper, "list literal",
+                                   type->object_type, request,
+                                   &expr_name, &helper_decls);
+    list_push(decls, helper_decls);
+
+    ncc_free(request);
+    list_free(&exprs);
+    ncc_array_free(elems);
+
+    return expr_name;
 }
 
 static bool
@@ -2593,6 +3522,38 @@ record_typedef_aliases(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
     ncc_array_free(init_decls);
 }
 
+static void
+record_list_typedef_aliases(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
+                            ncc_parse_tree_t *decl_specs,
+                            list_type_info_t *base_info)
+{
+    if (!base_info || !decl_is_typedef(decl_specs)) {
+        return;
+    }
+
+    ncc_parse_tree_t *list = ncc_xform_find_child_nt(decl,
+                                                     "init_declarator_list");
+    if (!list) {
+        return;
+    }
+
+    ncc_array_t(ncc_parse_tree_ptr_t) init_decls =
+        ncc_array_new(ncc_parse_tree_ptr_t, 4);
+    collect_nt_children(list, "init_declarator", &init_decls);
+
+    for (size_t i = 0; i < init_decls.len; i++) {
+        ncc_parse_tree_t *declarator = ncc_xform_find_child_nt(
+            init_decls.data[i], "declarator");
+        char *alias = declarator_name(declarator);
+        if (alias) {
+            record_list_type(ctx, alias, alias, base_info->elem_type);
+            ncc_free(alias);
+        }
+    }
+
+    ncc_array_free(init_decls);
+}
+
 static ncc_parse_tree_t *
 xform_array_decl(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                  ncc_xform_control_t *control)
@@ -2607,6 +3568,8 @@ xform_array_decl(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
 
     array_type_info_t *type = array_type_from_decl_specs(ctx, decl_specs);
     record_typedef_aliases(ctx, decl, decl_specs, type);
+    list_type_info_t *list_type = list_type_from_decl_specs(ctx, decl_specs);
+    record_list_typedef_aliases(ctx, decl, decl_specs, list_type);
 
     ncc_parse_tree_t *list = ncc_xform_find_child_nt(decl,
                                                      "init_declarator_list");
@@ -2622,6 +3585,67 @@ xform_array_decl(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
         ncc_parse_tree_t *init = ncc_xform_find_child_nt(init_decls.data[i],
                                                          "initializer");
         ncc_parse_tree_t *literal = initializer_array_literal(init);
+        ncc_parse_tree_t *list_literal = initializer_list_literal(init);
+        ncc_parse_tree_t *modified = initializer_modified_literal(init);
+        if (modified && !literal && !list_literal) {
+            const char *modifier = modified_literal_modifier(modified);
+            array_errorf(modified,
+                         "unknown literal modifier '%s{...}'; supported "
+                         "literal modifiers are 'a{...}' for arrays and "
+                         "'l{...}' for lists",
+                         modifier ? modifier : "<unknown>");
+        }
+        if (list_literal) {
+            ncc_parse_tree_t *declarator = ncc_xform_find_child_nt(
+                init_decls.data[i], "declarator");
+            char *name = declarator_name(declarator);
+
+            if (!list_type) {
+                char *target = node_text(decl_specs);
+                array_errorf(list_literal,
+                             "list literal initializer for '%s' requires a "
+                             "n00b_list_t(T) object or pointer target; found "
+                             "target type '%s'",
+                             name ? name : "<unknown>", target);
+            }
+
+            bool local = ncc_xform_find_ancestor(decl, "block_item") != nullptr;
+            bool readonly = decl_is_const(decl_specs);
+            if (local && !readonly) {
+                array_errorf(list_literal,
+                             "non-const local list literal for '%s' is not "
+                             "supported yet; add 'const' to the pointee/object "
+                             "type or move the declaration to file scope",
+                             name ? name : "<unknown>");
+            }
+
+            bool pointer_target =
+                pointer_depth_in_declarator(declarator) > 0;
+            string_list_t decls = {0};
+            char *replacement_src = lower_list_literal(ctx, decl, list_literal,
+                                                       list_type, &decls,
+                                                       readonly,
+                                                       pointer_target);
+
+            for (int d = 0; d < decls.count; d++) {
+                insert_generated_decl(ctx, decl, decls.items[d]);
+            }
+
+            ncc_parse_tree_t *replacement = ncc_xform_parse_source(
+                ctx->grammar, "initializer", replacement_src,
+                "xform_array_literal");
+            if (!replacement) {
+                fprintf(stderr, "ncc: error: failed to parse generated list "
+                                "initializer:\n%s\n", replacement_src);
+                exit(1);
+            }
+
+            replace_initializer(init_decls.data[i], replacement);
+            ncc_free(replacement_src);
+            ncc_free(name);
+            list_free(&decls);
+            continue;
+        }
         if (!literal) {
             continue;
         }

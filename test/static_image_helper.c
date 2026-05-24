@@ -6,13 +6,29 @@
 
 typedef struct {
     char  *type;
+    char  *type_hash;
     char  *prefix;
+    char  *entry_attr;
+    char  *container_kind;
+    char  *container_target;
+    char  *element_type;
+    char  *element_type_hash;
+    char  *data_type_hash;
     char  *identity_namespace;
     char  *identity_object_key;
     char  *identity_payload_key;
     int    readonly;
+    size_t len;
+    size_t cap;
+    char  *element_scan_kind;
+    char  *element_scan_cb;
+    char  *element_scan_user;
+    char  *element_shape_decl;
     char  *payload_hex;
     size_t payload_len;
+    char **cinit_items;
+    size_t cinit_len;
+    size_t cinit_cap;
 } request_t;
 
 static char *
@@ -93,11 +109,50 @@ parse_request(char *input, request_t *req)
         if (strncmp(line, "type_hex ", 9) == 0) {
             req->type = hex_decode_string(line + 9);
         }
+        else if (strncmp(line, "type_hash ", 10) == 0) {
+            req->type_hash = strdup(line + 10);
+        }
         else if (strncmp(line, "prefix ", 7) == 0) {
             req->prefix = strdup(line + 7);
         }
+        else if (strncmp(line, "entry_attr_hex ", 15) == 0) {
+            req->entry_attr = hex_decode_string(line + 15);
+        }
+        else if (strncmp(line, "container_kind ", 15) == 0) {
+            req->container_kind = strdup(line + 15);
+        }
+        else if (strncmp(line, "container_target ", 17) == 0) {
+            req->container_target = strdup(line + 17);
+        }
+        else if (strncmp(line, "element_type_hex ", 17) == 0) {
+            req->element_type = hex_decode_string(line + 17);
+        }
+        else if (strncmp(line, "element_type_hash ", 18) == 0) {
+            req->element_type_hash = strdup(line + 18);
+        }
+        else if (strncmp(line, "data_type_hash ", 15) == 0) {
+            req->data_type_hash = strdup(line + 15);
+        }
         else if (strncmp(line, "readonly ", 9) == 0) {
             req->readonly = atoi(line + 9);
+        }
+        else if (strncmp(line, "len ", 4) == 0) {
+            req->len = (size_t)strtoull(line + 4, NULL, 0);
+        }
+        else if (strncmp(line, "cap ", 4) == 0) {
+            req->cap = (size_t)strtoull(line + 4, NULL, 0);
+        }
+        else if (strncmp(line, "element_scan_kind ", 18) == 0) {
+            req->element_scan_kind = strdup(line + 18);
+        }
+        else if (strncmp(line, "element_scan_cb_hex ", 20) == 0) {
+            req->element_scan_cb = hex_decode_string(line + 20);
+        }
+        else if (strncmp(line, "element_scan_user_hex ", 22) == 0) {
+            req->element_scan_user = hex_decode_string(line + 22);
+        }
+        else if (strncmp(line, "element_shape_decl_hex ", 23) == 0) {
+            req->element_shape_decl = hex_decode_string(line + 23);
         }
         else if (strncmp(line, "identity_namespace_hex ", 23) == 0) {
             req->identity_namespace = hex_decode_string(line + 23);
@@ -114,7 +169,40 @@ parse_request(char *input, request_t *req)
             size_t len = 0;
             char *hex = NULL;
             if (sscanf(line, "arg %127s %31s %zu", name, kind, &len) == 3
-                && strcmp(kind, "bytes") == 0) {
+                && strcmp(kind, "cinit") == 0) {
+                char *p = line;
+                for (int spaces = 0; *p && spaces < 4; p++) {
+                    if (isspace((unsigned char)*p)) {
+                        while (isspace((unsigned char)*p)) {
+                            p++;
+                        }
+                        spaces++;
+                        p--;
+                    }
+                }
+                while (*p && isspace((unsigned char)*p)) {
+                    p++;
+                }
+                char *expr = hex_decode_string(p);
+                if (!expr) {
+                    fprintf(stderr, "bad cinit argument\n");
+                    return 0;
+                }
+                if (req->cinit_len == req->cinit_cap) {
+                    size_t new_cap = req->cinit_cap ? req->cinit_cap * 2 : 8;
+                    char **items = realloc(req->cinit_items,
+                                           new_cap * sizeof(*items));
+                    if (!items) {
+                        free(expr);
+                        return 0;
+                    }
+                    req->cinit_items = items;
+                    req->cinit_cap = new_cap;
+                }
+                req->cinit_items[req->cinit_len++] = expr;
+            }
+            else if (sscanf(line, "arg %127s %31s %zu", name, kind, &len) == 3
+                     && strcmp(kind, "bytes") == 0) {
                 if (strcmp(name, "-") != 0 && strcmp(name, "raw") != 0) {
                     fprintf(stderr, "unexpected static image argument '%s'\n",
                             name);
@@ -351,6 +439,258 @@ emit_buffer_image(const request_t *req)
     return 0;
 }
 
+static const char *
+or_default(const char *s, const char *fallback)
+{
+    return s && *s ? s : fallback;
+}
+
+static unsigned long long
+helper_hash_cstr(const char *s)
+{
+    unsigned long long h = 1469598103934665603ULL;
+    while (s && *s) {
+        h ^= (unsigned char)*s++;
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static void
+emit_cinit_items(const request_t *req)
+{
+    for (size_t i = 0; i < req->cinit_len; i++) {
+        if (i > 0) {
+            putchar(',');
+        }
+        fputs(req->cinit_items[i], stdout);
+    }
+    if (req->cinit_len == 0) {
+        fputs("0", stdout);
+    }
+}
+
+static int
+emit_list_image(const request_t *req)
+{
+    if (!req->element_type || !req->data_type_hash || req->cap < req->len
+        || req->cinit_len != req->len) {
+        fprintf(stderr, "bad n00b list static initializer request\n");
+        return 6;
+    }
+
+    int pointer_target = req->container_target
+                      && strcmp(req->container_target, "pointer") == 0;
+    const char *flags = req->readonly ? "N00B_STATIC_OBJECT_F_READONLY"
+                                      : "N00B_STATIC_OBJECT_F_MUTABLE";
+    const char *obj_const = req->readonly ? "const " : "";
+    const char *scan_kind = or_default(req->element_scan_kind,
+                                       "N00B_GC_SCAN_KIND_NONE");
+    const char *scan_cb = or_default(req->element_scan_cb, "nullptr");
+    const char *scan_user = or_default(req->element_scan_user, "nullptr");
+    const char *type_hash = or_default(req->type_hash, "0");
+    unsigned long long data_id = helper_hash_cstr(req->prefix)
+                               ^ 0x6c69737464617461ULL;
+    unsigned long long lock_id = helper_hash_cstr(req->prefix)
+                               ^ 0x6c6973746c6f636bULL;
+    unsigned long long obj_id = helper_hash_cstr(req->prefix)
+                              ^ 0x6c6973746f626aULL;
+
+    printf("NCC_STATIC_INIT_OK ");
+    if (pointer_target) {
+        printf("&%s_obj\n", req->prefix);
+    }
+    else {
+        printf("{.data=%s_data,.len=(size_t)%zu,.cap=(size_t)%zu,"
+               ".lock=&%s_lock,.allocator=nullptr,.scan_kind=%s,"
+               ".scan_cb=%s,.scan_user=%s}\n",
+               req->prefix, req->len, req->cap, req->prefix, scan_kind,
+               scan_cb, scan_user);
+    }
+
+    emit_identity_decls(req);
+    printf("%s", req->element_shape_decl ? req->element_shape_decl : "");
+    printf("static %s %s_data[%zu]={", req->element_type, req->prefix,
+           req->cap ? req->cap : 1);
+    emit_cinit_items(req);
+    printf("};");
+    printf("static const n00b_static_object_desc_t %s_data_desc={"
+           ".start=(const void*)%s_data,"
+           ".len=(uint64_t)sizeof(%s_data),"
+           ".tinfo=%s,.scan_kind=%s,.scan_cb=%s,.scan_user=%s,"
+           ".object_id=%lluULL,.file=__FILE__,.identity=",
+           req->prefix, req->prefix, req->prefix, req->data_type_hash,
+           scan_kind, scan_cb, scan_user, data_id);
+    if (has_identity(req)) {
+        printf("&%s_payload_id", req->prefix);
+    }
+    else {
+        printf("0");
+    }
+    printf(",.flags=%s};", flags);
+    printf("static const n00b_static_object_desc_t * const "
+           "%s_data_entry=&%s_data_desc;",
+           req->prefix, req->prefix);
+
+    printf("static n00b_rwlock_t %s_lock={0};", req->prefix);
+    printf("static const n00b_static_object_desc_t %s_lock_desc={"
+           ".start=(const void*)&%s_lock,"
+           ".len=(uint64_t)sizeof(%s_lock),"
+           ".tinfo=0,.scan_kind=N00B_GC_SCAN_KIND_NONE,"
+           ".scan_cb=nullptr,.scan_user=nullptr,"
+           ".object_id=%lluULL,.file=__FILE__,.identity=0,"
+           ".flags=N00B_STATIC_OBJECT_F_MUTABLE};",
+           req->prefix, req->prefix, req->prefix, lock_id);
+    printf("static const n00b_static_object_desc_t * const "
+           "%s_lock_entry=&%s_lock_desc;",
+           req->prefix, req->prefix);
+
+    if (pointer_target) {
+        printf("_Static_assert((__builtin_offsetof(%s,data)%%sizeof(void*))==0,"
+               "\"list data pointer must be pointer-aligned\");",
+               req->type);
+        printf("static const uint64_t %s_obj_offsets[]={"
+               "__builtin_offsetof(%s,data)/sizeof(void*)};",
+               req->prefix, req->type);
+        printf("static n00b_gc_struct_layout_t %s_obj_shape={"
+               ".stride=(sizeof(%s)/sizeof(void*)),.count=1,"
+               ".offset_count=1,.offsets=%s_obj_offsets};",
+               req->prefix, req->type, req->prefix);
+        printf("static %s%s %s_obj={"
+               ".data=%s_data,.len=(size_t)%zu,.cap=(size_t)%zu,"
+               ".lock=&%s_lock,.allocator=nullptr,.scan_kind=%s,"
+               ".scan_cb=%s,.scan_user=%s};",
+               obj_const, req->type, req->prefix, req->prefix, req->len,
+               req->cap, req->prefix, scan_kind, scan_cb, scan_user);
+        printf("static const n00b_static_object_desc_t %s_obj_desc={"
+               ".start=(const void*)&%s_obj,"
+               ".len=(uint64_t)sizeof(%s_obj),"
+               ".tinfo=%s,.scan_kind=N00B_GC_SCAN_KIND_CALLBACK,"
+               ".scan_cb=n00b_gc_scan_cb_struct_layout,"
+               ".scan_user=&%s_obj_shape,"
+               ".object_id=%lluULL,.file=__FILE__,.identity=",
+               req->prefix, req->prefix, req->prefix, type_hash,
+               req->prefix, obj_id);
+        if (has_identity(req)) {
+            printf("&%s_obj_id", req->prefix);
+        }
+        else {
+            printf("0");
+        }
+        printf(",.flags=%s};", flags);
+        printf("static const n00b_static_object_desc_t * const "
+               "%s_obj_entry=&%s_obj_desc;",
+               req->prefix, req->prefix);
+    }
+
+    printf("static const n00b_static_image_request_t %s_request={"
+           ".version=1u,.type_hash=%s,.payload_kind=N00B_STATIC_IMAGE_PAYLOAD_NONE,"
+           ".payload=0,.payload_len=0,.args=0,.arg_count=0,"
+           ".target_abi={.version=1u,.pointer_bytes=(uint8_t)sizeof(void*),"
+           ".size_t_bytes=(uint8_t)sizeof(size_t),.char_bits=8,.endian=1u},"
+           ".object_flags=%s,.required_scan_kind=N00B_GC_SCAN_KIND_CALLBACK,",
+           req->prefix, type_hash, flags);
+    emit_request_identity_fields(req);
+    printf("};");
+    printf("static const n00b_static_image_dependency_t %s_deps[]={"
+           "{.desc=&%s_data_desc,.relocation_offset=0,.role=\"data\"},",
+           req->prefix, req->prefix);
+    if (pointer_target) {
+        printf("{.desc=&%s_lock_desc,.relocation_offset=__builtin_offsetof(%s,lock),"
+               ".role=\"lock\"}};",
+               req->prefix, req->type);
+    }
+    else {
+        printf("{.desc=&%s_lock_desc,.relocation_offset=0,.role=\"lock\"}};",
+               req->prefix);
+    }
+    if (pointer_target) {
+        printf("static const n00b_static_image_response_t %s_response "
+               "__attribute__((used))={"
+               ".version=1u,.request=&%s_request,"
+               ".object_start=(const void*)&%s_obj,"
+               ".object_len=(uint64_t)sizeof(%s_obj),"
+               ".scan_kind=N00B_GC_SCAN_KIND_CALLBACK,"
+               ".scan_cb=n00b_gc_scan_cb_struct_layout,"
+               ".scan_user=&%s_obj_shape,.dependencies=%s_deps,"
+               ".dependency_count=2};",
+               req->prefix, req->prefix, req->prefix, req->prefix,
+               req->prefix, req->prefix);
+    }
+    else {
+        printf("static const n00b_static_image_response_t %s_response "
+               "__attribute__((used))={"
+               ".version=1u,.request=&%s_request,"
+               ".object_start=0,.object_len=0,"
+               ".scan_kind=N00B_GC_SCAN_KIND_NONE,.scan_cb=nullptr,"
+               ".scan_user=nullptr,.dependencies=%s_deps,"
+               ".dependency_count=2};",
+               req->prefix, req->prefix, req->prefix);
+    }
+    return 0;
+}
+
+static void
+emit_array_identity_decl(const request_t *req)
+{
+    if (!has_identity(req)) {
+        return;
+    }
+
+    printf("static const n00b_static_identity_t %s_data_id={"
+           ".version=1u,"
+           ".kind=N00B_STATIC_IDENTITY_NCC_ARRAY_DATA,"
+           ".namespace_id=",
+           req->prefix);
+    emit_c_string_literal(req->identity_namespace);
+    printf(",.object_key=");
+    emit_c_string_literal(req->identity_payload_key);
+    printf("};");
+}
+
+static int
+emit_array_image(const request_t *req)
+{
+    if (!req->element_type || !req->data_type_hash || req->cap != req->len
+        || req->cinit_len != req->len) {
+        fprintf(stderr, "bad n00b array static initializer request\n");
+        return 6;
+    }
+
+    const char *scan_kind = or_default(req->element_scan_kind, "1");
+    const char *scan_cb = or_default(req->element_scan_cb, "0");
+    const char *scan_user = or_default(req->element_scan_user, "0");
+    const char *entry_attr = req->entry_attr ? req->entry_attr : "";
+    unsigned long long data_id = helper_hash_cstr(req->prefix)
+                               ^ 0x6172726179646174ULL;
+
+    printf("NCC_STATIC_INIT_OK %s_data\n", req->prefix);
+    emit_array_identity_decl(req);
+    printf("%s", req->element_shape_decl ? req->element_shape_decl : "");
+    printf("static %s %s_data[%zu]={", req->element_type, req->prefix,
+           req->len ? req->len : 1);
+    emit_cinit_items(req);
+    printf("};");
+    printf("static const n00b_static_object_desc_t %s_data_desc={"
+           ".start=(const void*)%s_data,"
+           ".len=(uint64_t)sizeof(%s_data),"
+           ".tinfo=%s,.scan_kind=%s,.scan_cb=%s,.scan_user=%s,"
+           ".object_id=%lluULL,.file=__FILE__,.identity=",
+           req->prefix, req->prefix, req->prefix, req->data_type_hash,
+           scan_kind, scan_cb, scan_user, data_id);
+    if (has_identity(req)) {
+        printf("&%s_data_id", req->prefix);
+    }
+    else {
+        printf("0");
+    }
+    printf(",.flags=2};");
+    printf("static const n00b_static_object_desc_t * const "
+           "%s_data_entry %s=&%s_data_desc;",
+           req->prefix, entry_attr, req->prefix);
+    return 0;
+}
+
 int
 main(void)
 {
@@ -362,10 +702,43 @@ main(void)
         return 2;
     }
 
+    if (req.container_kind
+        && (strcmp(req.container_kind, "list") == 0
+            || strcmp(req.container_kind, "array") == 0)) {
+        int status = strcmp(req.container_kind, "array") == 0
+                   ? emit_array_image(&req)
+                   : emit_list_image(&req);
+        free(req.type);
+        free(req.type_hash);
+        free(req.prefix);
+        free(req.entry_attr);
+        free(req.container_kind);
+        free(req.container_target);
+        free(req.element_type);
+        free(req.element_type_hash);
+        free(req.data_type_hash);
+        free(req.element_scan_kind);
+        free(req.element_scan_cb);
+        free(req.element_scan_user);
+        free(req.element_shape_decl);
+        free(req.identity_namespace);
+        free(req.identity_object_key);
+        free(req.identity_payload_key);
+        free(req.payload_hex);
+        for (size_t i = 0; i < req.cinit_len; i++) {
+            free(req.cinit_items[i]);
+        }
+        free(req.cinit_items);
+        free(input);
+        return status;
+    }
+
     if (strcmp(req.type, "n00b_buffer_t") == 0) {
         int status = emit_buffer_image(&req);
         free(req.type);
+        free(req.type_hash);
         free(req.prefix);
+        free(req.entry_attr);
         free(req.identity_namespace);
         free(req.identity_object_key);
         free(req.identity_payload_key);
@@ -464,7 +837,9 @@ main(void)
            req.prefix);
 
     free(req.type);
+    free(req.type_hash);
     free(req.prefix);
+    free(req.entry_attr);
     free(req.identity_namespace);
     free(req.identity_object_key);
     free(req.identity_payload_key);

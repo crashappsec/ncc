@@ -56,6 +56,7 @@ typedef struct {
     ncc_dict_t                 option_decls;
     ncc_dict_t                 generic_struct_decls;
     ncc_dict_t                 array_types;
+    ncc_dict_t                 list_types;
     ncc_dict_t                 gc_aggregate_types;
     ncc_dict_t                 gc_pointer_typedefs;
     ncc_template_registry_t   *template_reg;

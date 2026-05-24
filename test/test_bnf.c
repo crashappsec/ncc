@@ -332,7 +332,11 @@ test_parse_array_literal_initializers(void)
     assert_c_parse(g,
                    "int xs = [1, 2, 3];\n"
                    "int empty = [];\n"
-                   "int nested = [[1, 2], [3, 4]];\n");
+                   "int nested = [[1, 2], [3, 4]];\n"
+                   "int explicit_array = a{1, 2, 3};\n"
+                   "int explicit_empty_array = a{};\n"
+                   "int explicit_list = l{1, 2, 3};\n"
+                   "int explicit_empty_list = l{};\n");
     assert_c_parse(g,
                    "int main(void) {\n"
                    "  const int xs = [1, 2, 3,];\n"

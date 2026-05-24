@@ -797,9 +797,11 @@ print_help(void)
         "                       Override r-string address expressions used by\n"
         "                       array literal static initializers\n"
         "  --ncc-array-literal-data-template=TMPL\n"
-        "                       Override array literal backing storage template\n"
+        "                       Legacy compatibility flag; ignored by\n"
+        "                       helper-backed array literals\n"
         "  --ncc-array-literal-data-expr=EXPR\n"
-        "                       Override expression used as array .data pointer\n"
+        "                       Legacy compatibility flag; ignored by\n"
+        "                       helper-backed array literals\n"
         "  --ncc-static-object-entry-attr=ATTR\n"
         "                       Attribute text for generated static-object\n"
         "                       descriptor section entries\n"
@@ -2195,6 +2197,8 @@ compile_file(ncc_opts_t *opts)
                             ncc_hash_cstring, ncc_dict_cstr_eq);
     ncc_dict_init(&xdata.array_types,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
+    ncc_dict_init(&xdata.list_types,
+                            ncc_hash_cstring, ncc_dict_cstr_eq);
     ncc_dict_init(&xdata.gc_aggregate_types,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
     ncc_dict_init(&xdata.gc_pointer_typedefs,
@@ -2215,6 +2219,7 @@ compile_file(ncc_opts_t *opts)
     ncc_dict_free(&xdata.option_decls);
     ncc_dict_free(&xdata.generic_struct_decls);
     ncc_dict_free(&xdata.array_types);
+    ncc_dict_free(&xdata.list_types);
     ncc_dict_free(&xdata.gc_aggregate_types);
     ncc_dict_free(&xdata.gc_pointer_typedefs);
     free_gc_stack_roots(xdata.gc_stack_roots);

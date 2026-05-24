@@ -242,6 +242,8 @@
 
 <array_literal_list> ::= <initializer> (%"," <initializer>)*
 
+<modified_literal> ::= %IDENTIFIER %"{" <array_literal_list>? %","? %"}"
+
 <array_abstract_declarator> ::= <direct_abstract_declarator>? %"[" <type_qualifier_list>? <assignment_expression>? %"]"
     | <direct_abstract_declarator>? %"[" %"static"? <type_qualifier_list>? <assignment_expression>? %"]"
     | <direct_abstract_declarator>? %"[" <type_qualifier_list> %"static" <assignment_expression> %"]"
@@ -461,6 +463,7 @@
 
 <initializer> ::= <braced_initializer>
     | <array_literal>
+    | <modified_literal>
     | <assignment_expression>
 
 <initializer_list> ::= <designation>? <initializer> (%"," <designation>? <initializer>)*
