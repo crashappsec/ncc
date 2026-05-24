@@ -352,6 +352,28 @@ tag_is_list_type(ncc_parse_tree_t *tag_node)
     return result;
 }
 
+// WP-011 Phase 2: dict-target tag detection.  Mirrors the list/array
+// `tag_is_*_type` shape: matches the runtime tag prefix `n00b_dict_`
+// (post-typeid-mangling) and the pre-mangle `typeid("n00b_dict", ...)`
+// form.  Phase 2 only needs to know "this target is a dict"; Phase 3
+// will record the resolved K/V types for the helper request.
+static bool
+tag_is_dict_type(ncc_parse_tree_t *tag_node)
+{
+    char *tag    = node_text(tag_node);
+    bool  result = false;
+
+    if (strncmp(tag, "n00b_dict_", 10) == 0) {
+        result = true;
+    }
+    else if (strstr(tag, "typeid") && strstr(tag, "\"n00b_dict\"")) {
+        result = true;
+    }
+
+    ncc_free(tag);
+    return result;
+}
+
 static char *
 type_from_specifier_qualifier_list(ncc_xform_ctx_t *ctx,
                                    ncc_parse_tree_t *sql)
@@ -591,6 +613,31 @@ list_type_from_decl_specs(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl_specs)
     return info;
 }
 
+// WP-011 Phase 2: dict-target detection.  Returns true when the
+// `<declaration_specifiers>` names a `n00b_dict_t(K, V)` generic
+// struct.  Phase 2 only needs the boolean "is dict target"; Phase 3
+// will resolve and record key/value types alongside the list/array
+// type tables.  Typedef-alias resolution for dict types is also a
+// Phase 3 concern (the Phase 2 fixtures use `n00b_dict_t(K, V) x`
+// directly, matching the struct-specifier inspection).
+static bool
+decl_specs_target_is_dict(ncc_parse_tree_t *decl_specs)
+{
+    if (!decl_specs) {
+        return false;
+    }
+    ncc_parse_tree_t *su = first_descendant_nt(decl_specs,
+                                               "struct_or_union_specifier");
+    if (!su) {
+        return false;
+    }
+    ncc_parse_tree_t *tag = ncc_xform_find_child_nt(su, "tag_name");
+    if (!tag) {
+        return false;
+    }
+    return tag_is_dict_type(tag);
+}
+
 static char *
 declarator_name(ncc_parse_tree_t *node)
 {
@@ -711,6 +758,34 @@ initializer_list_literal(ncc_parse_tree_t *initializer)
     }
     ncc_parse_tree_t *literal = initializer_modified_literal(initializer);
     return modified_literal_is(literal, "l") ? literal : nullptr;
+}
+
+// WP-011 Phase 2: dict-literal initializer detection.  Recognizes
+// both spellings:
+//   1) explicit `d{...}` — parsed as <modified_literal> with modifier "d";
+//   2) bare `{key: value, ...}` — parsed as <dict_literal>.
+// Bare `{}`, `{1,2,3}`, and `{.x = 5}` stay <braced_initializer>; the
+// grammar's <dict_literal> requires at least one <dict_pair> so the
+// empty / value-only / designated-initializer forms cannot match it.
+// Empty static dicts are spelled `d{}` and reach the dispatch via the
+// <modified_literal> branch.
+static ncc_parse_tree_t *
+initializer_dict_literal(ncc_parse_tree_t *initializer)
+{
+    if (!initializer) {
+        return nullptr;
+    }
+
+    // Bare `{key: value, ...}` form.
+    ncc_parse_tree_t *bare = ncc_xform_find_child_nt(initializer,
+                                                     "dict_literal");
+    if (bare) {
+        return bare;
+    }
+
+    // Explicit `d{...}` form (modifier == "d").
+    ncc_parse_tree_t *modified = initializer_modified_literal(initializer);
+    return modified_literal_is(modified, "d") ? modified : nullptr;
 }
 
 static void
@@ -2382,6 +2457,13 @@ static char *lower_list_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                                 list_type_info_t *type, string_list_t *decls,
                                 bool readonly, bool pointer_target);
 
+// WP-011 Phase 2 stub.  The real dict-literal lowering (helper request
+// build + dispatch + decl emission) lands in Phase 3.  For Phase 2 the
+// dispatch path emits a targeted error so test fixtures can confirm
+// the parser routes both `d{...}` and bare `{key: value, ...}` here.
+static void lower_dict_literal_stub(ncc_parse_tree_t *literal,
+                                    const char *target_type);
+
 static char *
 build_array_initializer(const char *data_name, int count,
                         const char *scan_kind, const char *scan_cb,
@@ -3478,6 +3560,24 @@ lower_list_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
     return expr_name;
 }
 
+// WP-011 Phase 2 stub.  Dict-literal lowering (helper request build,
+// helper invocation, decl emission, identity/lock storage) lands in
+// Phase 3 once D-066 cached-hash plumbing and the helper protocol
+// extension are in place.  For Phase 2 we only need the dispatch path
+// wired up so the test matrix can prove parser recognition and target-
+// type diagnostics.  This stub raises the targeted error described in
+// the WP plan; `literal_helper_error()` calls `array_errorf()` which
+// terminates compilation with the diagnostic and source position.
+static void
+lower_dict_literal_stub(ncc_parse_tree_t *literal, const char *target_type)
+{
+    literal_helper_error(literal, "dict literal",
+                         target_type ? target_type : "<unknown>",
+                         "dict lowering not yet implemented in WP-011 "
+                         "Phase 2",
+                         nullptr, 0);
+}
+
 static bool
 decl_is_typedef(ncc_parse_tree_t *decl_specs)
 {
@@ -3570,6 +3670,10 @@ xform_array_decl(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
     record_typedef_aliases(ctx, decl, decl_specs, type);
     list_type_info_t *list_type = list_type_from_decl_specs(ctx, decl_specs);
     record_list_typedef_aliases(ctx, decl, decl_specs, list_type);
+    // WP-011 Phase 2: dict-target detection.  Typedef-alias resolution
+    // and full K/V type recording are Phase 3 concerns; Phase 2 only
+    // needs the boolean to gate target-type diagnostics.
+    bool dict_target = decl_specs_target_is_dict(decl_specs);
 
     ncc_parse_tree_t *list = ncc_xform_find_child_nt(decl,
                                                      "init_declarator_list");
@@ -3586,14 +3690,66 @@ xform_array_decl(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                                                          "initializer");
         ncc_parse_tree_t *literal = initializer_array_literal(init);
         ncc_parse_tree_t *list_literal = initializer_list_literal(init);
+        // WP-011: dict literal detection (explicit `d{...}` and bare
+        // `{key: value, ...}`).  Sits before the unknown-modifier
+        // diagnostic so the dict path consumes `d{...}` instead of
+        // tripping the legacy a/l-only error.
+        ncc_parse_tree_t *dict_literal = initializer_dict_literal(init);
         ncc_parse_tree_t *modified = initializer_modified_literal(init);
-        if (modified && !literal && !list_literal) {
+        if (modified && !literal && !list_literal && !dict_literal) {
             const char *modifier = modified_literal_modifier(modified);
             array_errorf(modified,
                          "unknown literal modifier '%s{...}'; supported "
-                         "literal modifiers are 'a{...}' for arrays and "
-                         "'l{...}' for lists",
+                         "literal modifiers are 'a{...}' for arrays, "
+                         "'l{...}' for lists, and 'd{...}' for dicts",
                          modifier ? modifier : "<unknown>");
+        }
+        if (dict_literal) {
+            ncc_parse_tree_t *declarator = ncc_xform_find_child_nt(
+                init_decls.data[i], "declarator");
+            char *name = declarator_name(declarator);
+
+            // Target-type check: bare `{key: value, ...}` is dict-only
+            // (the parser admits `{...}` as a dict literal only when
+            // it contains `:` separators; D-063).  An explicit `d{...}`
+            // is also dict-only.  Either way, the target type must be
+            // a dict.
+            if (!dict_target) {
+                char *target = node_text(decl_specs);
+                array_errorf(dict_literal,
+                             "dict literal initializer for '%s' requires a "
+                             "n00b_dict_t(K, V) object or pointer target; "
+                             "found target type '%s'",
+                             name ? name : "<unknown>", target);
+            }
+
+            // Lifetime check parallels the list literal rule (WP-010):
+            // block-scope mutable dict targets are rejected ahead of
+            // lowering, matching the list literal precedent so the
+            // diagnostic fires before the Phase 2 stub error.
+            bool local = ncc_xform_find_ancestor(decl, "block_item") != nullptr;
+            bool readonly = decl_is_const(decl_specs);
+            if (local && !readonly) {
+                array_errorf(dict_literal,
+                             "non-const local dict literal for '%s' is not "
+                             "supported yet; add 'const' to the pointee/object "
+                             "type or move the declaration to file scope",
+                             name ? name : "<unknown>");
+            }
+
+            // Phase 2 stub: dict lowering is implemented in Phase 3.
+            // The stub raises a targeted error so the dispatch path is
+            // observable via test fixtures.  `lower_dict_literal_stub`
+            // does not return; the rest of the dict branch is for
+            // Phase 3.
+            char *target_type = node_text(decl_specs);
+            ncc_free(name);
+            lower_dict_literal_stub(dict_literal,
+                                    target_type ? target_type : "<unknown>");
+            // Unreachable; defensive cleanup if the helper ever stops
+            // exiting on error.
+            ncc_free(target_type);
+            continue;
         }
         if (list_literal) {
             ncc_parse_tree_t *declarator = ncc_xform_find_child_nt(

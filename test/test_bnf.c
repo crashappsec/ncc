@@ -358,6 +358,53 @@ test_parse_array_literal_initializers(void)
     ncc_grammar_free(g);
 }
 
+// WP-011 Phase 2: parser-level recognition for dict literals.  Two
+// spellings: explicit `d{...}` <modified_literal> (already covered by
+// the existing <modified_literal> shape; this test pins it down) and
+// bare `{key: value, ...}` <dict_literal> (D-063).  Existing
+// non-dict forms — empty `{}`, comma-only `{1, 2, 3}`, designated
+// initializers `{.x = 5}` — MUST still parse as <braced_initializer>
+// (D-064 plus existing C semantics); regression coverage is below.
+static void
+test_parse_dict_literal_initializers(void)
+{
+    printf("Test: Parse dict literal initializers...\n");
+
+    ncc_grammar_t *g = load_c_grammar();
+
+    if (!g) {
+        printf("  SKIP\n");
+        return;
+    }
+
+    // Positive: dict literals in both spellings, plus nesting and
+    // multi-pair / trailing-comma variants.  These must all parse.
+    assert_c_parse(g,
+                   "int explicit_dict = d{1: 2};\n"
+                   "int explicit_empty_dict = d{};\n"
+                   "int bare_dict = {1: 2};\n"
+                   "int multi_pair = d{1: 2, 3: 4, 5: 6};\n"
+                   "int trailing_comma = d{1: 2, 3: 4,};\n"
+                   "int bare_trailing_comma = {1: 2, 3: 4,};\n"
+                   "int nested_dict_in_dict = d{1: d{2: 3}};\n"
+                   "int nested_list_value = d{1: l{2, 3}};\n"
+                   "int nested_array_value = d{1: a{2, 3}};\n"
+                   "int nested_bracket_value = d{1: [2, 3]};\n");
+
+    // Negative-style regression: braced initializers without `:` keep
+    // their existing C semantics.  These intentionally use an
+    // aggregate-shaped target so the C grammar accepts them.
+    assert_c_parse(g,
+                   "struct s { int x; };\n"
+                   "struct s zero = {};\n"
+                   "struct s positional = {1};\n"
+                   "int xs[3] = {1, 2, 3};\n"
+                   "struct s designated = {.x = 5};\n");
+
+    printf("  PASS\n");
+    ncc_grammar_free(g);
+}
+
 // ============================================================================
 // Test: BNF preprocessing
 // ============================================================================
@@ -395,6 +442,7 @@ main(void)
     test_load_grammar();
     test_parse_simple_c();
     test_parse_array_literal_initializers();
+    test_parse_dict_literal_initializers();
 
     printf("\nAll BNF tests passed.\n");
     return 0;

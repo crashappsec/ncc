@@ -992,6 +992,36 @@ ncc_error_contains_tests = {
     test_dir / 'err_list_literal_missing_helper.c',
     'requires --ncc-static-init-helper=PATH',
   ],
+  # WP-011 Phase 2 dict literal fixtures.  These all expect targeted
+  # diagnostics; the helper-backed lowering lands in Phase 3.  The
+  # `_stub` fixture pins the Phase 2 stub message and is DELETED when
+  # Phase 3 implements real dict lowering.
+  'err_dict_literal_non_dict_target': [
+    test_dir / 'err_dict_literal_non_dict_target.c',
+    'dict literal initializer',
+  ],
+  'err_dict_literal_bare_in_non_dict_target': [
+    test_dir / 'err_dict_literal_bare_in_non_dict_target.c',
+    'dict literal initializer',
+  ],
+  'err_dict_literal_local_mutable': [
+    test_dir / 'err_dict_literal_local_mutable.c',
+    'non-const local dict literal',
+  ],
+  'err_dict_literal_stub': [
+    test_dir / 'err_dict_literal_stub.c',
+    'dict lowering not yet implemented in WP-011 Phase 2',
+  ],
+  # test_dict_literal.c is structured like test_list_literal.c (the
+  # assertion-style fixture Phase 3 flips to compile_run) but runs as
+  # `expect_error_contains` for now: every form parses, then the xform
+  # pass trips the Phase 2 stub on the first declaration.  When Phase 3
+  # lands, move this entry to ncc_compile_tests and delete the stub
+  # fixture above.
+  'test_dict_literal_phase2_stub': [
+    test_dir / 'test_dict_literal.c',
+    'dict lowering not yet implemented in WP-011 Phase 2',
+  ],
   'err_static_image_bad_payload': [
     test_dir / 'err_static_image_bad_payload.c',
     'requires a string payload',

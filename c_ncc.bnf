@@ -243,6 +243,21 @@
 <array_literal_list> ::= <initializer> (%"," <initializer>)*
 
 <modified_literal> ::= %IDENTIFIER %"{" <array_literal_list>? %","? %"}"
+    | %IDENTIFIER %"{" <dict_pair_list> %","? %"}"
+
+# WP-011: bare dict literal `{key: value, ...}`. Disambiguates from
+# `<braced_initializer>` by requiring at least one `<dict_pair>` (i.e.
+# at least one `:` key/value separator).  Empty `{}` and comma-only
+# initializer lists fall through to `<braced_initializer>`; designated
+# initializers (`.x = 5`) likewise stay in `<braced_initializer>`.
+# The `<modified_literal>` rule above shares <dict_pair_list> so that
+# explicit `d{key: value, ...}` accepts the same body shape; the
+# modifier-vs-bare distinction is resolved by the xform pass.
+<dict_literal> ::= %"{" <dict_pair_list> %","? %"}"
+
+<dict_pair_list> ::= <dict_pair> (%"," <dict_pair>)*
+
+<dict_pair> ::= <initializer> %":" <initializer>
 
 <array_abstract_declarator> ::= <direct_abstract_declarator>? %"[" <type_qualifier_list>? <assignment_expression>? %"]"
     | <direct_abstract_declarator>? %"[" %"static"? <type_qualifier_list>? <assignment_expression>? %"]"
@@ -461,7 +476,8 @@
 
 <init_declarator_list> ::= <init_declarator> (%"," <init_declarator>)*
 
-<initializer> ::= <braced_initializer>
+<initializer> ::= <dict_literal>
+    | <braced_initializer>
     | <array_literal>
     | <modified_literal>
     | <assignment_expression>
