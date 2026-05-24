@@ -2360,7 +2360,9 @@ build_array_data_decl(ncc_xform_ctx_t *ctx, array_type_info_t *type,
     ncc_static_object_slots_t stobj;
     ncc_static_object_slots_init(&stobj, ctx, &names, typehash_str, "2",
                                  scan_plan.scan_kind, scan_plan.scan_cb,
-                                 scan_plan.scan_user);
+                                 scan_plan.scan_user,
+                                 "N00B_STATIC_IDENTITY_NCC_ARRAY_DATA",
+                                 "ncc-array-data", site, count_str);
 
     const char *all_args[] = {
         type->elem_type, data_name, count_str, items, stobj.typehash,
@@ -2368,12 +2370,14 @@ build_array_data_decl(ncc_xform_ctx_t *ctx, array_type_info_t *type,
         wrapper_name, scan_plan.shape_name, scan_plan.stride_words, "0",
         scan_plan.shape_decl, scan_plan.no_scan, stobj.desc_name,
         stobj.entry_name, stobj.object_id, stobj.flags, stobj.entry_attr,
+        stobj.identity_decl, stobj.identity_expr,
     };
 
     char *result = ncc_static_object_expand_template(
         "array literal data", get_array_literal_data_template(ctx),
-        all_args, 20);
+        all_args, 22);
 
+    ncc_static_object_slots_cleanup(&stobj);
     ncc_free(items);
     ncc_free(typehash_str);
     array_scan_plan_free(&scan_plan);
@@ -2403,7 +2407,9 @@ build_array_data_expr(ncc_xform_ctx_t *ctx, array_type_info_t *type,
     ncc_static_object_slots_t stobj;
     ncc_static_object_slots_init(&stobj, ctx, &names, typehash_str, "2",
                                  scan_plan.scan_kind, scan_plan.scan_cb,
-                                 scan_plan.scan_user);
+                                 scan_plan.scan_user,
+                                 "N00B_STATIC_IDENTITY_NCC_ARRAY_DATA",
+                                 "ncc-array-data", site, count_str);
 
     const char *all_args[] = {
         type->elem_type, data_name, count_str, "", stobj.typehash,
@@ -2411,12 +2417,14 @@ build_array_data_expr(ncc_xform_ctx_t *ctx, array_type_info_t *type,
         wrapper_name, "__unused_shape", "0", "0", "",
         scan_plan.no_scan, stobj.desc_name, stobj.entry_name,
         stobj.object_id, stobj.flags, stobj.entry_attr,
+        stobj.identity_decl, stobj.identity_expr,
     };
 
     char *result = ncc_static_object_expand_template(
         "array literal data expression", get_array_literal_data_expr(ctx),
-        all_args, 20);
+        all_args, 22);
 
+    ncc_static_object_slots_cleanup(&stobj);
     ncc_free(typehash_str);
     array_scan_plan_free(&scan_plan);
     return result;

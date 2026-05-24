@@ -7,6 +7,22 @@
 
 typedef void (*n00b_static_scan_cb_t)(void *, void *);
 
+#define N00B_STATIC_IDENTITY_VERSION 1u
+
+typedef enum n00b_static_identity_kind_t : uint8_t {
+    N00B_STATIC_IDENTITY_NONE            = 0,
+    N00B_STATIC_IDENTITY_NCC_RSTR        = 1,
+    N00B_STATIC_IDENTITY_NCC_ARRAY_DATA  = 2,
+} n00b_static_identity_kind_t;
+
+typedef struct {
+    uint32_t                    version;
+    n00b_static_identity_kind_t kind;
+    uint8_t                     reserved[3];
+    const char                 *namespace_id;
+    const char                 *object_key;
+} n00b_static_identity_t;
+
 typedef struct {
     uint64_t stride;
     uint64_t offset;
@@ -29,6 +45,7 @@ typedef struct {
     void                  *scan_user;
     uint64_t               object_id;
     const char            *file;
+    const n00b_static_identity_t *identity;
     uint32_t               flags;
 } n00b_static_object_desc_t;
 

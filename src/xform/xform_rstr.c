@@ -1004,7 +1004,9 @@ ncc_rstr_static_ref_t ncc_rstr_build_static_ref(ncc_xform_ctx_t *ctx,
 
   ncc_static_object_slots_t stobj;
   ncc_static_object_slots_init(&stobj, ctx, &names, typehash_str, "2", "1",
-                               "nullptr", "nullptr");
+                               "nullptr", "nullptr",
+                               "N00B_STATIC_IDENTITY_NCC_RSTR", "ncc-rstr",
+                               call, bytes_str);
 
   char *decl_str = nullptr;
   char *expr_str = nullptr;
@@ -1020,39 +1022,44 @@ ncc_rstr_static_ref_t ncc_rstr_build_static_ref(ncc_xform_ctx_t *ctx,
     // $5=styling $6=typehash $7=wrapper_var
     // $8=descriptor $9=entry $10=object_id $11=flags
     // $12=scan_kind $13=scan_cb $14=scan_user $15=entry_attr
+    // $16=identity_decl $17=identity_expr
     const char *all_args[] = {
         style_decls, var_name, bytes_str, data_str,
         cp_str,      styling_str, typehash_str, wrapper_var,
         stobj.desc_name,    stobj.entry_name, stobj.object_id, stobj.flags,
         stobj.scan_kind,    stobj.scan_cb,    stobj.scan_user, stobj.entry_attr,
+        stobj.identity_decl, stobj.identity_expr,
     };
 
     decl_str = ncc_static_object_expand_template(
         "r-string static-ref",
-        get_rstr_static_ref_template_styled(ctx), all_args, 16);
+        get_rstr_static_ref_template_styled(ctx), all_args, 18);
     expr_str = ncc_static_object_expand_template(
         "r-string static-ref expression",
-        get_rstr_static_ref_expr_styled(ctx), all_args, 16);
+        get_rstr_static_ref_expr_styled(ctx), all_args, 18);
     ncc_free(style_decls);
   } else {
     // Slot layout mirrors the main plain r-string template:
     // $0=var $1=bytes $2=data $3=codepoints $4=typehash $5=wrapper_var
     // $6=descriptor $7=entry $8=object_id $9=flags
     // $10=scan_kind $11=scan_cb $12=scan_user $13=entry_attr
+    // $14=identity_decl $15=identity_expr
     const char *all_args[] = {
         var_name, bytes_str, data_str, cp_str, typehash_str, wrapper_var,
         stobj.desc_name, stobj.entry_name, stobj.object_id, stobj.flags,
         stobj.scan_kind, stobj.scan_cb,    stobj.scan_user, stobj.entry_attr,
+        stobj.identity_decl, stobj.identity_expr,
     };
 
     decl_str = ncc_static_object_expand_template(
         "r-string static-ref",
-        get_rstr_static_ref_template_plain(ctx), all_args, 14);
+        get_rstr_static_ref_template_plain(ctx), all_args, 16);
     expr_str = ncc_static_object_expand_template(
         "r-string static-ref expression",
-        get_rstr_static_ref_expr_plain(ctx), all_args, 14);
+        get_rstr_static_ref_expr_plain(ctx), all_args, 16);
   }
 
+  ncc_static_object_slots_cleanup(&stobj);
   ncc_free(content);
   ncc_free(data_str);
   ncc_free(typehash_str);
@@ -1168,7 +1175,9 @@ static ncc_parse_tree_t *xform_rstr(ncc_xform_ctx_t *ctx,
 
   ncc_static_object_slots_t stobj;
   ncc_static_object_slots_init(&stobj, ctx, &names, typehash_str, "2", "1",
-                               "nullptr", "nullptr");
+                               "nullptr", "nullptr",
+                               "N00B_STATIC_IDENTITY_NCC_RSTR", "ncc-rstr",
+                               node, bytes_str);
 
   ncc_result_t(ncc_parse_tree_ptr_t) r;
 
@@ -1178,6 +1187,7 @@ static ncc_parse_tree_t *xform_rstr(ncc_xform_ctx_t *ctx,
     //              $4=codepoints $5=styling $6=typehash $7=wrapper_var
     //              $8=descriptor $9=entry $10=object_id $11=flags
     //              $12=scan_kind $13=scan_cb $14=scan_user $15=entry_attr
+    //              $16=identity_decl $17=identity_expr
     char *style_decls = emit_style_declarations(ctx, &out, uid);
 
     char styling_str[64];
@@ -1188,9 +1198,10 @@ static ncc_parse_tree_t *xform_rstr(ncc_xform_ctx_t *ctx,
         cp_str,      styling_str, typehash_str, wrapper_var,
         stobj.desc_name,    stobj.entry_name,  stobj.object_id, stobj.flags,
         stobj.scan_kind,    stobj.scan_cb,     stobj.scan_user, stobj.entry_attr,
+        stobj.identity_decl, stobj.identity_expr,
     };
     int nslots = ncc_template_slot_count(tmpl_reg, "rstr_styled");
-    require_rstr_template_slots("rstr_styled", nslots, 16);
+    require_rstr_template_slots("rstr_styled", nslots, 18);
     r = ncc_template_instantiate(tmpl_reg, "rstr_styled", all_args, nslots);
     ncc_free(style_decls);
   } else {
@@ -1199,13 +1210,15 @@ static ncc_parse_tree_t *xform_rstr(ncc_xform_ctx_t *ctx,
     //              $4=typehash $5=wrapper_var
     //              $6=descriptor $7=entry $8=object_id $9=flags
     //              $10=scan_kind $11=scan_cb $12=scan_user $13=entry_attr
+    //              $14=identity_decl $15=identity_expr
     const char *all_args[] = {
         var_name, bytes_str, data_str, cp_str, typehash_str, wrapper_var,
         stobj.desc_name, stobj.entry_name, stobj.object_id, stobj.flags,
         stobj.scan_kind, stobj.scan_cb,    stobj.scan_user, stobj.entry_attr,
+        stobj.identity_decl, stobj.identity_expr,
     };
     int nslots = ncc_template_slot_count(tmpl_reg, "rstr_plain");
-    require_rstr_template_slots("rstr_plain", nslots, 14);
+    require_rstr_template_slots("rstr_plain", nslots, 16);
     r = ncc_template_instantiate(tmpl_reg, "rstr_plain", all_args, nslots);
   }
 
@@ -1220,6 +1233,7 @@ static ncc_parse_tree_t *xform_rstr(ncc_xform_ctx_t *ctx,
   ncc_parse_tree_t *replacement = ncc_result_get(r);
 
   // Cleanup.
+  ncc_static_object_slots_cleanup(&stobj);
   ncc_free(content);
   ncc_free(data_str);
   ncc_free(typehash_str);

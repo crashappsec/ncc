@@ -41,8 +41,25 @@ typedef struct {
     void              *scan_user;
     uint64_t           object_id;
     const char        *file;
+    const struct n00b_static_identity_t *identity;
     uint32_t           flags;
 } n00b_static_object_desc_t;
+
+#define N00B_STATIC_IDENTITY_VERSION 1u
+
+typedef enum n00b_static_identity_kind_t : uint8_t {
+    N00B_STATIC_IDENTITY_NONE                     = 0,
+    N00B_STATIC_IDENTITY_NCC_STATIC_IMAGE_OBJECT  = 3,
+    N00B_STATIC_IDENTITY_NCC_STATIC_IMAGE_PAYLOAD = 4,
+} n00b_static_identity_kind_t;
+
+typedef struct n00b_static_identity_t {
+    uint32_t                    version;
+    n00b_static_identity_kind_t kind;
+    uint8_t                     reserved[3];
+    const char                 *namespace_id;
+    const char                 *object_key;
+} n00b_static_identity_t;
 
 typedef enum n00b_static_image_payload_kind_t : uint8_t {
     N00B_STATIC_IMAGE_PAYLOAD_NONE  = 0,
@@ -66,6 +83,9 @@ typedef struct n00b_static_image_request_t {
     n00b_static_image_abi_t          target_abi;
     uint32_t                         object_flags;
     n00b_gc_scan_kind_t              required_scan_kind;
+    const char                      *identity_namespace;
+    const char                      *identity_object_key;
+    const char                      *identity_payload_key;
 } n00b_static_image_request_t;
 
 typedef struct n00b_static_image_dependency_t {

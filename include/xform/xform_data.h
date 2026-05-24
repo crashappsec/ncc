@@ -49,6 +49,7 @@ typedef struct ncc_gc_stack_root_t {
 
 typedef struct {
     const char                *compiler;
+    const char                *input_file;
     const char                *constexpr_headers;
     ncc_meta_table_t           func_meta;
     ncc_dict_t                 option_meta;
@@ -71,6 +72,7 @@ typedef struct {
     const char                *array_literal_data_expr;
     const char                *static_object_entry_attr;
     const char                *static_init_helper;
+    bool                       static_identity_generate_namespace;
     bool                       gc_stack_maps;
     bool                       gc_stack_maps_relaxed;
     ncc_gc_stack_root_t       *gc_stack_roots;

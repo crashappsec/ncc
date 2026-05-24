@@ -675,8 +675,8 @@ collect_static_image_args(ncc_parse_tree_t *call)
 }
 
 static char *
-build_helper_request(ncc_xform_ctx_t *ctx, const char *type_name,
-                     const char *prefix, bool readonly,
+build_helper_request(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *call,
+                     const char *type_name, const char *prefix, bool readonly,
                      const static_image_arg_list_t *args)
 {
     ncc_buffer_t *buf = ncc_buffer_empty();
@@ -687,6 +687,26 @@ build_helper_request(ncc_xform_ctx_t *ctx, const char *type_name,
     char *type_hash = ncc_static_object_typehash_expr(hash_type);
     const char *entry_attr = ncc_static_object_entry_attr(ctx);
     char *entry_attr_hex = hex_string(entry_attr, strlen(entry_attr));
+    char *identity_namespace =
+        ncc_static_object_identity_namespace(ctx, call);
+    char *identity_object_key =
+        ncc_static_object_identity_key(ctx,
+                                       "ncc-static-image-object",
+                                       call,
+                                       type_hash,
+                                       "1");
+    char *identity_payload_key =
+        ncc_static_object_identity_key(ctx,
+                                       "ncc-static-image-payload",
+                                       call,
+                                       "0",
+                                       "payload");
+    char *identity_namespace_hex =
+        hex_string(identity_namespace, strlen(identity_namespace));
+    char *identity_object_key_hex =
+        hex_string(identity_object_key, strlen(identity_object_key));
+    char *identity_payload_key_hex =
+        hex_string(identity_payload_key, strlen(identity_payload_key));
 
     ncc_buffer_printf(buf,
                       "NCC_STATIC_INIT 1\n"
@@ -696,11 +716,18 @@ build_helper_request(ncc_xform_ctx_t *ctx, const char *type_name,
                       "readonly %u\n"
                       "abi %zu %zu 8 %s\n"
                       "entry_attr_hex %s\n"
+                      "identity_namespace_hex %s\n"
+                      "identity_object_key_hex %s\n"
+                      "identity_payload_key_hex %s\n"
                       "arg_count %zu\n",
                       type_hex, type_hash, prefix, readonly ? 1u : 0u,
                       sizeof(void *), sizeof(size_t),
                       static_image_host_endian_value(),
-                      entry_attr_hex, args->len);
+                      entry_attr_hex,
+                      identity_namespace_hex,
+                      identity_object_key_hex,
+                      identity_payload_key_hex,
+                      args->len);
 
     for (size_t i = 0; i < args->len; i++) {
         const static_image_arg_t *arg = &args->data[i];
@@ -729,6 +756,12 @@ build_helper_request(ncc_xform_ctx_t *ctx, const char *type_name,
     ncc_free(hash_type);
     ncc_free(type_hash);
     ncc_free(entry_attr_hex);
+    ncc_free(identity_namespace);
+    ncc_free(identity_object_key);
+    ncc_free(identity_payload_key);
+    ncc_free(identity_namespace_hex);
+    ncc_free(identity_object_key_hex);
+    ncc_free(identity_payload_key_hex);
     return ncc_buffer_take(buf);
 }
 
@@ -988,7 +1021,7 @@ lower_static_image_initializer(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                             syntax_name, type_name);
     }
 
-    char *request = build_helper_request(ctx, type_name, prefix, readonly,
+    char *request = build_helper_request(ctx, call, type_name, prefix, readonly,
                                          &args);
     char *expr_name = nullptr;
     char *decls     = nullptr;

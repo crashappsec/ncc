@@ -234,6 +234,7 @@ typedef struct {
     bool         dump_output;
     bool         gc_stack_maps;
     bool         gc_stack_maps_relaxed;
+    bool         static_identity_generate_namespace;
 
     // Dependency file generation (handled separately from compilation).
     bool         has_dep_flags; // -MD or -MMD present
@@ -601,6 +602,10 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
                 continue;
             }
         }
+        if (strcmp(arg, "--ncc-static-identity-generate-namespace") == 0) {
+            opts->static_identity_generate_namespace = true;
+            continue;
+        }
         if (strncmp(arg, "--ncc-vargs-type=", 17) == 0) {
             opts->vargs_type = arg + 17;
             continue;
@@ -801,6 +806,9 @@ print_help(void)
         "  --ncc-static-init-helper=PATH\n"
         "                       Build-time helper for constructor-backed\n"
         "                       static image literals\n"
+        "  --ncc-static-identity-generate-namespace\n"
+        "                       Write .namespace.toml beside the source file\n"
+        "                       when stable static identity metadata is absent\n"
         "\n"
         "Standard flags:\n"
         "  -E                   Preprocess + transform, emit C to stdout\n"
@@ -2157,6 +2165,7 @@ compile_file(ncc_opts_t *opts)
     ncc_xform_ctx_init(&xctx, g, &xreg, tree);
     ncc_xform_data_t xdata = {
         .compiler          = opts->compiler,
+        .input_file        = opts->input_file,
         .constexpr_headers = opts->constexpr_headers,
         .func_meta         = {0},
         .template_reg      = &tmpl_reg,
@@ -2173,6 +2182,8 @@ compile_file(ncc_opts_t *opts)
         .array_literal_data_expr     = array_literal_data_expr,
         .static_object_entry_attr    = static_object_entry_attr,
         .static_init_helper          = opts->static_init_helper,
+        .static_identity_generate_namespace =
+            opts->static_identity_generate_namespace,
         .gc_stack_maps               = opts->gc_stack_maps,
         .gc_stack_maps_relaxed       = opts->gc_stack_maps_relaxed,
     };

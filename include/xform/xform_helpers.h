@@ -30,6 +30,9 @@ ncc_string_t ncc_xform_extract_type_string(ncc_xform_ctx_t  *ctx,
 void ncc_xform_first_leaf_pos(ncc_parse_tree_t *node,
                                 uint32_t *line, uint32_t *col);
 
+// Get source file from first leaf token in a subtree. Returns nullptr if absent.
+const char *ncc_xform_first_leaf_file(ncc_parse_tree_t *node);
+
 // Walk all leaves of a subtree and concatenate their text with spaces.
 // Returns an ncc_string_t.
 ncc_string_t ncc_xform_node_to_text(ncc_parse_tree_t *node);

@@ -7,6 +7,9 @@
 typedef struct {
     char  *type;
     char  *prefix;
+    char  *identity_namespace;
+    char  *identity_object_key;
+    char  *identity_payload_key;
     int    readonly;
     char  *payload_hex;
     size_t payload_len;
@@ -96,6 +99,15 @@ parse_request(char *input, request_t *req)
         else if (strncmp(line, "readonly ", 9) == 0) {
             req->readonly = atoi(line + 9);
         }
+        else if (strncmp(line, "identity_namespace_hex ", 23) == 0) {
+            req->identity_namespace = hex_decode_string(line + 23);
+        }
+        else if (strncmp(line, "identity_object_key_hex ", 24) == 0) {
+            req->identity_object_key = hex_decode_string(line + 24);
+        }
+        else if (strncmp(line, "identity_payload_key_hex ", 25) == 0) {
+            req->identity_payload_key = hex_decode_string(line + 25);
+        }
         else if (strncmp(line, "arg ", 4) == 0 && !req->payload_hex) {
             char name[128];
             char kind[32];
@@ -158,6 +170,94 @@ buffer_capacity(size_t len)
 }
 
 static int
+has_identity(const request_t *req)
+{
+    return req->identity_namespace && req->identity_namespace[0]
+        && req->identity_object_key && req->identity_object_key[0]
+        && req->identity_payload_key && req->identity_payload_key[0];
+}
+
+static void
+emit_c_string_literal(const char *s)
+{
+    putchar('"');
+    for (const unsigned char *p = (const unsigned char *)(s ? s : ""); *p; p++) {
+        switch (*p) {
+        case '\\':
+            fputs("\\\\", stdout);
+            break;
+        case '"':
+            fputs("\\\"", stdout);
+            break;
+        case '\n':
+            fputs("\\n", stdout);
+            break;
+        case '\r':
+            fputs("\\r", stdout);
+            break;
+        case '\t':
+            fputs("\\t", stdout);
+            break;
+        default:
+            if (*p >= 0x20 && *p < 0x7f) {
+                putchar((char)*p);
+            }
+            else {
+                printf("\\%03o", (unsigned)*p);
+            }
+            break;
+        }
+    }
+    putchar('"');
+}
+
+static void
+emit_identity_decls(const request_t *req)
+{
+    if (!has_identity(req)) {
+        return;
+    }
+
+    printf("static const n00b_static_identity_t %s_payload_id={"
+           ".version=1u,"
+           ".kind=N00B_STATIC_IDENTITY_NCC_STATIC_IMAGE_PAYLOAD,"
+           ".namespace_id=",
+           req->prefix);
+    emit_c_string_literal(req->identity_namespace);
+    printf(",.object_key=");
+    emit_c_string_literal(req->identity_payload_key);
+    printf("};");
+
+    printf("static const n00b_static_identity_t %s_obj_id={"
+           ".version=1u,"
+           ".kind=N00B_STATIC_IDENTITY_NCC_STATIC_IMAGE_OBJECT,"
+           ".namespace_id=",
+           req->prefix);
+    emit_c_string_literal(req->identity_namespace);
+    printf(",.object_key=");
+    emit_c_string_literal(req->identity_object_key);
+    printf("};");
+}
+
+static void
+emit_request_identity_fields(const request_t *req)
+{
+    if (!has_identity(req)) {
+        printf(".identity_namespace=0,.identity_object_key=0,"
+               ".identity_payload_key=0,");
+        return;
+    }
+
+    printf(".identity_namespace=");
+    emit_c_string_literal(req->identity_namespace);
+    printf(",.identity_object_key=");
+    emit_c_string_literal(req->identity_object_key);
+    printf(",.identity_payload_key=");
+    emit_c_string_literal(req->identity_payload_key);
+    printf(",");
+}
+
+static int
 emit_buffer_image(const request_t *req)
 {
     if (!req->readonly) {
@@ -172,6 +272,7 @@ emit_buffer_image(const request_t *req)
     size_t alloc_len = buffer_capacity(req->payload_len);
 
     printf("NCC_STATIC_INIT_OK &%s_obj\n", req->prefix);
+    emit_identity_decls(req);
     printf("static const unsigned char %s_payload[]={", req->prefix);
     emit_payload_bytes(req->payload_hex);
     printf("};");
@@ -179,8 +280,15 @@ emit_buffer_image(const request_t *req)
            ".start=(const void*)%s_payload,"
            ".len=(uint64_t)sizeof(%s_payload),"
            ".tinfo=0,.scan_kind=1,.scan_cb=0,.scan_user=0,"
-           ".object_id=11,.file=__FILE__,.flags=1};",
+           ".object_id=11,.file=__FILE__,.identity=",
            req->prefix, req->prefix, req->prefix);
+    if (has_identity(req)) {
+        printf("&%s_payload_id", req->prefix);
+    }
+    else {
+        printf("0");
+    }
+    printf(",.flags=1};");
     printf("static const n00b_static_object_desc_t * const "
            "%s_payload_entry=&%s_payload_desc;",
            req->prefix, req->prefix);
@@ -191,8 +299,10 @@ emit_buffer_image(const request_t *req)
            ".payload_len=(uint64_t)%zu,"
            ".target_abi={.version=1u,.pointer_bytes=(uint8_t)sizeof(void*),"
            ".size_t_bytes=(uint8_t)sizeof(size_t),.char_bits=8,.endian=1u},"
-           ".object_flags=1,.required_scan_kind=4};",
+           ".object_flags=1,.required_scan_kind=4,",
            req->prefix, req->prefix, req->payload_len);
+    emit_request_identity_fields(req);
+    printf("};");
     printf("static const uint64_t %s_offsets[]={"
            "__builtin_offsetof(n00b_buffer_t,data)/sizeof(void*)};",
            req->prefix);
@@ -211,8 +321,15 @@ emit_buffer_image(const request_t *req)
            ".start=(const void*)&%s_obj,"
            ".len=(uint64_t)sizeof(%s_obj),"
            ".tinfo=0,.scan_kind=4,.scan_cb=n00b_gc_scan_cb_struct_layout,"
-           ".scan_user=&%s_shape,.object_id=12,.file=__FILE__,.flags=1};",
+           ".scan_user=&%s_shape,.object_id=12,.file=__FILE__,.identity=",
            req->prefix, req->prefix, req->prefix, req->prefix);
+    if (has_identity(req)) {
+        printf("&%s_obj_id", req->prefix);
+    }
+    else {
+        printf("0");
+    }
+    printf(",.flags=1};");
     printf("static const n00b_static_object_desc_t * const "
            "%s_obj_entry=&%s_obj_desc;",
            req->prefix, req->prefix);
@@ -249,6 +366,9 @@ main(void)
         int status = emit_buffer_image(&req);
         free(req.type);
         free(req.prefix);
+        free(req.identity_namespace);
+        free(req.identity_object_key);
+        free(req.identity_payload_key);
         free(req.payload_hex);
         free(input);
         return status;
@@ -268,6 +388,7 @@ main(void)
     const char *flags     = req.readonly ? "1" : "2";
 
     printf("NCC_STATIC_INIT_OK &%s_obj\n", req.prefix);
+    emit_identity_decls(&req);
     printf("static const unsigned char %s_payload[]={", req.prefix);
     emit_payload_bytes(req.payload_hex);
     printf("};");
@@ -275,8 +396,15 @@ main(void)
            ".start=(const void*)%s_payload,"
            ".len=(uint64_t)sizeof(%s_payload),"
            ".tinfo=0,.scan_kind=1,.scan_cb=0,.scan_user=0,"
-           ".object_id=1,.file=__FILE__,.flags=1};",
+           ".object_id=1,.file=__FILE__,.identity=",
            req.prefix, req.prefix, req.prefix);
+    if (has_identity(&req)) {
+        printf("&%s_payload_id", req.prefix);
+    }
+    else {
+        printf("0");
+    }
+    printf(",.flags=1};");
     printf("static const n00b_static_object_desc_t * const "
            "%s_payload_entry=&%s_payload_desc;",
            req.prefix, req.prefix);
@@ -287,8 +415,10 @@ main(void)
            ".payload_len=(uint64_t)%zu,"
            ".target_abi={.version=1u,.pointer_bytes=(uint8_t)sizeof(void*),"
            ".size_t_bytes=(uint8_t)sizeof(size_t),.char_bits=8,.endian=1u},"
-           ".object_flags=%s,.required_scan_kind=4};",
+           ".object_flags=%s,.required_scan_kind=4,",
            req.prefix, req.prefix, req.payload_len, flags);
+    emit_request_identity_fields(&req);
+    printf("};");
     printf("static const uint64_t %s_offsets[]={"
            "__builtin_offsetof(n00b_static_image_test_t,bytes)/sizeof(void*)};",
            req.prefix);
@@ -305,8 +435,15 @@ main(void)
            ".start=(const void*)&%s_obj,"
            ".len=(uint64_t)sizeof(%s_obj),"
            ".tinfo=0,.scan_kind=4,.scan_cb=n00b_gc_scan_cb_struct_layout,"
-           ".scan_user=&%s_shape,.object_id=2,.file=__FILE__,.flags=%s};",
-           req.prefix, req.prefix, req.prefix, req.prefix, flags);
+           ".scan_user=&%s_shape,.object_id=2,.file=__FILE__,.identity=",
+           req.prefix, req.prefix, req.prefix, req.prefix);
+    if (has_identity(&req)) {
+        printf("&%s_obj_id", req.prefix);
+    }
+    else {
+        printf("0");
+    }
+    printf(",.flags=%s};", flags);
     printf("static const n00b_static_object_desc_t * const "
            "%s_obj_entry=&%s_obj_desc;",
            req.prefix, req.prefix);
@@ -328,6 +465,9 @@ main(void)
 
     free(req.type);
     free(req.prefix);
+    free(req.identity_namespace);
+    free(req.identity_object_key);
+    free(req.identity_payload_key);
     free(req.payload_hex);
     free(input);
     return 0;
