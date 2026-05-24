@@ -1,13 +1,11 @@
-// WP-011 Phase 3c.i partial-stub fixture; DELETE when Phase 3c.ii
-// implements pointer-key lowering.  This fixture pins down the
-// pointer-key partial-stub diagnostic; when Phase 3c.ii lands the
-// scalar/pointer divide goes away and this fixture stops being
-// meaningful.
+// WP-011 Phase 3c.i duplicate-key fixture.
+//
+// Duplicate keys at compile time are a hard error per D-065.  The
+// diagnostic names the duplicate value and both source positions so a
+// human can find the typo quickly.
 
 #include <stddef.h>
 #include <stdint.h>
-
-#include "ncc_runtime.h"
 
 typedef struct n00b_rwlock_t n00b_rwlock_t;
 typedef struct n00b_allocator_t n00b_allocator_t;
@@ -31,5 +29,4 @@ typedef enum n00b_gc_scan_kind_t : uint8_t {
         void               *scan_user;                                        \
     }
 
-// Pointer-keyed dict literal triggers the Phase 3c.i partial-stub.
-n00b_dict_t(ncc_string_t *, int) x = d{r"foo": 1};
+n00b_dict_t(int, int) x = d{1: 2, 1: 3};

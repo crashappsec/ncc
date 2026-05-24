@@ -2199,6 +2199,8 @@ compile_file(ncc_opts_t *opts)
                             ncc_hash_cstring, ncc_dict_cstr_eq);
     ncc_dict_init(&xdata.list_types,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
+    ncc_dict_init(&xdata.dict_types,
+                            ncc_hash_cstring, ncc_dict_cstr_eq);
     ncc_dict_init(&xdata.gc_aggregate_types,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
     ncc_dict_init(&xdata.gc_pointer_typedefs,
@@ -2220,6 +2222,7 @@ compile_file(ncc_opts_t *opts)
     ncc_dict_free(&xdata.generic_struct_decls);
     ncc_dict_free(&xdata.array_types);
     ncc_dict_free(&xdata.list_types);
+    ncc_dict_free(&xdata.dict_types);
     ncc_dict_free(&xdata.gc_aggregate_types);
     ncc_dict_free(&xdata.gc_pointer_typedefs);
     free_gc_stack_roots(xdata.gc_stack_roots);

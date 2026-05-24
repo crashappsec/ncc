@@ -360,6 +360,7 @@ ncc_compile_tests = {
   'bang':          ['compile_run',  test_dir / 'test_bang.c'],
   'array_literal': ['compile_run',  test_dir / 'test_array_literal.c'],
   'list_literal':  ['compile_run',  test_dir / 'test_list_literal.c'],
+  'dict_literal':  ['compile_run',  test_dir / 'test_dict_literal.c'],
   'static_image': ['compile_run', test_dir / 'test_static_image.c'],
   'constexpr':    ['compile_run',  test_dir / 'test_constexpr.c'],
   'kargs':        ['compile_run',  test_dir / 'test_kargs.c'],
@@ -387,7 +388,7 @@ ncc_compile_tests = {
 foreach name, params : ncc_compile_tests
   extra_args = []
   test_deps = [ncc_exe]
-  if name == 'static_image' or name == 'list_literal' or name == 'array_literal'
+  if name == 'static_image' or name == 'list_literal' or name == 'array_literal' or name == 'dict_literal'
     extra_args = static_image_helper_flags
     test_deps += [static_image_helper]
   endif
@@ -1008,19 +1009,18 @@ ncc_error_contains_tests = {
     test_dir / 'err_dict_literal_local_mutable.c',
     'non-const local dict literal',
   ],
+  # Phase 3c.i partial-stub: pointer-keyed dict literals route to a
+  # narrower diagnostic until Phase 3c.ii implements pointer-key
+  # hashing/emission.  Delete this entry along with the fixture once
+  # 3c.ii lands.
   'err_dict_literal_stub': [
     test_dir / 'err_dict_literal_stub.c',
-    'dict lowering not yet implemented in WP-011 Phase 2',
+    'dict pointer-key lowering not yet implemented in WP-011 Phase 3c.i; coming in Phase 3c.ii',
   ],
-  # test_dict_literal.c is structured like test_list_literal.c (the
-  # assertion-style fixture Phase 3 flips to compile_run) but runs as
-  # `expect_error_contains` for now: every form parses, then the xform
-  # pass trips the Phase 2 stub on the first declaration.  When Phase 3
-  # lands, move this entry to ncc_compile_tests and delete the stub
-  # fixture above.
-  'test_dict_literal_phase2_stub': [
-    test_dir / 'test_dict_literal.c',
-    'dict lowering not yet implemented in WP-011 Phase 2',
+  # Phase 3c.i duplicate-key compile-time rejection (D-065).
+  'err_dict_literal_duplicate_key': [
+    test_dir / 'err_dict_literal_duplicate_key.c',
+    'duplicate key',
   ],
   'err_static_image_bad_payload': [
     test_dir / 'err_static_image_bad_payload.c',

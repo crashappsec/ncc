@@ -17,12 +17,40 @@
 #include <stdlib.h>
 #include <string.h>
 
+// WP-011 Phase 3c.i: precompute scalar-key dict hashes using the same
+// XXH3_128bits over raw key bytes that the n00b runtime uses for
+// `n00b_hash_raw(key_ptr, ksz)` (see /Users/viega/n00b/.../core/hash.c).
+// We pull in xxhash as a static-inline implementation so the resulting
+// 128-bit values are bit-identical to what the runtime computes during
+// dict lookup; otherwise every static-dict lookup would fail.  Hashes
+// are sent to the static-init helper via `hash <lo> <hi>` modifiers on
+// the per-pair record (see helper's `arg pair cinit` parser).
+//
+// Conversion: XXH128_hash_t has fields { low64, high64 } and the n00b
+// runtime's `n00b_xxh_convert` reinterprets the struct as a 128-bit
+// integer.  Reading the union members in little-endian word order
+// gives the same byte sequence; we expose `.low64` and `.high64`
+// directly without needing the union trick.
+#define XXH_INLINE_ALL
+#define XXH_STATIC_LINKING_ONLY
+#include "vendor/xxhash.h"
+
 typedef struct {
     char *object_type;
     char *elem_type;
 } array_type_info_t;
 
 typedef array_type_info_t list_type_info_t;
+
+// WP-011 Phase 3c: dict type info table.  Mirrors `list_types`/`array_types`
+// but records BOTH the key and value element types so the lowering pass
+// can synthesize the helper request fields (`key_type_*`, `value_type_*`)
+// for a `n00b_dict_t(K, V)` target.
+typedef struct {
+    char *object_type;
+    char *key_type;
+    char *value_type;
+} dict_type_info_t;
 
 typedef struct {
     char **items;
@@ -46,6 +74,8 @@ typedef ncc_layout_aggregate_type_info_t array_aggregate_type_info_t;
 typedef ncc_layout_uint64_list_t uint64_list_t;
 
 static void array_errorf(ncc_parse_tree_t *node, const char *fmt, ...);
+static void collect_nt_children(ncc_parse_tree_t *node, const char *name,
+                                ncc_array_t(ncc_parse_tree_ptr_t) *out);
 
 static ncc_dict_t *
 array_types(ncc_xform_ctx_t *ctx)
@@ -57,6 +87,12 @@ static ncc_dict_t *
 list_types(ncc_xform_ctx_t *ctx)
 {
     return &ncc_xform_get_data(ctx)->list_types;
+}
+
+static ncc_dict_t *
+dict_types(ncc_xform_ctx_t *ctx)
+{
+    return &ncc_xform_get_data(ctx)->dict_types;
 }
 
 static bool
@@ -290,6 +326,47 @@ lookup_list_type(ncc_xform_ctx_t *ctx, const char *key)
 
     bool              found = false;
     list_type_info_t *info  = ncc_dict_get(list_types(ctx), (void *)key,
+                                           &found);
+    return found ? info : nullptr;
+}
+
+// WP-011 Phase 3c: dict type table helpers.  Mirror record_list_type/
+// lookup_list_type but persist both key and value types so the lowering
+// pass can produce key_type_*/value_type_* helper fields without re-
+// inspecting the struct shape at lowering time.
+static void
+record_dict_type(ncc_xform_ctx_t *ctx, const char *key,
+                 const char *object_type, const char *key_type,
+                 const char *value_type)
+{
+    if (!key || !*key || !object_type || !*object_type
+        || !key_type || !*key_type
+        || !value_type || !*value_type) {
+        return;
+    }
+
+    bool found = false;
+    ncc_dict_get(dict_types(ctx), (void *)key, &found);
+    if (found) {
+        return;
+    }
+
+    dict_type_info_t *info = ncc_alloc(dict_type_info_t);
+    info->object_type      = copy_cstr(object_type);
+    info->key_type         = copy_cstr(key_type);
+    info->value_type       = copy_cstr(value_type);
+    ncc_dict_put(dict_types(ctx), copy_cstr(key), info);
+}
+
+static dict_type_info_t *
+lookup_dict_type(ncc_xform_ctx_t *ctx, const char *key)
+{
+    if (!key || !*key) {
+        return nullptr;
+    }
+
+    bool              found = false;
+    dict_type_info_t *info  = ncc_dict_get(dict_types(ctx), (void *)key,
                                            &found);
     return found ? info : nullptr;
 }
@@ -533,6 +610,136 @@ list_type_from_struct_spec(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *su)
     return result;
 }
 
+// WP-011 Phase 3c: extract the K and V type names from a dict tag's
+// `typeid("n00b_dict", K, V)` synthetic identifier.  The `<tag_name>`
+// of `n00b_dict_t(K, V)` (post-`_generic_struct` expansion) holds a
+// `<synthetic_identifier>` whose first `<typeid_atom>` is the string
+// literal `"n00b_dict"` and whose `<typeid_continuation>` chain
+// carries the K and V type names.
+//
+// This avoids depending on the user-visible struct layout: the test
+// fixtures and the real libn00b struct both store keys/values inside
+// the dict's `store`, not as top-level members.  The typeid is the
+// source of truth for K and V.
+static char *
+typeid_continuation_nth_atom(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *cont,
+                             size_t index)
+{
+    // index 0 → first atom in the continuation chain (i.e., the
+    // second `typeid_atom` overall, the one after the "n00b_dict"
+    // header).  index 1 → the next one.
+    while (cont) {
+        if (!ncc_xform_nt_name_is(cont, "typeid_continuation")) {
+            // Unwrap group wrappers.
+            ncc_parse_tree_t *inner = ncc_xform_find_child_nt(
+                cont, "typeid_continuation");
+            if (!inner || inner == cont) {
+                return nullptr;
+            }
+            cont = inner;
+            continue;
+        }
+
+        ncc_parse_tree_t *atom = ncc_xform_find_child_nt(cont, "typeid_atom");
+        if (index == 0) {
+            if (!atom) {
+                return nullptr;
+            }
+            ncc_string_t s = ncc_xform_extract_type_string(ctx, atom, nullptr);
+            char *result = trim_copy(s.data);
+            ncc_free(s.data);
+            return result;
+        }
+
+        ncc_parse_tree_t *next = ncc_xform_find_child_nt(cont,
+                                                         "typeid_continuation");
+        if (!next || next == cont) {
+            return nullptr;
+        }
+        cont = next;
+        index--;
+    }
+    return nullptr;
+}
+
+static bool
+dict_kv_from_tag(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tag_node,
+                 char **out_key, char **out_value)
+{
+    *out_key   = nullptr;
+    *out_value = nullptr;
+
+    ncc_parse_tree_t *synthetic = first_descendant_nt(tag_node,
+                                                      "synthetic_identifier");
+    if (!synthetic || !contains_leaf_text(synthetic, "typeid")) {
+        return false;
+    }
+
+    ncc_parse_tree_t *cont = ncc_xform_find_child_nt(synthetic,
+                                                     "typeid_continuation");
+    if (!cont) {
+        return false;
+    }
+
+    char *key   = typeid_continuation_nth_atom(ctx, cont, 0);
+    char *value = typeid_continuation_nth_atom(ctx, cont, 1);
+    if (!key || !value) {
+        ncc_free(key);
+        ncc_free(value);
+        return false;
+    }
+
+    *out_key   = key;
+    *out_value = value;
+    return true;
+}
+
+// WP-011 Phase 3c: resolve a `n00b_dict_t(K, V)` from its generic
+// struct specifier.  Records both the key and value element types so
+// the lowering pass can build helper requests without re-inspecting
+// the struct.  K and V come from the tag's `typeid("n00b_dict", K, V)`
+// synthetic identifier rather than from member declarations — the
+// real libn00b dict struct stores keys/values inside its `store`, not
+// as top-level members, so the typeid is the only stable source.
+static dict_type_info_t *
+dict_type_from_struct_spec(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *su)
+{
+    ncc_parse_tree_t *tag = ncc_xform_find_child_nt(su, "tag_name");
+    if (!tag) {
+        return nullptr;
+    }
+
+    char *runtime_tag = tag_runtime_name(ctx, tag);
+
+    ncc_buffer_t *obj_buf = ncc_buffer_empty();
+    ncc_buffer_printf(obj_buf, "struct %s", runtime_tag);
+    char *object_type = ncc_buffer_take(obj_buf);
+
+    char *key_type   = nullptr;
+    char *value_type = nullptr;
+    bool  have_kv    = dict_kv_from_tag(ctx, tag, &key_type, &value_type);
+    bool  is_dict    = have_kv && tag_is_dict_type(tag);
+
+    if (!is_dict) {
+        dict_type_info_t *known = lookup_dict_type(ctx, object_type);
+        ncc_free(runtime_tag);
+        ncc_free(object_type);
+        ncc_free(key_type);
+        ncc_free(value_type);
+        return known;
+    }
+
+    record_dict_type(ctx, object_type, object_type, key_type, value_type);
+    record_dict_type(ctx, runtime_tag, object_type, key_type, value_type);
+
+    dict_type_info_t *result = lookup_dict_type(ctx, object_type);
+    ncc_free(runtime_tag);
+    ncc_free(object_type);
+    ncc_free(key_type);
+    ncc_free(value_type);
+    return result;
+}
+
 static char *
 decl_specs_typedef_name(ncc_parse_tree_t *node)
 {
@@ -613,30 +820,36 @@ list_type_from_decl_specs(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl_specs)
     return info;
 }
 
-// WP-011 Phase 2: dict-target detection.  Returns true when the
-// `<declaration_specifiers>` names a `n00b_dict_t(K, V)` generic
-// struct.  Phase 2 only needs the boolean "is dict target"; Phase 3
-// will resolve and record key/value types alongside the list/array
-// type tables.  Typedef-alias resolution for dict types is also a
-// Phase 3 concern (the Phase 2 fixtures use `n00b_dict_t(K, V) x`
-// directly, matching the struct-specifier inspection).
-static bool
-decl_specs_target_is_dict(ncc_parse_tree_t *decl_specs)
+// WP-011 Phase 3c: dict target resolution.  Mirrors
+// `list_type_from_decl_specs`: inspect the inline struct-or-union
+// specifier first (for `n00b_dict_t(K, V) x = ...` declarations), then
+// fall back to a typedef-alias lookup so `typedef n00b_dict_t(int, int)
+// my_dict_t; my_dict_t y = ...` also resolves.  The typedef-alias path
+// relies on `record_dict_typedef_aliases` having recorded the alias
+// when the typedef declaration itself was processed.
+static dict_type_info_t *
+dict_type_from_decl_specs(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl_specs)
 {
-    if (!decl_specs) {
-        return false;
-    }
     ncc_parse_tree_t *su = first_descendant_nt(decl_specs,
                                                "struct_or_union_specifier");
-    if (!su) {
-        return false;
+    if (su) {
+        dict_type_info_t *info = dict_type_from_struct_spec(ctx, su);
+        if (info) {
+            return info;
+        }
     }
-    ncc_parse_tree_t *tag = ncc_xform_find_child_nt(su, "tag_name");
-    if (!tag) {
-        return false;
-    }
-    return tag_is_dict_type(tag);
+
+    char *name = decl_specs_typedef_name(decl_specs);
+    dict_type_info_t *info = lookup_dict_type(ctx, name);
+    ncc_free(name);
+    return info;
 }
+
+// WP-011 Phase 3c: dict-target detection is folded into
+// `dict_type_from_decl_specs` — callers check whether the returned
+// info pointer is non-null.  Phase 2's standalone
+// `decl_specs_target_is_dict` is removed because the lowering pass
+// needs the resolved K/V types anyway, not just a boolean.
 
 static char *
 declarator_name(ncc_parse_tree_t *node)
@@ -2457,12 +2670,14 @@ static char *lower_list_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                                 list_type_info_t *type, string_list_t *decls,
                                 bool readonly, bool pointer_target);
 
-// WP-011 Phase 2 stub.  The real dict-literal lowering (helper request
-// build + dispatch + decl emission) lands in Phase 3.  For Phase 2 the
-// dispatch path emits a targeted error so test fixtures can confirm
-// the parser routes both `d{...}` and bare `{key: value, ...}` here.
-static void lower_dict_literal_stub(ncc_parse_tree_t *literal,
-                                    const char *target_type);
+// WP-011 Phase 3c.i: full scalar/enum-keyed dict literal lowering and
+// a partial-stub branch for pointer-keyed dicts (Phase 3c.ii).
+// `dict_type_info_t` is defined near the top of this file alongside
+// `array_type_info_t` / `list_type_info_t`.
+static char *lower_dict_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
+                                ncc_parse_tree_t *literal,
+                                dict_type_info_t *type, string_list_t *decls,
+                                bool readonly, bool pointer_target);
 
 static char *
 build_array_initializer(const char *data_name, int count,
@@ -3560,22 +3775,801 @@ lower_list_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
     return expr_name;
 }
 
-// WP-011 Phase 2 stub.  Dict-literal lowering (helper request build,
-// helper invocation, decl emission, identity/lock storage) lands in
-// Phase 3 once D-066 cached-hash plumbing and the helper protocol
-// extension are in place.  For Phase 2 we only need the dispatch path
-// wired up so the test matrix can prove parser recognition and target-
-// type diagnostics.  This stub raises the targeted error described in
-// the WP plan; `literal_helper_error()` calls `array_errorf()` which
-// terminates compilation with the diagnostic and source position.
+// WP-011 Phase 3c.i partial-stub: pointer-keyed dict literals fall
+// back to the same `literal_helper_error()` machinery as the Phase 2
+// stub, but with a narrower message scoped to pointer-key lowering.
+// Phase 3c.ii will implement r-string and b-buffer key hashing/
+// emission and remove this branch.  Scalar/enum-keyed lowering is
+// implemented inline below.
 static void
-lower_dict_literal_stub(ncc_parse_tree_t *literal, const char *target_type)
+lower_dict_literal_pointer_key_stub(ncc_parse_tree_t *literal,
+                                    const char *target_type)
 {
     literal_helper_error(literal, "dict literal",
                          target_type ? target_type : "<unknown>",
-                         "dict lowering not yet implemented in WP-011 "
-                         "Phase 2",
+                         "dict pointer-key lowering not yet implemented "
+                         "in WP-011 Phase 3c.i; coming in Phase 3c.ii",
                          nullptr, 0);
+}
+
+// WP-011 Phase 3c.i: compile-time size of a scalar/enum key type.
+// `n00b_hash_raw(key_ptr, ksz)` hashes exactly `ksz` raw bytes of the
+// stored key, so ncc must precompute the hash over the same byte
+// count that the runtime dict store will use as `sizeof(keys[0])`.
+// Enums match the host's `int` width per the C ABI (`-fshort-enums`
+// is not used).  This table parallels `is_supported_scalar_type` but
+// returns the concrete byte count (0 for unsupported types).
+static size_t
+scalar_type_size_bytes(const char *type)
+{
+    if (!type || !*type) {
+        return 0;
+    }
+
+    struct {
+        const char *name;
+        size_t      size;
+    } table[] = {
+        {"bool",                       sizeof(bool)},
+        {"char",                       sizeof(char)},
+        {"signed char",                sizeof(signed char)},
+        {"unsigned char",              sizeof(unsigned char)},
+        {"short",                      sizeof(short)},
+        {"short int",                  sizeof(short int)},
+        {"signed short",               sizeof(signed short)},
+        {"signed short int",           sizeof(signed short int)},
+        {"unsigned short",             sizeof(unsigned short)},
+        {"unsigned short int",         sizeof(unsigned short int)},
+        {"int",                        sizeof(int)},
+        {"signed",                     sizeof(signed)},
+        {"signed int",                 sizeof(signed int)},
+        {"unsigned",                   sizeof(unsigned)},
+        {"unsigned int",               sizeof(unsigned int)},
+        {"long",                       sizeof(long)},
+        {"long int",                   sizeof(long int)},
+        {"signed long",                sizeof(signed long)},
+        {"signed long int",            sizeof(signed long int)},
+        {"unsigned long",              sizeof(unsigned long)},
+        {"unsigned long int",          sizeof(unsigned long int)},
+        {"long long",                  sizeof(long long)},
+        {"long long int",              sizeof(long long int)},
+        {"unsigned long long",         sizeof(unsigned long long)},
+        {"unsigned long long int",     sizeof(unsigned long long int)},
+        {"size_t",                     sizeof(size_t)},
+        {"int8_t",                     sizeof(int8_t)},
+        {"int16_t",                    sizeof(int16_t)},
+        {"int32_t",                    sizeof(int32_t)},
+        {"int64_t",                    sizeof(int64_t)},
+        {"uint8_t",                    sizeof(uint8_t)},
+        {"uint16_t",                   sizeof(uint16_t)},
+        {"uint32_t",                   sizeof(uint32_t)},
+        {"uint64_t",                   sizeof(uint64_t)},
+        {"uintptr_t",                  sizeof(uintptr_t)},
+        {"intptr_t",                   sizeof(intptr_t)},
+        {nullptr,                      0},
+    };
+
+    for (int i = 0; table[i].name; i++) {
+        if (strcmp(type, table[i].name) == 0) {
+            return table[i].size;
+        }
+    }
+
+    if (strncmp(type, "enum ", 5) == 0) {
+        return sizeof(int);
+    }
+
+    return 0;
+}
+
+// WP-011 Phase 3c.i: classification of a dict key for hashing.  Used
+// to gate the scalar-only lowering path; pointer-typed keys route to
+// the partial-stub diagnostic so Phase 3c.ii can ship r-string/buffer
+// support without disturbing the scalar path.
+typedef enum {
+    DICT_KEY_KIND_SCALAR,   // ints, enums — hash via XXH3 over raw bytes.
+    DICT_KEY_KIND_POINTER,  // r-string, buffer, other pointer types.
+    DICT_KEY_KIND_UNSUPPORTED,
+} dict_key_kind_t;
+
+static dict_key_kind_t
+classify_dict_key_type(ncc_xform_ctx_t *ctx, const char *type)
+{
+    if (!type || !*type) {
+        return DICT_KEY_KIND_UNSUPPORTED;
+    }
+    if (is_static_pointer_type(ctx, type)) {
+        return DICT_KEY_KIND_POINTER;
+    }
+    if (scalar_type_size_bytes(type) > 0) {
+        return DICT_KEY_KIND_SCALAR;
+    }
+    return DICT_KEY_KIND_UNSUPPORTED;
+}
+
+// WP-011 Phase 3c.i: parse a C integer literal (with optional sign and
+// suffix) into the byte representation the runtime would store in the
+// `keys[]` slot for a scalar/enum-keyed dict.  This is the input to
+// XXH3_128bits to mirror `n00b_hash_raw(key_ptr, ksz)`.  Returns true
+// on success.  Hex (`0x...`), octal (leading `0`), and decimal are
+// recognised; `'c'` character literals are mapped to a 1-byte value.
+// Cast prefixes like `(uint64_t)123` are tolerated by skipping any
+// leading parenthesized type name.
+static bool
+parse_scalar_key_to_bytes(const char *expr, size_t ksz,
+                          unsigned char out[16])
+{
+    if (!expr || ksz == 0 || ksz > 8) {
+        return false;
+    }
+
+    const char *p = expr;
+    while (*p && isspace((unsigned char)*p)) {
+        p++;
+    }
+
+    // Skip a leading C-style cast like `(int)`.
+    if (*p == '(') {
+        const char *close = strchr(p, ')');
+        if (!close) {
+            return false;
+        }
+        p = close + 1;
+        while (*p && isspace((unsigned char)*p)) {
+            p++;
+        }
+    }
+
+    bool negative = false;
+    if (*p == '+' || *p == '-') {
+        negative = (*p == '-');
+        p++;
+    }
+
+    // Character literal: `'c'`.
+    if (*p == '\'') {
+        const char *q = p + 1;
+        int         value = 0;
+        if (*q == '\\') {
+            q++;
+            switch (*q) {
+            case 'n': value = '\n'; break;
+            case 't': value = '\t'; break;
+            case 'r': value = '\r'; break;
+            case '0': value = '\0'; break;
+            case '\\': value = '\\'; break;
+            case '\'': value = '\''; break;
+            case '"': value = '"';  break;
+            default: return false;
+            }
+            q++;
+        }
+        else if (*q && *q != '\'') {
+            value = (unsigned char)*q;
+            q++;
+        }
+        else {
+            return false;
+        }
+        if (*q != '\'') {
+            return false;
+        }
+        uint64_t magnitude = (uint64_t)value;
+        if (negative) {
+            magnitude = (uint64_t)-(int64_t)magnitude;
+        }
+        memset(out, 0, 16);
+        memcpy(out, &magnitude, ksz);
+        return true;
+    }
+
+    if (!isdigit((unsigned char)*p)) {
+        return false;
+    }
+
+    int base = 10;
+    if (*p == '0') {
+        if (p[1] == 'x' || p[1] == 'X') {
+            base = 16;
+            p += 2;
+        }
+        else if (p[1] && isdigit((unsigned char)p[1])) {
+            base = 8;
+            p += 1;
+        }
+    }
+
+    uint64_t value = 0;
+    bool     consumed = false;
+    while (*p) {
+        unsigned char c   = (unsigned char)*p;
+        unsigned int  dig = 0;
+        if (c >= '0' && c <= '9') {
+            dig = c - '0';
+        }
+        else if (base == 16 && c >= 'a' && c <= 'f') {
+            dig = 10 + (c - 'a');
+        }
+        else if (base == 16 && c >= 'A' && c <= 'F') {
+            dig = 10 + (c - 'A');
+        }
+        else {
+            break;
+        }
+        if (dig >= (unsigned int)base) {
+            return false;
+        }
+        value = value * (uint64_t)base + dig;
+        consumed = true;
+        p++;
+    }
+    if (!consumed) {
+        return false;
+    }
+
+    // Skip integer suffixes (u, l, ll, ul, ull, uz, etc.) — case-
+    // insensitive, just consume contiguous u/l/z chars.
+    while (*p && (*p == 'u' || *p == 'U' || *p == 'l' || *p == 'L'
+                  || *p == 'z' || *p == 'Z')) {
+        p++;
+    }
+    while (*p && isspace((unsigned char)*p)) {
+        p++;
+    }
+    if (*p) {
+        return false;
+    }
+
+    if (negative) {
+        value = (uint64_t)-(int64_t)value;
+    }
+
+    memset(out, 0, 16);
+    memcpy(out, &value, ksz);
+    return true;
+}
+
+// WP-011 Phase 3c.i: compute the precomputed scalar-key hash that the
+// helper carries through to the bucket's `hv` slot.  Uses
+// XXH3_128bits over `ksz` bytes of the parsed key value, matching the
+// runtime's `n00b_hash_raw(key_ptr, ksz)` path used by
+// `compute_hash()` when `skip_obj_hash = true` and `fn == nullptr`.
+//
+// MUST NOT be replaced by `n00b_hash_word` or any other primitive —
+// the runtime branch this mirrors hashes the raw stored key bytes,
+// not the integer value cast to a pointer-sized word, so any other
+// hashing produces a mismatched key lookup at runtime.
+static void
+compute_scalar_key_hash(const unsigned char key_bytes[16], size_t ksz,
+                        uint64_t *hash_lo, uint64_t *hash_hi)
+{
+    XXH128_hash_t h = XXH3_128bits(key_bytes, ksz);
+    *hash_lo = (uint64_t)h.low64;
+    *hash_hi = (uint64_t)h.high64;
+}
+
+typedef struct {
+    char *key_expr;
+    char *value_expr;
+    uint64_t hash_lo;
+    uint64_t hash_hi;
+    uint32_t line;
+    uint32_t col;
+} dict_pair_t;
+
+static void
+dict_pairs_free(dict_pair_t *pairs, size_t count)
+{
+    if (!pairs) {
+        return;
+    }
+    for (size_t i = 0; i < count; i++) {
+        ncc_free(pairs[i].key_expr);
+        ncc_free(pairs[i].value_expr);
+    }
+    ncc_free(pairs);
+}
+
+// WP-011 Phase 3c.i: helper request builder for scalar-keyed dicts.
+// Mirrors `build_list_helper_request`/`build_array_helper_request`
+// shape: produces an `NCC_STATIC_INIT 1` request stream with
+// container_kind dict, key/value type metadata, scan policy for both
+// arrays, per-pair `arg pair cinit` records with precomputed
+// `hash <lo> <hi>` modifiers, and identity keys for marshal.
+// Pointer-target dicts pass `container_target pointer`; value-target
+// dicts pass `container_target value`.
+static char *
+build_dict_helper_request(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *site,
+                          dict_type_info_t *type, const char *prefix,
+                          bool readonly, bool pointer_target,
+                          dict_pair_t *pairs, size_t pair_count)
+{
+    uint64_t entry_count = (uint64_t)pair_count;
+    uint64_t cap = 1;
+    while (cap < entry_count) {
+        cap <<= 1;
+    }
+    if (cap < 16) {
+        cap = 16;
+    }
+
+    char len_str[32];
+    char cap_str[32];
+    snprintf(len_str, sizeof(len_str), "%llu", (unsigned long long)entry_count);
+    snprintf(cap_str, sizeof(cap_str), "%llu", (unsigned long long)cap);
+
+    char *type_hex  = hex_string(type->object_type,
+                                 strlen(type->object_type));
+    char *key_hex   = hex_string(type->key_type, strlen(type->key_type));
+    char *value_hex = hex_string(type->value_type, strlen(type->value_type));
+
+    char *type_hash = ncc_static_object_typehash_expr(type->object_type);
+    char *key_hash  = ncc_static_object_typehash_expr(type->key_type);
+    char *value_hash =
+        ncc_static_object_typehash_expr(type->value_type);
+    // `data_type_hash` is the typehash for the type-erased store
+    // backing.  It does not really correspond to a user-visible type;
+    // we use the dict object's own type hash so it is a stable
+    // non-zero scalar (the helper rejects `data_type_hash == 0`).
+    char *data_type_hash = ncc_static_object_typehash_expr(type->object_type);
+
+    const char *entry_attr = ncc_static_object_entry_attr(ctx);
+    char *entry_attr_hex = hex_string(entry_attr, strlen(entry_attr));
+    char *identity_namespace =
+        ncc_static_object_identity_namespace(ctx, site);
+    char *identity_object_key =
+        ncc_static_object_identity_key(ctx, "ncc-static-dict-object",
+                                       site, type_hash, len_str);
+    char *identity_payload_key =
+        ncc_static_object_identity_key(ctx, "ncc-static-dict-store",
+                                       site, data_type_hash, cap_str);
+    char *identity_namespace_hex =
+        hex_string(identity_namespace, strlen(identity_namespace));
+    char *identity_object_key_hex =
+        hex_string(identity_object_key, strlen(identity_object_key));
+    char *identity_payload_key_hex =
+        hex_string(identity_payload_key, strlen(identity_payload_key));
+
+    // Scan plans for keys[] and values[] arrays.  Scalar-keyed dicts
+    // always have POD keys → N00B_GC_SCAN_KIND_NONE.  Value arrays may
+    // hold pointer-bearing aggregates (nested lists, arrays); reuse
+    // the array_scan_plan machinery by treating the dict as a
+    // synthetic array_type_info_t whose elem_type is the value type.
+    char *key_scan_kind  = copy_cstr("1");           // NONE
+    char *key_scan_cb    = copy_cstr("nullptr");
+    char *key_scan_user  = copy_cstr("nullptr");
+    char *key_shape_decl = copy_cstr("");
+
+    array_type_info_t value_synth = {
+        .object_type = type->object_type,
+        .elem_type   = type->value_type,
+    };
+    array_type_info_t *value_elem_array =
+        lookup_array_type(ctx, type->value_type);
+    list_type_info_t  *value_elem_list  =
+        lookup_list_type(ctx, type->value_type);
+    array_scan_plan_t value_scan_plan = {0};
+    char value_shape_prefix[80];
+    snprintf(value_shape_prefix, sizeof(value_shape_prefix),
+             "%s_values", prefix);
+    array_scan_plan_init(&value_scan_plan, ctx, &value_synth,
+                         value_elem_array
+                             ? value_elem_array
+                             : (array_type_info_t *)value_elem_list,
+                         value_shape_prefix, (int)cap, true, site);
+
+    char *value_scan_kind = copy_cstr(value_scan_plan.scan_kind);
+    char *value_scan_cb   = copy_cstr(value_scan_plan.scan_cb);
+    char *value_scan_user = copy_cstr(value_scan_plan.scan_user);
+    char *value_shape_decl = copy_cstr(value_scan_plan.shape_decl
+                                           ? value_scan_plan.shape_decl
+                                           : "");
+
+    char *key_scan_cb_hex   = hex_string(key_scan_cb, strlen(key_scan_cb));
+    char *key_scan_user_hex = hex_string(key_scan_user,
+                                         strlen(key_scan_user));
+    char *key_shape_decl_hex = hex_string(key_shape_decl,
+                                          strlen(key_shape_decl));
+    char *value_scan_cb_hex = hex_string(value_scan_cb,
+                                         strlen(value_scan_cb));
+    char *value_scan_user_hex = hex_string(value_scan_user,
+                                           strlen(value_scan_user));
+    char *value_shape_decl_hex = hex_string(value_shape_decl,
+                                            strlen(value_shape_decl));
+
+    ncc_buffer_t *buf = ncc_buffer_empty();
+    ncc_buffer_printf(buf,
+                      "NCC_STATIC_INIT 1\n"
+                      "container_kind dict\n"
+                      "container_target %s\n"
+                      "type_hex %s\n"
+                      "type_hash %s\n"
+                      "key_type_hex %s\n"
+                      "key_type_hash %s\n"
+                      "value_type_hex %s\n"
+                      "value_type_hash %s\n"
+                      "data_type_hash %s\n"
+                      "prefix %s\n"
+                      "readonly %u\n"
+                      "len %s\n"
+                      "cap %s\n"
+                      "abi %zu %zu 8 %s\n"
+                      "entry_attr_hex %s\n"
+                      "identity_namespace_hex %s\n"
+                      "identity_object_key_hex %s\n"
+                      "identity_payload_key_hex %s\n"
+                      "key_scan_kind %s\n"
+                      "key_scan_cb_hex %s\n"
+                      "key_scan_user_hex %s\n"
+                      "key_shape_decl_hex %s\n"
+                      "value_scan_kind %s\n"
+                      "value_scan_cb_hex %s\n"
+                      "value_scan_user_hex %s\n"
+                      "value_shape_decl_hex %s\n"
+                      "skip_obj_hash 1\n"
+                      "cached_hash_emit no\n"
+                      "arg_count %zu\n",
+                      pointer_target ? "pointer" : "value",
+                      type_hex, type_hash, key_hex, key_hash, value_hex,
+                      value_hash, data_type_hash, prefix,
+                      readonly ? 1u : 0u, len_str, cap_str,
+                      sizeof(void *), sizeof(size_t),
+                      static_image_host_endian_value(), entry_attr_hex,
+                      identity_namespace_hex, identity_object_key_hex,
+                      identity_payload_key_hex,
+                      key_scan_kind, key_scan_cb_hex, key_scan_user_hex,
+                      key_shape_decl_hex,
+                      value_scan_kind, value_scan_cb_hex,
+                      value_scan_user_hex, value_shape_decl_hex,
+                      pair_count);
+
+    for (size_t i = 0; i < pair_count; i++) {
+        size_t key_len = strlen(pairs[i].key_expr);
+        size_t val_len = strlen(pairs[i].value_expr);
+        char  *key_expr_hex = hex_string(pairs[i].key_expr, key_len);
+        char  *val_expr_hex = hex_string(pairs[i].value_expr, val_len);
+        ncc_buffer_printf(buf,
+                          "arg - pair cinit %zu %s %zu %s "
+                          "hash %llu %llu\n",
+                          key_len, key_expr_hex, val_len, val_expr_hex,
+                          (unsigned long long)pairs[i].hash_lo,
+                          (unsigned long long)pairs[i].hash_hi);
+        ncc_free(key_expr_hex);
+        ncc_free(val_expr_hex);
+    }
+
+    ncc_buffer_puts(buf, "end\n");
+
+    ncc_free(type_hex);
+    ncc_free(key_hex);
+    ncc_free(value_hex);
+    ncc_free(type_hash);
+    ncc_free(key_hash);
+    ncc_free(value_hash);
+    ncc_free(data_type_hash);
+    ncc_free(entry_attr_hex);
+    ncc_free(identity_namespace);
+    ncc_free(identity_object_key);
+    ncc_free(identity_payload_key);
+    ncc_free(identity_namespace_hex);
+    ncc_free(identity_object_key_hex);
+    ncc_free(identity_payload_key_hex);
+    ncc_free(key_scan_kind);
+    ncc_free(key_scan_cb);
+    ncc_free(key_scan_user);
+    ncc_free(key_shape_decl);
+    ncc_free(key_scan_cb_hex);
+    ncc_free(key_scan_user_hex);
+    ncc_free(key_shape_decl_hex);
+    ncc_free(value_scan_kind);
+    ncc_free(value_scan_cb);
+    ncc_free(value_scan_user);
+    ncc_free(value_shape_decl);
+    ncc_free(value_scan_cb_hex);
+    ncc_free(value_scan_user_hex);
+    ncc_free(value_shape_decl_hex);
+    array_scan_plan_free(&value_scan_plan);
+
+    return ncc_buffer_take(buf);
+}
+
+// WP-011 Phase 3c.i: full scalar/enum-keyed dict literal lowering.
+// Replaces the Phase 2 stub.  Inspects each key's classified type:
+// scalar/enum keys are precomputed via XXH3_128bits and sent through
+// the helper protocol; pointer keys (any key) route to the Phase
+// 3c.i partial-stub diagnostic so Phase 3c.ii can implement
+// r-string/buffer-key hashing without disturbing the scalar path.
+// Duplicate keys at compile time (D-065) are rejected here by
+// hash comparison so the diagnostic can name BOTH source positions.
+static char *
+lower_dict_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
+                   ncc_parse_tree_t *literal, dict_type_info_t *type,
+                   string_list_t *decls, bool readonly, bool pointer_target)
+{
+    (void)decl;
+
+    // Collect pairs from the dict literal.  Both spellings reach this
+    // path (explicit `d{...}` and bare `{k: v, ...}`), with a
+    // <dict_pair_list> child carrying <dict_pair> nodes whose first
+    // child is the key initializer and last is the value initializer.
+    ncc_parse_tree_t *pair_list = first_descendant_nt(literal,
+                                                      "dict_pair_list");
+    ncc_array_t(ncc_parse_tree_ptr_t) pairs_nodes =
+        ncc_array_new(ncc_parse_tree_ptr_t, 8);
+    if (pair_list) {
+        collect_nt_children(pair_list, "dict_pair", &pairs_nodes);
+    }
+
+    dict_key_kind_t  key_kind = DICT_KEY_KIND_SCALAR;
+    size_t           ksz      = scalar_type_size_bytes(type->key_type);
+    if (ksz == 0) {
+        key_kind = classify_dict_key_type(ctx, type->key_type);
+    }
+
+    if (key_kind == DICT_KEY_KIND_POINTER) {
+        ncc_array_free(pairs_nodes);
+        lower_dict_literal_pointer_key_stub(literal, type->object_type);
+        return nullptr;
+    }
+    if (key_kind == DICT_KEY_KIND_UNSUPPORTED) {
+        ncc_array_free(pairs_nodes);
+        array_errorf(literal,
+                     "dict literal key type '%s' is not supported for "
+                     "static initialization yet; allowed key types are "
+                     "scalar integers/enums (Phase 3c.i) and r-string/"
+                     "buffer pointer keys (Phase 3c.ii, not yet "
+                     "implemented)",
+                     type->key_type);
+    }
+
+    // Value-type validation parallels the list-literal precedent.
+    array_type_info_t *value_elem_array =
+        lookup_array_type(ctx, type->value_type);
+    list_type_info_t  *value_elem_list  =
+        lookup_list_type(ctx, type->value_type);
+    dict_type_info_t  *value_elem_dict  =
+        lookup_dict_type(ctx, type->value_type);
+    array_aggregate_type_info_t *value_elem_aggregate =
+        (value_elem_array || value_elem_list || value_elem_dict)
+            ? nullptr
+            : aggregate_info_from_type_name(ctx, type->value_type);
+
+    if (!value_elem_array && !value_elem_list && !value_elem_dict
+        && !value_elem_aggregate
+        && !is_supported_scalar_type(ctx, type->value_type)) {
+        ncc_array_free(pairs_nodes);
+        array_errorf(literal,
+                     "dict literal value type '%s' is not supported for "
+                     "static initialization yet; allowed value types are "
+                     "scalar numeric/enums, static pointers, r-string "
+                     "pointers, compatible b\"...\" buffer pointers, "
+                     "aggregate types with static layout, and nested "
+                     "ncc/n00b arrays, lists, or dicts",
+                     type->value_type);
+    }
+
+    // Build the per-pair list with hashes (scalar-key only).
+    size_t pair_count = pairs_nodes.len;
+    dict_pair_t *pairs = pair_count
+                            ? ncc_alloc_array(dict_pair_t, pair_count)
+                            : nullptr;
+
+    for (size_t i = 0; i < pair_count; i++) {
+        ncc_parse_tree_t *pair_node = pairs_nodes.data[i];
+        ncc_array_t(ncc_parse_tree_ptr_t) inits =
+            ncc_array_new(ncc_parse_tree_ptr_t, 2);
+        collect_nt_children(pair_node, "initializer", &inits);
+        if (inits.len < 2) {
+            ncc_array_free(inits);
+            ncc_array_free(pairs_nodes);
+            dict_pairs_free(pairs, i);
+            array_errorf(pair_node, "internal: dict pair missing key/value "
+                                    "initializer children");
+        }
+        ncc_parse_tree_t *key_init   = inits.data[0];
+        ncc_parse_tree_t *value_init = inits.data[1];
+        ncc_array_free(inits);
+
+        uint32_t line = 0;
+        uint32_t col  = 0;
+        ncc_xform_first_leaf_pos(key_init, &line, &col);
+
+        // Key expression.  For scalar keys we render the textual form
+        // and also parse the value bytes to feed XXH3.
+        char *key_expr = node_text(key_init);
+        unsigned char key_bytes[16];
+        if (!parse_scalar_key_to_bytes(key_expr, ksz, key_bytes)) {
+            ncc_free(key_expr);
+            ncc_array_free(pairs_nodes);
+            dict_pairs_free(pairs, i);
+            array_errorf(key_init,
+                         "dict literal key for type '%s' must be a "
+                         "compile-time integer/character literal (Phase "
+                         "3c.i scalar-key lowering); non-literal "
+                         "expressions are reserved for a future phase",
+                         type->key_type);
+        }
+
+        uint64_t hash_lo = 0;
+        uint64_t hash_hi = 0;
+        compute_scalar_key_hash(key_bytes, ksz, &hash_lo, &hash_hi);
+
+        // Value expression handling: nested array/list/dict literals
+        // recurse through their respective lowering paths; r-string
+        // and b-buffer references are spliced inline.
+        ncc_parse_tree_t *nested_array =
+            initializer_array_literal(value_init);
+        ncc_parse_tree_t *nested_list  =
+            initializer_list_literal(value_init);
+        ncc_parse_tree_t *nested_dict  =
+            initializer_dict_literal(value_init);
+        char *value_expr = nullptr;
+        if (value_elem_array) {
+            if (!nested_array) {
+                ncc_free(key_expr);
+                ncc_array_free(pairs_nodes);
+                dict_pairs_free(pairs, i);
+                array_errorf(value_init,
+                             "nested array value for dict value type "
+                             "'%s' must be an array literal like "
+                             "'a{...}' or '[...]'",
+                             type->value_type);
+            }
+            value_expr = lower_array_literal(ctx, decl, nested_array,
+                                             value_elem_array, decls,
+                                             false);
+        }
+        else if (value_elem_list) {
+            if (!nested_list) {
+                ncc_free(key_expr);
+                ncc_array_free(pairs_nodes);
+                dict_pairs_free(pairs, i);
+                array_errorf(value_init,
+                             "nested list value for dict value type '%s' "
+                             "must be a list literal like 'l{...}'",
+                             type->value_type);
+            }
+            value_expr = lower_list_literal(ctx, decl, nested_list,
+                                            value_elem_list, decls,
+                                            readonly, false);
+        }
+        else if (value_elem_dict) {
+            if (!nested_dict) {
+                ncc_free(key_expr);
+                ncc_array_free(pairs_nodes);
+                dict_pairs_free(pairs, i);
+                array_errorf(value_init,
+                             "nested dict value for dict value type '%s' "
+                             "must be a dict literal like 'd{...}' "
+                             "or '{k: v, ...}'",
+                             type->value_type);
+            }
+            value_expr = lower_dict_literal(ctx, decl, nested_dict,
+                                            value_elem_dict, decls,
+                                            readonly, false);
+        }
+        else {
+            if (nested_array) {
+                ncc_free(key_expr);
+                ncc_array_free(pairs_nodes);
+                dict_pairs_free(pairs, i);
+                array_errorf(value_init,
+                             "dict value type '%s' is scalar, so nested "
+                             "array literal is not allowed here",
+                             type->value_type);
+            }
+            if (nested_list) {
+                ncc_free(key_expr);
+                ncc_array_free(pairs_nodes);
+                dict_pairs_free(pairs, i);
+                array_errorf(value_init,
+                             "dict value type '%s' is not a "
+                             "n00b_list_t(T) value, so nested list "
+                             "literal is not allowed here",
+                             type->value_type);
+            }
+            if (nested_dict) {
+                ncc_free(key_expr);
+                ncc_array_free(pairs_nodes);
+                dict_pairs_free(pairs, i);
+                array_errorf(value_init,
+                             "dict value type '%s' is not a "
+                             "n00b_dict_t(K, V) value, so nested dict "
+                             "literal is not allowed here",
+                             type->value_type);
+            }
+
+            value_expr = node_text(value_init);
+            if (strstr(value_expr, "__ncc_rstr")) {
+                if (!value_elem_aggregate
+                    && !is_rstr_element_type(ctx, type->value_type)) {
+                    ncc_free(key_expr);
+                    ncc_free(value_expr);
+                    ncc_array_free(pairs_nodes);
+                    dict_pairs_free(pairs, i);
+                    array_errorf(value_init,
+                                 "r-string dict value requires value type "
+                                 "'%s' or a configured r-string pointer "
+                                 "type; found '%s'",
+                                 ncc_xform_get_data(ctx)->rstr_string_type,
+                                 type->value_type);
+                }
+                (void)lower_rstrings_in_initializer_expr(ctx, value_init,
+                                                        decls,
+                                                        &value_expr);
+            }
+            if (strstr(value_expr, "__ncc_buflit")) {
+                if (!value_elem_aggregate
+                    && !is_buffer_pointer_element_type(type->value_type)) {
+                    ncc_free(key_expr);
+                    ncc_free(value_expr);
+                    ncc_array_free(pairs_nodes);
+                    dict_pairs_free(pairs, i);
+                    array_errorf(value_init,
+                                 "b-string dict value requires value type "
+                                 "'n00b_buffer_t *' or a configured "
+                                 "buffer pointer typedef; found '%s'",
+                                 type->value_type);
+                }
+                (void)lower_buffers_in_initializer_expr(ctx, value_init,
+                                                       decls,
+                                                       &value_expr);
+            }
+        }
+
+        // Duplicate-key check (D-065).  We compare the 128-bit hash;
+        // collisions in the precomputed scalar hash for distinct keys
+        // would also be caught by the helper's slot-assignment pass,
+        // but we do it here first so the diagnostic can name both
+        // source positions and the duplicated key text.
+        for (size_t j = 0; j < i; j++) {
+            if (pairs[j].hash_lo == hash_lo && pairs[j].hash_hi == hash_hi) {
+                array_errorf(key_init,
+                             "duplicate key %s in dict literal "
+                             "(first occurrence at line %u col %u, "
+                             "this occurrence at line %u col %u)",
+                             key_expr, pairs[j].line, pairs[j].col,
+                             line, col);
+            }
+        }
+
+        pairs[i].key_expr   = key_expr;
+        pairs[i].value_expr = value_expr;
+        pairs[i].hash_lo    = hash_lo;
+        pairs[i].hash_hi    = hash_hi;
+        pairs[i].line       = line;
+        pairs[i].col        = col;
+    }
+
+    ncc_array_free(pairs_nodes);
+
+    int id = ctx->unique_id++;
+    char prefix[64];
+    snprintf(prefix, sizeof(prefix), "__ncc_dictlit_%d", id);
+
+    const char *helper = ncc_xform_get_data(ctx)->static_init_helper;
+    if (!helper || !*helper) {
+        dict_pairs_free(pairs, pair_count);
+        array_errorf(literal,
+                     "dict literal initializer for '%s' requires "
+                     "--ncc-static-init-helper=PATH",
+                     type->object_type);
+    }
+
+    char *request = build_dict_helper_request(ctx, literal, type, prefix,
+                                              readonly, pointer_target,
+                                              pairs, pair_count);
+    char *expr_name = nullptr;
+    char *helper_decls = nullptr;
+    run_literal_static_init_helper(literal, helper, "dict literal",
+                                   type->object_type, request,
+                                   &expr_name, &helper_decls);
+    list_push(decls, helper_decls);
+
+    ncc_free(request);
+    dict_pairs_free(pairs, pair_count);
+
+    return expr_name;
 }
 
 static bool
@@ -3654,6 +4648,43 @@ record_list_typedef_aliases(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
     ncc_array_free(init_decls);
 }
 
+// WP-011 Phase 3c: register `typedef n00b_dict_t(K, V) my_dict_t;`
+// aliases so the subsequent declaration `my_dict_t x = d{...};` can be
+// resolved by typedef-name lookup.  Mirrors
+// `record_list_typedef_aliases` for the dict_types table.
+static void
+record_dict_typedef_aliases(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
+                            ncc_parse_tree_t *decl_specs,
+                            dict_type_info_t *base_info)
+{
+    if (!base_info || !decl_is_typedef(decl_specs)) {
+        return;
+    }
+
+    ncc_parse_tree_t *list = ncc_xform_find_child_nt(decl,
+                                                     "init_declarator_list");
+    if (!list) {
+        return;
+    }
+
+    ncc_array_t(ncc_parse_tree_ptr_t) init_decls =
+        ncc_array_new(ncc_parse_tree_ptr_t, 4);
+    collect_nt_children(list, "init_declarator", &init_decls);
+
+    for (size_t i = 0; i < init_decls.len; i++) {
+        ncc_parse_tree_t *declarator = ncc_xform_find_child_nt(
+            init_decls.data[i], "declarator");
+        char *alias = declarator_name(declarator);
+        if (alias) {
+            record_dict_type(ctx, alias, alias, base_info->key_type,
+                             base_info->value_type);
+            ncc_free(alias);
+        }
+    }
+
+    ncc_array_free(init_decls);
+}
+
 static ncc_parse_tree_t *
 xform_array_decl(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                  ncc_xform_control_t *control)
@@ -3670,10 +4701,13 @@ xform_array_decl(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
     record_typedef_aliases(ctx, decl, decl_specs, type);
     list_type_info_t *list_type = list_type_from_decl_specs(ctx, decl_specs);
     record_list_typedef_aliases(ctx, decl, decl_specs, list_type);
-    // WP-011 Phase 2: dict-target detection.  Typedef-alias resolution
-    // and full K/V type recording are Phase 3 concerns; Phase 2 only
-    // needs the boolean to gate target-type diagnostics.
-    bool dict_target = decl_specs_target_is_dict(decl_specs);
+    // WP-011 Phase 3c: full dict K/V resolution with typedef-alias
+    // recording, mirroring the list precedent.  Phase 2 only had a
+    // boolean dict-target check; the lowering pass needs the resolved
+    // K/V types so the helper request fields can be built.
+    dict_type_info_t *dict_type = dict_type_from_decl_specs(ctx, decl_specs);
+    record_dict_typedef_aliases(ctx, decl, decl_specs, dict_type);
+    bool dict_target = dict_type != nullptr;
 
     ncc_parse_tree_t *list = ncc_xform_find_child_nt(decl,
                                                      "init_declarator_list");
@@ -3726,7 +4760,7 @@ xform_array_decl(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
             // Lifetime check parallels the list literal rule (WP-010):
             // block-scope mutable dict targets are rejected ahead of
             // lowering, matching the list literal precedent so the
-            // diagnostic fires before the Phase 2 stub error.
+            // diagnostic fires before lowering.
             bool local = ncc_xform_find_ancestor(decl, "block_item") != nullptr;
             bool readonly = decl_is_const(decl_specs);
             if (local && !readonly) {
@@ -3737,18 +4771,35 @@ xform_array_decl(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                              name ? name : "<unknown>");
             }
 
-            // Phase 2 stub: dict lowering is implemented in Phase 3.
-            // The stub raises a targeted error so the dispatch path is
-            // observable via test fixtures.  `lower_dict_literal_stub`
-            // does not return; the rest of the dict branch is for
-            // Phase 3.
-            char *target_type = node_text(decl_specs);
+            // WP-011 Phase 3c.i: full scalar/enum-keyed dict lowering.
+            // Pointer-keyed dicts route to the partial-stub diagnostic
+            // inside `lower_dict_literal`; that path does not return.
+            bool pointer_target =
+                pointer_depth_in_declarator(declarator) > 0;
+            string_list_t dict_decls = {0};
+            char *replacement_src = lower_dict_literal(ctx, decl,
+                                                       dict_literal,
+                                                       dict_type, &dict_decls,
+                                                       readonly,
+                                                       pointer_target);
+
+            for (int d = 0; d < dict_decls.count; d++) {
+                insert_generated_decl(ctx, decl, dict_decls.items[d]);
+            }
+
+            ncc_parse_tree_t *replacement = ncc_xform_parse_source(
+                ctx->grammar, "initializer", replacement_src,
+                "xform_array_literal");
+            if (!replacement) {
+                fprintf(stderr, "ncc: error: failed to parse generated dict "
+                                "initializer:\n%s\n", replacement_src);
+                exit(1);
+            }
+
+            replace_initializer(init_decls.data[i], replacement);
+            ncc_free(replacement_src);
             ncc_free(name);
-            lower_dict_literal_stub(dict_literal,
-                                    target_type ? target_type : "<unknown>");
-            // Unreachable; defensive cleanup if the helper ever stops
-            // exiting on error.
-            ncc_free(target_type);
+            list_free(&dict_decls);
             continue;
         }
         if (list_literal) {
