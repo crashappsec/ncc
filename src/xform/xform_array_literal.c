@@ -2740,6 +2740,46 @@ static char *lower_array_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                                  array_type_info_t *type,
                                  string_list_t *decls, bool materialize);
 
+// WP-018 / WP-016 B1: defense-in-depth bound on container-literal
+// nesting depth. Hostile or pathological source like `[[[[...]]]]`
+// otherwise recurses through `lower_array_literal` /
+// `lower_list_literal` / `lower_dict_literal` until ncc blows the
+// stack. The cap matches `collect_static_layout_offsets_for_aggregate`'s
+// 64-level limit. The counter is `thread_local` so it stays correct
+// if ncc ever fans out compilation across threads; today ncc is
+// single-threaded per source file, so this is purely defensive.
+//
+// All three `lower_*_literal` entry points share one counter because
+// they freely call each other (an array of lists, a list of dicts, a
+// dict of arrays, etc.); the limit is on total container nesting at
+// the literal site, not on each kind separately.
+#define NCC_STATIC_CONTAINER_LITERAL_MAX_DEPTH 64
+static thread_local int ncc_static_container_literal_depth = 0;
+
+static void
+ncc_static_container_literal_enter(ncc_parse_tree_t *literal,
+                                   const char *kind)
+{
+    if (ncc_static_container_literal_depth
+        >= NCC_STATIC_CONTAINER_LITERAL_MAX_DEPTH) {
+        array_errorf(literal,
+                     "%s literal exceeds the maximum static-initializer "
+                     "nesting depth (%d levels); flatten the literal or "
+                     "split it into multiple declarations",
+                     kind, NCC_STATIC_CONTAINER_LITERAL_MAX_DEPTH);
+        // array_errorf does not return.
+    }
+    ncc_static_container_literal_depth++;
+}
+
+static void
+ncc_static_container_literal_leave(void)
+{
+    if (ncc_static_container_literal_depth > 0) {
+        ncc_static_container_literal_depth--;
+    }
+}
+
 static char *lower_list_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                                 ncc_parse_tree_t *literal,
                                 list_type_info_t *type, string_list_t *decls,
@@ -3453,9 +3493,23 @@ validate_container_scan_plan(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *site,
     array_scan_plan_free(&plan);
 }
 
+// Defense-in-depth (WP-018 / WP-016 A1): bound the pow2-ceiling loop so
+// a hostile or pathological literal cannot run away. 2^30 entries is far
+// beyond any plausible static list literal and matches the cap enforced
+// in the n00b static-init helper. Caller passes `site` so the diagnostic
+// can be attributed to the literal that overran the limit.
+#define NCC_STATIC_CONTAINER_MAX_LEN ((int)1 << 30)
+
 static int
-list_static_capacity(int len)
+list_static_capacity(ncc_parse_tree_t *site, int len)
 {
+    if (len < 0 || len > NCC_STATIC_CONTAINER_MAX_LEN) {
+        array_errorf(site,
+                     "static list literal has too many entries (%d); the "
+                     "maximum supported is 2^30",
+                     len);
+        // array_errorf does not return.
+    }
     int cap = 16;
     while (cap < len) {
         cap <<= 1;
@@ -3469,7 +3523,7 @@ build_list_helper_request(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *site,
                           bool readonly, bool pointer_target,
                           string_list_t *exprs)
 {
-    int cap = list_static_capacity(exprs->count);
+    int cap = list_static_capacity(site, exprs->count);
 
     char len_str[32];
     char cap_str[32];
@@ -3690,6 +3744,11 @@ lower_array_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                     ncc_parse_tree_t *literal, array_type_info_t *type,
                     string_list_t *decls, bool materialize)
 {
+    // WP-018 / WP-016 B1: bound nesting depth across array/list/dict
+    // recursion. Exits with `array_errorf` past the limit; otherwise
+    // pairs with a `_leave` call on every return path.
+    ncc_static_container_literal_enter(literal, "array");
+
     ncc_array_t(ncc_parse_tree_ptr_t) elems =
         ncc_array_new(ncc_parse_tree_ptr_t, 8);
     collect_array_elements(literal, &elems);
@@ -3824,6 +3883,7 @@ lower_array_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
     ncc_array_free(elems);
 
     if (!materialize) {
+        ncc_static_container_literal_leave();
         return init;
     }
 
@@ -3838,6 +3898,7 @@ lower_array_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
     list_push(decls, ncc_buffer_take(obj_decl));
 
     ncc_free(init);
+    ncc_static_container_literal_leave();
     return obj_name;
 }
 
@@ -3846,6 +3907,10 @@ lower_list_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                    ncc_parse_tree_t *literal, list_type_info_t *type,
                    string_list_t *decls, bool readonly, bool pointer_target)
 {
+    // WP-018 / WP-016 B1: bound container-literal nesting (see
+    // lower_array_literal for the rationale and the shared counter).
+    ncc_static_container_literal_enter(literal, "list");
+
     ncc_array_t(ncc_parse_tree_ptr_t) elems =
         ncc_array_new(ncc_parse_tree_ptr_t, 8);
     collect_array_elements(literal, &elems);
@@ -3957,7 +4022,8 @@ lower_list_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                                  elem_array
                                      ? elem_array
                                      : (array_type_info_t *)elem_list,
-                                 prefix, list_static_capacity(exprs.count));
+                                 prefix,
+                                 list_static_capacity(literal, exprs.count));
 
     const char *helper = ncc_xform_get_data(ctx)->static_init_helper;
     // Phase 3c.iv: friendly `n00b_list_t(T)` name in user-facing
@@ -3991,6 +4057,7 @@ lower_list_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
     list_free(&exprs);
     ncc_array_free(elems);
 
+    ncc_static_container_literal_leave();
     return expr_name;
 }
 
@@ -4394,6 +4461,17 @@ build_dict_helper_request(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *site,
                           dict_pair_t *pairs, size_t pair_count)
 {
     uint64_t entry_count = (uint64_t)pair_count;
+    // Defense-in-depth (WP-018 / WP-016 A1): bound the pow2-ceiling loop
+    // so a runaway count cannot infinite-loop (the doubling result drops
+    // to zero once it crosses 2^63 and the loop never terminates). 2^30
+    // entries matches the n00b static-init helper's cap.
+    if (entry_count > ((uint64_t)1 << 30)) {
+        array_errorf(site,
+                     "static dict literal has too many entries (%llu); the "
+                     "maximum supported is 2^30",
+                     (unsigned long long)entry_count);
+        // array_errorf does not return.
+    }
     uint64_t cap = 1;
     while (cap < entry_count) {
         cap <<= 1;
@@ -4634,6 +4712,10 @@ lower_dict_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
 {
     (void)decl;
 
+    // WP-018 / WP-016 B1: bound container-literal nesting (see
+    // lower_array_literal for the rationale and the shared counter).
+    ncc_static_container_literal_enter(literal, "dict");
+
     // Collect pairs from the dict literal.  Both spellings reach this
     // path (explicit `d{...}` and bare `{k: v, ...}`), with a
     // <dict_pair_list> child carrying <dict_pair> nodes whose first
@@ -4663,6 +4745,7 @@ lower_dict_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
     if (key_kind == DICT_KEY_KIND_POINTER) {
         ncc_array_free(pairs_nodes);
         lower_dict_literal_pointer_key_stub(literal, type);
+        ncc_static_container_literal_leave();
         return nullptr;
     }
     if (key_kind == DICT_KEY_KIND_UNSUPPORTED) {
@@ -5132,6 +5215,7 @@ lower_dict_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
     ncc_free(request);
     dict_pairs_free(pairs, pair_count);
 
+    ncc_static_container_literal_leave();
     return expr_name;
 }
 
