@@ -349,12 +349,17 @@ parse_request(char *input, request_t *req)
                 };
                 continue;
             }
-            // WP-011 Phase 3c.iv: capture `arg cached_hash_lo int <val>`
-            // / `arg cached_hash_hi int <val>` so the emitted buffer
-            // object descriptor's `.cached_hash` slot matches the
-            // production `n00b_buffer_static_init` helper.  ncc only
-            // emits these for dict-key buffer literals; non-key buffer
-            // literals omit them and both halves stay zero.
+            // WP-011 Phase 3c.iv / 5f: capture `arg cached_hash_lo int
+            // <val>` / `arg cached_hash_hi int <val>` so the emitted
+            // buffer object descriptor's `.cached_hash` slot matches
+            // the production `n00b_buffer_static_init` helper.  Phase
+            // 5f extends this from the dict-key-only path to every
+            // buffer literal emission (standalone declarations and
+            // list/array/struct elements via
+            // `lower_buffer_literal_ref`); empty buffer literals
+            // continue to omit the kwargs and both halves stay zero
+            // (algorithm parity with `n00b_buffer_hash`'s empty-input
+            // `n00b_hash_word(0ULL)` fallback).
             long long int_val = 0;
             if (sscanf(line, "arg %127s int %lld", name, &int_val) == 2) {
                 if (strcmp(name, "cached_hash_lo") == 0) {

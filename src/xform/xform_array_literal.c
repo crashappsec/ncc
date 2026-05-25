@@ -3041,13 +3041,31 @@ lower_rstrings_in_initializer_expr(ncc_xform_ctx_t *ctx,
     return true;
 }
 
-// WP-011 Phase 3c.ii.b: when a b"..." literal serves as a dict key,
-// ncc precomputes its XXH3_128bits and threads the value through two
-// named integer args (`cached_hash_lo`, `cached_hash_hi`) so the
-// n00b-side `n00b_buffer_static_init` builder can populate the
+// WP-011 Phase 5f: forward declaration so `lower_buffer_literal_ref`
+// (the non-dict-key emission path) can precompute the descriptor's
+// `.cached_hash` slot without re-ordering the existing definition
+// further down the file (the dict-key path at ~line 4895 also uses
+// this helper, so its current position is load-bearing for that
+// caller too).
+static void
+compute_buffer_key_hash(const unsigned char *bytes, size_t len,
+                        uint64_t *out_lo, uint64_t *out_hi);
+
+// WP-011 Phase 3c.ii.b / 5f: every b"..." literal emission threads
+// its XXH3_128bits through two named integer args
+// (`cached_hash_lo`, `cached_hash_hi`) so the n00b-side
+// `n00b_buffer_static_init` builder can populate the
 // `n00b_buffer_t` object descriptor's `.cached_hash` slot at build
-// time.  For the common non-key case both halves are zero and the
-// descriptor keeps `.cached_hash = 0`, matching pre-3c.ii.b behavior.
+// time.  Phase 3c.ii.b introduced this for dict-key buffer literals;
+// Phase 5f extended it to every buffer literal emission (standalone,
+// list/array/struct element) via `lower_buffer_literal_ref` so
+// content-equal `b"..."` literals share the same cached_hash across
+// every occurrence — the symmetric fix to Phase 5d's r-string
+// cached_hash population (D-066 perf path).  For an empty `b""`
+// literal both halves are zero and the descriptor keeps
+// `.cached_hash = 0` (algorithm parity with `n00b_buffer_hash`'s
+// zero-length `n00b_hash_word(0ULL)` fallback, which we can't
+// reproduce at ncc compile time).
 static char *
 build_buffer_literal_helper_request(ncc_xform_ctx_t *ctx,
                                     ncc_parse_tree_t *call,
@@ -3131,14 +3149,17 @@ build_buffer_literal_helper_request(ncc_xform_ctx_t *ctx,
     return ncc_buffer_take(buf);
 }
 
-// WP-011 Phase 3c.ii.b: shared lowering helper for b"..." literals.
-// `cached_hash_lo`/`cached_hash_hi` are zero in the common list/array
-// element / value case (the helper's `n00b_buffer_static_init`
-// short-circuits the cached_hash arg pair when both halves are zero,
-// preserving pre-3c.ii.b behavior).  Dict-key callers thread the
-// precomputed `compute_buffer_key_hash` value through so the
-// emitted buffer object descriptor's `.cached_hash` slot lands the
-// same XXH3_128bits the runtime would recompute on first lookup.
+// WP-011 Phase 3c.ii.b / 5f: shared lowering helper for b"..."
+// literals.  Both callers (`lower_buffer_literal_ref` for the common
+// non-key path post-Phase-5f, and the dict-key path that calls
+// `lower_buffer_literal_ref_with_hash` directly) precompute the
+// payload's XXH3_128bits and thread the value here so the emitted
+// buffer object descriptor's `.cached_hash` slot lands the same
+// XXH3 the runtime would recompute on first lookup.  Empty buffer
+// payloads pass `(0, 0)` — the helper's `n00b_buffer_static_init`
+// keeps `.cached_hash = 0` and the runtime falls back to
+// `n00b_hash_word(0ULL)` on the zero-length branch (caveat
+// documented at `compute_buffer_key_hash` / `lower_buffer_literal_ref`).
 //
 // `out_payload_bytes` / `out_payload_len` (if non-NULL) receive a
 // freshly allocated copy of the literal's decoded bytes so dict-key
@@ -3200,12 +3221,50 @@ lower_buffer_literal_ref_with_hash(ncc_xform_ctx_t *ctx,
     return expr_name;
 }
 
+// WP-011 Phase 5f: every non-dict-key buffer literal emission now
+// populates the descriptor's `.cached_hash` slot with the same
+// XXH3_128bits the runtime `n00b_buffer_hash` would compute — see
+// `compute_buffer_key_hash` above for the algorithm parity contract
+// and the empty-buffer caveat (an empty `b""` keeps cached_hash = 0
+// because `n00b_buffer_hash` falls back to `n00b_hash_word(0ULL)` on
+// the zero-length branch, which we cannot reproduce at ncc compile
+// time without depending on libn00b's `n00b_word_t` layout).  This is
+// the symmetric fix to Phase 5d (r-string cached_hash population); it
+// ensures `n00b_hash(buffer_ptr)` returns the same value at every
+// occurrence of a content-equal `b"..."` literal across the program,
+// realising D-066's runtime perf path for buffer keys too.
+//
+// We pre-decode the payload once to compute the hash, then call
+// `lower_buffer_literal_ref_with_hash` which decodes a second time
+// internally; the cost is tiny and the shape stays simple (same
+// double-decode pattern the dict-key path uses).
 static char *
 lower_buffer_literal_ref(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *call,
                          string_list_t *decls)
 {
+    uint64_t cached_hash_lo = 0;
+    uint64_t cached_hash_hi = 0;
+
+    ncc_buffer_t *probe = ncc_buffer_empty();
+    int probe_count = 0;
+    if (decode_buflit_call_strings(call, probe, &probe_count)
+        && probe_count > 0 && probe->byte_len > 0) {
+        compute_buffer_key_hash((const unsigned char *)probe->data,
+                                probe->byte_len,
+                                &cached_hash_lo, &cached_hash_hi);
+    }
+    // Empty buffers (probe->byte_len == 0) keep both halves at 0; the
+    // descriptor's `.cached_hash` slot stays zero and the runtime
+    // `n00b_buffer_hash` falls back to `n00b_hash_word(0ULL)` on first
+    // lookup.  Decode failure is also tolerated: we let the second
+    // decode inside `lower_buffer_literal_ref_with_hash` produce the
+    // canonical error so the caller sees a consistent diagnostic.
+    ncc_buffer_free(probe);
+
     return lower_buffer_literal_ref_with_hash(ctx, call, decls,
-                                              0, 0, nullptr, nullptr);
+                                              cached_hash_lo,
+                                              cached_hash_hi,
+                                              nullptr, nullptr);
 }
 
 static bool

@@ -14,6 +14,25 @@
 #include <stdlib.h>
 #include <string.h>
 
+// WP-011 Phase 5f: vendored XXH3_128bits so the standalone buffer
+// literal emission path (`static n00b_buffer_t *p = b"...";` and
+// related top-level declarations) can precompute the descriptor's
+// `.cached_hash` slot at build time.  Mirrors `n00b_buffer_hash` in
+// libn00b's `src/core/hash.c:145-153`:
+//
+//   if (!b || !b->byte_len) return n00b_hash_word(0ULL);
+//   return n00b_xxh_convert(XXH3_128bits(b->data, b->byte_len));
+//
+// Same algorithm-match contract Phase 3c.ii.b (`compute_buffer_key_hash`
+// in xform_array_literal.c) and Phase 5d (`format_rstr_cached_hash_expr`
+// in xform_rstr.c) follow.  Empty payloads keep both halves at zero —
+// the runtime falls back to `n00b_hash_word(0ULL)` for empty buffers,
+// which we cannot reproduce at ncc compile time without depending on
+// libn00b's `n00b_word_t` layout.
+#define XXH_INLINE_ALL
+#define XXH_STATIC_LINKING_ONLY
+#include "vendor/xxhash.h"
+
 typedef struct {
     ncc_parse_tree_t **data;
     size_t             len;
@@ -674,6 +693,84 @@ collect_static_image_args(ncc_parse_tree_t *call)
     return result;
 }
 
+// WP-011 Phase 5f: inject `cached_hash_lo`/`cached_hash_hi` integer
+// args into the static-image arg list for the standalone buffer
+// literal case (`static n00b_buffer_t *p = b"...";`).  The single
+// positional bytes arg the prescan emits for `__ncc_buflit("...")`
+// carries the payload; we hash it with the same XXH3_128bits
+// sequence `n00b_buffer_hash` uses at runtime, then append the two
+// halves as named integer args.  The n00b-side
+// `n00b_buffer_static_init` (and the test stub) already accept these
+// kwargs (Phase 3c.iii) and emit the resulting `.cached_hash`
+// expression into the buffer object descriptor.
+//
+// Empty buffers (zero-length payload) skip the injection so the
+// descriptor's `.cached_hash` slot stays at zero — `n00b_buffer_hash`
+// falls back to `n00b_hash_word(0ULL)` on empty input and we cannot
+// reproduce that value at ncc compile time without dragging in
+// libn00b's `n00b_word_t` layout.  Empty `b""` literals therefore
+// keep the pre-Phase-5f behaviour (cached_hash unset; runtime
+// recompute lands on the vtable's zero-length branch).  This matches
+// the empty r-string caveat documented in Phase 5d's
+// `format_rstr_cached_hash_expr`.
+static void
+inject_buffer_cached_hash_args(static_image_arg_list_t *args)
+{
+    // Locate the buffer's payload bytes.  The prescan emits a single
+    // positional bytes arg for `b"..."` -> `__ncc_buflit("...")`; we
+    // match that case strictly to avoid accidentally hashing some
+    // other byte-shaped kwarg in a future extension.
+    const char *payload = nullptr;
+    size_t      payload_len = 0;
+    for (size_t i = 0; i < args->len; i++) {
+        const static_image_arg_t *arg = &args->data[i];
+        if (arg->kind != STATIC_IMAGE_ARG_BYTES) {
+            continue;
+        }
+        // The prescan emits a single positional bytes arg.  Skip
+        // anything keyword-tagged (defensive — kwargs for raw bytes
+        // would land on the production helper's `.raw` / `.hex`
+        // alias path, but the standalone `b"..."` literal in user
+        // source always goes through positional).
+        if (arg->name != nullptr) {
+            continue;
+        }
+        payload = arg->bytes;
+        payload_len = arg->byte_len;
+        break;
+    }
+
+    if (!payload || payload_len == 0) {
+        return;
+    }
+
+    XXH128_hash_t h = XXH3_128bits(payload, payload_len);
+    // The helper wire is signed int64 underneath (see
+    // `static_image_arg_t.scalar_text` decoding in build_helper_request
+    // and the n00b-side parser in src/core/buffer.c); cast through
+    // int64_t so the bit pattern survives sign reinterpretation.
+    int64_t lo_signed = (int64_t)(uint64_t)h.low64;
+    int64_t hi_signed = (int64_t)(uint64_t)h.high64;
+
+    char lo_text[32];
+    char hi_text[32];
+    snprintf(lo_text, sizeof(lo_text), "%lld", (long long)lo_signed);
+    snprintf(hi_text, sizeof(hi_text), "%lld", (long long)hi_signed);
+
+    static_image_arg_t lo_arg = {
+        .name        = copy_cstr("cached_hash_lo"),
+        .kind        = STATIC_IMAGE_ARG_INT,
+        .scalar_text = copy_cstr(lo_text),
+    };
+    static_image_arg_t hi_arg = {
+        .name        = copy_cstr("cached_hash_hi"),
+        .kind        = STATIC_IMAGE_ARG_INT,
+        .scalar_text = copy_cstr(hi_text),
+    };
+    arg_list_push(args, lo_arg);
+    arg_list_push(args, hi_arg);
+}
+
 static char *
 build_helper_request(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *call,
                      const char *type_name, const char *prefix, bool readonly,
@@ -1012,6 +1109,31 @@ lower_static_image_initializer(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
     snprintf(prefix, sizeof(prefix), "__ncc_static_image_%d", id);
 
     static_image_arg_list_t args = collect_static_image_args(call);
+
+    // WP-011 Phase 5f: thread the payload's XXH3_128bits into the
+    // n00b-side `n00b_buffer_static_init` builder so every standalone
+    // `b"..."` literal emission (file-scope declarations like
+    // `static const n00b_buffer_t *p = b"...";`) lands a populated
+    // `.cached_hash` slot on the buffer object descriptor.  Together
+    // with `lower_buffer_literal_ref`'s update (xform_array_literal.c)
+    // this closes Phase 5f's algorithm-match contract: every buffer
+    // literal in ncc-compiled source now carries the same XXH3 the
+    // runtime would compute, so cross-occurrence
+    // `n00b_hash(buffer_ptr)` results are bit-identical.
+    //
+    // We gate the injection on `is_buffer_literal_call` because the
+    // production `n00b_buffer_static_init` arg-parser only accepts
+    // `cached_hash_lo`/`cached_hash_hi` (and the other documented
+    // buffer kwargs); injecting them into a non-buffer
+    // `ncc_static_image(...)` target — whose static-init handler may
+    // not know those names — would trigger the helper's
+    // "unsupported ... argument" failure (see src/core/buffer.c's
+    // `n00b_static_image_builder_fail` path).  The buffer-literal
+    // gate ensures the new kwargs only ride on the buffer codepath.
+    if (is_buffer_literal_call(call)) {
+        inject_buffer_cached_hash_args(&args);
+    }
+
     const char *helper = ncc_xform_get_data(ctx)->static_init_helper;
     if (!helper || !*helper) {
         free_arg_list(&args);
