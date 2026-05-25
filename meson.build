@@ -1009,17 +1009,37 @@ ncc_error_contains_tests = {
     test_dir / 'err_dict_literal_local_mutable.c',
     'non-const local dict literal',
   ],
-  # Phase 3c.ii.b partial-stub: pointer-keyed dict literals whose
-  # key type is neither n00b_string_t (r-string) nor n00b_buffer_t
-  # (buffer) — e.g., generic struct pointers — still route to a
-  # narrower diagnostic until a future phase widens the pointer-key
-  # surface.  R-string and buffer keys are supported as of 3c.ii.b,
-  # so this fixture's trigger is now `d{nullptr: 1}` over a
-  # `struct foo *` key type.  Delete this entry along with the
-  # fixture once the pointer-key surface widens.
-  'err_dict_literal_stub': [
-    test_dir / 'err_dict_literal_stub.c',
+  # Phase 3c.iii permanent fixture: generic struct-pointer key
+  # (DICT_KEY_KIND_POINTER, not r-string and not buffer) routes to
+  # the dict pointer-key partial-stub diagnostic.  Renamed from
+  # `err_dict_literal_stub` in Phase 3c.iii; see the fixture's
+  # leading comment.
+  'err_dict_literal_struct_pointer_key': [
+    test_dir / 'err_dict_literal_struct_pointer_key.c',
     'dict pointer-key lowering not yet implemented for this pointer type in WP-011 Phase 3c.ii.b',
+  ],
+  # Phase 3c.iii: non-pointer-non-scalar key types (e.g. `float`)
+  # land in DICT_KEY_KIND_UNSUPPORTED and emit a friendly
+  # "dict literal key type ... is not supported" diagnostic.
+  'err_dict_literal_unsupported_key_type': [
+    test_dir / 'err_dict_literal_unsupported_key_type.c',
+    'dict literal key type',
+  ],
+  # Phase 3c.iii: value types outside the scalar / pointer /
+  # registered-aggregate / nested-container set (e.g.
+  # `_Complex double`) emit a friendly "dict literal value type
+  # ... is not supported" diagnostic.
+  'err_dict_literal_unsupported_value_type': [
+    test_dir / 'err_dict_literal_unsupported_value_type.c',
+    'dict literal value type',
+  ],
+  # Phase 3c.iii: a valid dict literal compiled without
+  # `--ncc-static-init-helper=PATH` fails with the missing-helper
+  # diagnostic (parallel to the list / array missing-helper
+  # fixtures).
+  'err_dict_literal_missing_helper': [
+    test_dir / 'err_dict_literal_missing_helper.c',
+    'requires --ncc-static-init-helper=PATH',
   ],
   # Phase 3c.i duplicate-key compile-time rejection (D-065).
   'err_dict_literal_duplicate_key': [

@@ -371,6 +371,28 @@ lookup_dict_type(ncc_xform_ctx_t *ctx, const char *key)
     return found ? info : nullptr;
 }
 
+// WP-011 Phase 3c.iii: produce a user-friendly dict type label for
+// diagnostics.  The `object_type` field is the post-typeid-mangle
+// `struct n00b_dict_<HASH>` form, which is stable but unreadable.
+// Phase 3c.iii synthesizes `n00b_dict_t(<K>, <V>)` from the recorded
+// K and V types so error messages name the type the way the user
+// wrote it (or a close paraphrase) instead of leaking the mangled
+// runtime tag or the `_generic_struct typeid(...)` expansion.  The
+// returned buffer is owned by the caller; free with `ncc_free`.
+static char *
+dict_type_friendly_name(const dict_type_info_t *info)
+{
+    if (!info) {
+        return copy_cstr("<unknown dict>");
+    }
+    const char *k = info->key_type   ? info->key_type   : "?";
+    const char *v = info->value_type ? info->value_type : "?";
+    size_t      len = strlen(k) + strlen(v) + 32;
+    char       *out = ncc_alloc_size(1, len);
+    snprintf(out, len, "n00b_dict_t(%s, %s)", k, v);
+    return out;
+}
+
 static char *
 tag_runtime_name(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tag_node)
 {
@@ -3852,16 +3874,23 @@ lower_list_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
 // pointer-key surface to other registered pointer types.  Scalar /
 // enum-keyed, r-string-keyed, and buffer-keyed lowering are all
 // implemented inline below.
+//
+// Phase 3c.iii: the diagnostic now names the dict via its friendly
+// `n00b_dict_t(K, V)` form (synthesized from `dict_type_info_t`) so
+// the user sees the type they wrote, not the post-typeid-mangle
+// `struct n00b_dict_<HASH>` symbol.
 static void
 lower_dict_literal_pointer_key_stub(ncc_parse_tree_t *literal,
-                                    const char *target_type)
+                                    const dict_type_info_t *type)
 {
+    char *friendly = dict_type_friendly_name(type);
     literal_helper_error(literal, "dict literal",
-                         target_type ? target_type : "<unknown>",
+                         friendly,
                          "dict pointer-key lowering not yet implemented "
                          "for this pointer type in WP-011 Phase 3c.ii.b; "
                          "r-string and buffer keys are supported",
                          nullptr, 0);
+    ncc_free(friendly);
 }
 
 // WP-011 Phase 3c.i: compile-time size of a scalar/enum key type.
@@ -4493,7 +4522,7 @@ lower_dict_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
     // pointer-key path.
     if (key_kind == DICT_KEY_KIND_POINTER) {
         ncc_array_free(pairs_nodes);
-        lower_dict_literal_pointer_key_stub(literal, type->object_type);
+        lower_dict_literal_pointer_key_stub(literal, type);
         return nullptr;
     }
     if (key_kind == DICT_KEY_KIND_UNSUPPORTED) {
@@ -4935,12 +4964,17 @@ lower_dict_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
     snprintf(prefix, sizeof(prefix), "__ncc_dictlit_%d", id);
 
     const char *helper = ncc_xform_get_data(ctx)->static_init_helper;
+    // Phase 3c.iii: friendly `n00b_dict_t(K, V)` name in user-facing
+    // diagnostics, used both for the missing-helper error and for any
+    // helper-launch error surfaced by `run_literal_static_init_helper`.
+    char *friendly_type = dict_type_friendly_name(type);
     if (!helper || !*helper) {
         dict_pairs_free(pairs, pair_count);
         array_errorf(literal,
                      "dict literal initializer for '%s' requires "
                      "--ncc-static-init-helper=PATH",
-                     type->object_type);
+                     friendly_type);
+        // array_errorf does not return.
     }
 
     char *request = build_dict_helper_request(ctx, literal, type, prefix,
@@ -4950,8 +4984,9 @@ lower_dict_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
     char *expr_name = nullptr;
     char *helper_decls = nullptr;
     run_literal_static_init_helper(literal, helper, "dict literal",
-                                   type->object_type, request,
+                                   friendly_type, request,
                                    &expr_name, &helper_decls);
+    ncc_free(friendly_type);
     list_push(decls, helper_decls);
 
     ncc_free(request);

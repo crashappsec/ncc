@@ -1,14 +1,16 @@
-// WP-011 Phase 3c.ii.b partial-stub fixture; DELETE when a future
-// phase widens the pointer-key surface to other registered pointer
-// types (typedef'd struct pointers, generic struct pointers, etc.).
-// Phase 3c.ii.a shipped r-string-key support; Phase 3c.ii.b adds
-// buffer-key support; this fixture pins the partial-stub diagnostic
-// for the residual pointer-key kinds that still route to the stub.
+// WP-011 Phase 3c.iii permanent fixture: a generic struct-pointer
+// key (`struct foo *`) is classified as `DICT_KEY_KIND_POINTER`
+// (the wildcard-pointer kind — neither `n00b_string_t *` nor
+// `n00b_buffer_t *`) and is rejected with the dict pointer-key
+// partial-stub diagnostic.  This pins the friendly-named partial-
+// stub message for the generic pointer-key path; it is a distinct
+// code path from the non-pointer-non-scalar case covered by
+// `err_dict_literal_unsupported_key_type.c`.
 //
-// Trigger: a generic struct-pointer key (`struct foo *`) that is
-// neither `n00b_string_t *` nor `n00b_buffer_t *`.  ncc classifies
-// it as `DICT_KEY_KIND_POINTER` (the wildcard-pointer kind) and
-// falls through to `lower_dict_literal_pointer_key_stub`.
+// Renamed from `err_dict_literal_stub.c` in Phase 3c.iii.  When a
+// future phase widens the pointer-key surface to additional
+// registered pointer types, update or retire this fixture in that
+// work-package.
 
 #include <stddef.h>
 #include <stdint.h>
