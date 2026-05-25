@@ -1,15 +1,20 @@
-// WP-011 Phase 3c.ii.a partial-stub fixture; DELETE when Phase
-// 3c.ii.b implements buffer-key lowering.  Phase 3c.ii.a shipped
-// r-string-key support, so this fixture switched its trigger to a
-// b-buffer key (`d{b"abc": 1}`); buffer keys remain routed to the
-// partial-stub diagnostic until 3c.ii.b lands.
+// WP-011 Phase 3c.ii.b partial-stub fixture; DELETE when a future
+// phase widens the pointer-key surface to other registered pointer
+// types (typedef'd struct pointers, generic struct pointers, etc.).
+// Phase 3c.ii.a shipped r-string-key support; Phase 3c.ii.b adds
+// buffer-key support; this fixture pins the partial-stub diagnostic
+// for the residual pointer-key kinds that still route to the stub.
+//
+// Trigger: a generic struct-pointer key (`struct foo *`) that is
+// neither `n00b_string_t *` nor `n00b_buffer_t *`.  ncc classifies
+// it as `DICT_KEY_KIND_POINTER` (the wildcard-pointer kind) and
+// falls through to `lower_dict_literal_pointer_key_stub`.
 
 #include <stddef.h>
 #include <stdint.h>
 
 #include "ncc_runtime.h"
 
-typedef struct n00b_buffer_t n00b_buffer_t;
 typedef struct n00b_rwlock_t n00b_rwlock_t;
 typedef struct n00b_allocator_t n00b_allocator_t;
 typedef struct n00b_gc_map_t n00b_gc_map_t;
@@ -32,5 +37,13 @@ typedef enum n00b_gc_scan_kind_t : uint8_t {
         void               *scan_user;                                        \
     }
 
-// Buffer-keyed dict literal triggers the Phase 3c.ii.a partial-stub.
-n00b_dict_t(n00b_buffer_t *, int) x = d{b"abc": 1};
+struct foo {
+    int x;
+};
+
+// Generic struct-pointer-keyed dict literal triggers the Phase
+// 3c.ii.b partial-stub.  The key expression's specifics are not
+// significant: the lowering pass rejects the literal before ever
+// evaluating it, since the key TYPE (`struct foo *`) classifies
+// as DICT_KEY_KIND_POINTER.
+n00b_dict_t(struct foo *, int) x = d{nullptr: 1};

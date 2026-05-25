@@ -17,8 +17,11 @@
 
 // WP-011 Phase 3c.ii.a: positive r-string-keyed dict literal coverage
 // (added in addition to the Phase 3c.i scalar-keyed cases below).
-// Buffer-keyed dicts continue to trigger the partial-stub diagnostic
-// — see err_dict_literal_stub.c for that fixture (now using b"...").
+// WP-011 Phase 3c.ii.b: positive buffer-keyed dict literal coverage
+// (parallels the r-string case; ncc precomputes XXH3_128bits over the
+// buffer bytes and threads the value through both the helper's bucket
+// `hv` slot AND the buffer object descriptor's `.cached_hash` slot
+// via two named integer args on the buffer literal request).
 
 #include <assert.h>
 #include <stdatomic.h>
@@ -262,6 +265,29 @@ n00b_dict_t(int, int) empty_dict = d{};
 // pointer keys whose payloads are static `ncc_string_t` instances.
 n00b_dict_t(ncc_string_t *, int) rstr_dict = d{
     r"foo": 1, r"bar": 2, r"baz": 3
+};
+
+// WP-011 Phase 3c.ii.b: buffer-keyed dict.  Mirror of the rstr_dict
+// case above, except keys are `b"..."` literals whose hashes mirror
+// `n00b_buffer_hash` (`XXH3_128bits(bytes, byte_len)`).  We mirror
+// just enough of `n00b_buffer_t`'s shape so the fixture's content-
+// based lookup can compare `byte_len`/`data` without pulling in
+// libn00b.  The fields used (`data`, `byte_len`) are the same ones
+// `n00b_buffer_hash` reads.
+typedef struct n00b_buffer_t {
+    char                *data;
+    size_t               byte_len;
+    size_t               alloc_len;
+    n00b_rwlock_t       *lock;
+    n00b_allocator_t    *allocator;
+    uint32_t             flags;
+    n00b_gc_scan_kind_t  scan_kind;
+    n00b_gc_scan_cb_t    scan_cb;
+    void                *scan_user;
+} n00b_buffer_t;
+
+n00b_dict_t(n00b_buffer_t *, int) buf_dict = d{
+    b"abc": 10, b"xyz": 20
 };
 
 // ----------------------------------------------------------------------------
@@ -508,6 +534,108 @@ test_rstring_keyed_dict(void)
     assert(occupied == 3);
 }
 
+// WP-011 Phase 3c.ii.b: content-based buffer-keyed lookup.  Same
+// shape as `rstr_dict_lookup` but compares `byte_len`/`data` on
+// `n00b_buffer_t *` keys.  The runtime n00b dict would call
+// `n00b_buffer_hash` on the query and compare keys via buffer-content
+// equality.  This standalone fixture rolls both: hash via XXH3 over
+// the raw bytes (implicit through the bucket `hv` precomputation),
+// then linear-probe with content-equality on the stored buffer
+// pointers.
+static int
+buf_dict_lookup(__n00b_internal_type_erased_store_t *store,
+                const n00b_buffer_t *q, int *out)
+{
+    uint32_t        cap    = store->last_slot + 1u;
+    n00b_buffer_t **keys   = (n00b_buffer_t **)store->keys;
+    int            *values = (int *)store->values;
+    for (uint32_t s = 0; s < cap; s++) {
+        if (store->buckets[s].hv == (n00b_uint128_t)0) {
+            continue;
+        }
+        n00b_buffer_t *k = keys[s];
+        if (!k) {
+            continue;
+        }
+        if (k->byte_len == q->byte_len
+            && memcmp(k->data, q->data, q->byte_len) == 0) {
+            *out = values[s];
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void
+test_buffer_keyed_dict(void)
+{
+    auto store = buf_dict.store;
+    assert(store != nullptr);
+    assert(store->last_slot == 15u);
+    assert(atomic_load_explicit(&store->used_count,
+                                memory_order_relaxed)
+           == 2u);
+    assert(atomic_load_explicit(&buf_dict.length,
+                                memory_order_relaxed)
+           == 2);
+    // Buffer-keyed dicts skip the runtime XXH3 raw-bytes path
+    // (`skip_obj_hash=0`): the runtime calls `n00b_buffer_hash` on
+    // the key pointer instead, and the descriptor's cached_hash slot
+    // short-circuits that call to the precomputed XXH3 value.
+    assert(buf_dict.skip_obj_hash == 0);
+
+    auto erased_store =
+        (__n00b_internal_type_erased_store_t *)store;
+    int v;
+    // `b"..."` only resolves to a buffer-literal call in
+    // initializer contexts (it has no expression-context xform),
+    // so build query buffers from inline plain-C struct literals.
+    // The lookup helper compares `byte_len` + `data` bytes, which
+    // is the same comparison `n00b_buffer_eq` would do.
+    n00b_buffer_t q_abc = {.data = "abc", .byte_len = 3};
+    n00b_buffer_t q_xyz = {.data = "xyz", .byte_len = 3};
+    n00b_buffer_t q_missing = {.data = "missing", .byte_len = 7};
+    assert(buf_dict_lookup(erased_store, &q_abc, &v) && v == 10);
+    assert(buf_dict_lookup(erased_store, &q_xyz, &v) && v == 20);
+    assert(!buf_dict_lookup(erased_store, &q_missing, &v));
+
+    // Every occupied bucket must carry a non-zero precomputed hash.
+    // A zero `hv` would mean ncc failed to thread the XXH3 result
+    // through, leaving the runtime dict store with no way to slot-
+    // match a lookup.
+    uint32_t cap = erased_store->last_slot + 1u;
+    int occupied = 0;
+    for (uint32_t s = 0; s < cap; s++) {
+        if (erased_store->buckets[s].hv != (n00b_uint128_t)0) {
+            occupied++;
+        }
+    }
+    assert(occupied == 2);
+
+    // Cross-check key bytes for confidence the helper put each pair
+    // where the runtime would look for it.
+    n00b_buffer_t **keys = (n00b_buffer_t **)erased_store->keys;
+    int saw_abc = 0;
+    int saw_xyz = 0;
+    for (uint32_t s = 0; s < cap; s++) {
+        if (erased_store->buckets[s].hv == (n00b_uint128_t)0) {
+            continue;
+        }
+        n00b_buffer_t *k = keys[s];
+        if (!k) {
+            continue;
+        }
+        if (k->byte_len == 3 && memcmp(k->data, "abc", 3) == 0) {
+            saw_abc++;
+        }
+        if (k->byte_len == 3 && memcmp(k->data, "xyz", 3) == 0) {
+            saw_xyz++;
+        }
+    }
+    assert(saw_abc == 1);
+    assert(saw_xyz == 1);
+}
+
 static void
 test_empty_dict(void)
 {
@@ -537,6 +665,7 @@ main(void)
     test_pointer_target_dict();
     test_empty_dict();
     test_rstring_keyed_dict();
+    test_buffer_keyed_dict();
     (void)dict_length;
     return 0;
 }

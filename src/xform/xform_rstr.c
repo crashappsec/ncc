@@ -950,9 +950,27 @@ static ncc_parse_tree_t *find_rstr_call(ncc_parse_tree_t *node) {
 
 ncc_rstr_static_ref_t ncc_rstr_build_static_ref(ncc_xform_ctx_t *ctx,
                                                 ncc_parse_tree_t *node) {
+  // WP-011 Phase 3c.ii.b: default cached_hash expression is "0".  The
+  // descriptor template casts this to `n00b_uint128_t`, so zero-fill
+  // semantics are preserved for non-dict-key call sites.
+  return ncc_rstr_build_static_ref_ex(ctx, node, "0");
+}
+
+ncc_rstr_static_ref_t ncc_rstr_build_static_ref_ex(
+    ncc_xform_ctx_t *ctx,
+    ncc_parse_tree_t *node,
+    const char *cached_hash_expr) {
   ncc_parse_tree_t *call = find_rstr_call(node);
   if (!call) {
     return (ncc_rstr_static_ref_t){0};
+  }
+
+  // WP-011 Phase 3c.ii.b: `cached_hash_expr` defaults to "0" when the
+  // caller routes through the legacy entrypoint.  An empty / NULL
+  // expression is treated as "0" for the same reason — the rstr
+  // template casts the slot to n00b_uint128_t unconditionally.
+  if (!cached_hash_expr || !*cached_hash_expr) {
+    cached_hash_expr = "0";
   }
 
   ncc_parse_tree_t *kid2 = ncc_tree_child(call, 2);
@@ -1023,20 +1041,23 @@ ncc_rstr_static_ref_t ncc_rstr_build_static_ref(ncc_xform_ctx_t *ctx,
     // $8=descriptor $9=entry $10=object_id $11=flags
     // $12=scan_kind $13=scan_cb $14=scan_user $15=entry_attr
     // $16=identity_decl $17=identity_expr
+    // $18=cached_hash (WP-011 Phase 3c.ii.b — descriptor cached_hash
+    //                  expression; "0" for non-dict-key emission).
     const char *all_args[] = {
         style_decls, var_name, bytes_str, data_str,
         cp_str,      styling_str, typehash_str, wrapper_var,
         stobj.desc_name,    stobj.entry_name, stobj.object_id, stobj.flags,
         stobj.scan_kind,    stobj.scan_cb,    stobj.scan_user, stobj.entry_attr,
         stobj.identity_decl, stobj.identity_expr,
+        cached_hash_expr,
     };
 
     decl_str = ncc_static_object_expand_template(
         "r-string static-ref",
-        get_rstr_static_ref_template_styled(ctx), all_args, 18);
+        get_rstr_static_ref_template_styled(ctx), all_args, 19);
     expr_str = ncc_static_object_expand_template(
         "r-string static-ref expression",
-        get_rstr_static_ref_expr_styled(ctx), all_args, 18);
+        get_rstr_static_ref_expr_styled(ctx), all_args, 19);
     ncc_free(style_decls);
   } else {
     // Slot layout mirrors the main plain r-string template:
@@ -1044,19 +1065,22 @@ ncc_rstr_static_ref_t ncc_rstr_build_static_ref(ncc_xform_ctx_t *ctx,
     // $6=descriptor $7=entry $8=object_id $9=flags
     // $10=scan_kind $11=scan_cb $12=scan_user $13=entry_attr
     // $14=identity_decl $15=identity_expr
+    // $16=cached_hash (WP-011 Phase 3c.ii.b — descriptor cached_hash
+    //                  expression; "0" for non-dict-key emission).
     const char *all_args[] = {
         var_name, bytes_str, data_str, cp_str, typehash_str, wrapper_var,
         stobj.desc_name, stobj.entry_name, stobj.object_id, stobj.flags,
         stobj.scan_kind, stobj.scan_cb,    stobj.scan_user, stobj.entry_attr,
         stobj.identity_decl, stobj.identity_expr,
+        cached_hash_expr,
     };
 
     decl_str = ncc_static_object_expand_template(
         "r-string static-ref",
-        get_rstr_static_ref_template_plain(ctx), all_args, 16);
+        get_rstr_static_ref_template_plain(ctx), all_args, 17);
     expr_str = ncc_static_object_expand_template(
         "r-string static-ref expression",
-        get_rstr_static_ref_expr_plain(ctx), all_args, 16);
+        get_rstr_static_ref_expr_plain(ctx), all_args, 17);
   }
 
   // WP-011 Phase 3c.ii.a: copy out the post-rich-markup UTF-8 content
@@ -1205,6 +1229,10 @@ static ncc_parse_tree_t *xform_rstr(ncc_xform_ctx_t *ctx,
     //              $8=descriptor $9=entry $10=object_id $11=flags
     //              $12=scan_kind $13=scan_cb $14=scan_user $15=entry_attr
     //              $16=identity_decl $17=identity_expr
+    //              $18=cached_hash (WP-011 Phase 3c.ii.b — always
+    //                  "0" for standalone r-string emission; only
+    //                  the static-ref path threads a precomputed
+    //                  XXH3 value here for dict-key emission).
     char *style_decls = emit_style_declarations(ctx, &out, uid);
 
     char styling_str[64];
@@ -1216,9 +1244,10 @@ static ncc_parse_tree_t *xform_rstr(ncc_xform_ctx_t *ctx,
         stobj.desc_name,    stobj.entry_name,  stobj.object_id, stobj.flags,
         stobj.scan_kind,    stobj.scan_cb,     stobj.scan_user, stobj.entry_attr,
         stobj.identity_decl, stobj.identity_expr,
+        "0",
     };
     int nslots = ncc_template_slot_count(tmpl_reg, "rstr_styled");
-    require_rstr_template_slots("rstr_styled", nslots, 18);
+    require_rstr_template_slots("rstr_styled", nslots, 19);
     r = ncc_template_instantiate(tmpl_reg, "rstr_styled", all_args, nslots);
     ncc_free(style_decls);
   } else {
@@ -1228,14 +1257,17 @@ static ncc_parse_tree_t *xform_rstr(ncc_xform_ctx_t *ctx,
     //              $6=descriptor $7=entry $8=object_id $9=flags
     //              $10=scan_kind $11=scan_cb $12=scan_user $13=entry_attr
     //              $14=identity_decl $15=identity_expr
+    //              $16=cached_hash (WP-011 Phase 3c.ii.b — always
+    //                  "0" for standalone r-string emission).
     const char *all_args[] = {
         var_name, bytes_str, data_str, cp_str, typehash_str, wrapper_var,
         stobj.desc_name, stobj.entry_name, stobj.object_id, stobj.flags,
         stobj.scan_kind, stobj.scan_cb,    stobj.scan_user, stobj.entry_attr,
         stobj.identity_decl, stobj.identity_expr,
+        "0",
     };
     int nslots = ncc_template_slot_count(tmpl_reg, "rstr_plain");
-    require_rstr_template_slots("rstr_plain", nslots, 16);
+    require_rstr_template_slots("rstr_plain", nslots, 17);
     r = ncc_template_instantiate(tmpl_reg, "rstr_plain", all_args, nslots);
   }
 

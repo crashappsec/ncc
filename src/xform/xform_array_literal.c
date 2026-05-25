@@ -2966,12 +2966,21 @@ lower_rstrings_in_initializer_expr(ncc_xform_ctx_t *ctx,
     return true;
 }
 
+// WP-011 Phase 3c.ii.b: when a b"..." literal serves as a dict key,
+// ncc precomputes its XXH3_128bits and threads the value through two
+// named integer args (`cached_hash_lo`, `cached_hash_hi`) so the
+// n00b-side `n00b_buffer_static_init` builder can populate the
+// `n00b_buffer_t` object descriptor's `.cached_hash` slot at build
+// time.  For the common non-key case both halves are zero and the
+// descriptor keeps `.cached_hash = 0`, matching pre-3c.ii.b behavior.
 static char *
 build_buffer_literal_helper_request(ncc_xform_ctx_t *ctx,
                                     ncc_parse_tree_t *call,
                                     const char *prefix,
                                     const char *payload,
-                                    size_t payload_len)
+                                    size_t payload_len,
+                                    uint64_t cached_hash_lo,
+                                    uint64_t cached_hash_hi)
 {
     const char *type_name = "n00b_buffer_t";
     char *type_hex = hex_string(type_name, strlen(type_name));
@@ -2994,6 +3003,16 @@ build_buffer_literal_helper_request(ncc_xform_ctx_t *ctx,
     char *identity_payload_key_hex =
         hex_string(identity_payload_key, strlen(identity_payload_key));
 
+    // The helper's arg-parser accepts integer values as signed
+    // (`parse_i64_token`).  We always have well-defined 64-bit values
+    // here; cast through `int64_t` so the helper's value matches the
+    // unsigned bit pattern (two's-complement reinterpretation).  The
+    // n00b-side builder casts back to uint64_t before reassembling
+    // the 128-bit cached_hash.
+    bool emit_cached_hash = (cached_hash_lo != 0) || (cached_hash_hi != 0);
+    int  base_arg_count   = 1;
+    int  total_args       = base_arg_count + (emit_cached_hash ? 2 : 0);
+
     ncc_buffer_t *buf = ncc_buffer_empty();
     ncc_buffer_printf(buf,
                       "NCC_STATIC_INIT 1\n"
@@ -3006,14 +3025,23 @@ build_buffer_literal_helper_request(ncc_xform_ctx_t *ctx,
                       "identity_namespace_hex %s\n"
                       "identity_object_key_hex %s\n"
                       "identity_payload_key_hex %s\n"
-                      "arg_count 1\n"
-                      "arg - bytes %zu %s\n"
-                      "end\n",
+                      "arg_count %d\n"
+                      "arg - bytes %zu %s\n",
                       type_hex, type_hash, prefix, sizeof(void *),
                       sizeof(size_t), static_image_host_endian_value(),
                       entry_attr_hex, identity_namespace_hex,
                       identity_object_key_hex, identity_payload_key_hex,
-                      payload_len, payload_hex);
+                      total_args, payload_len, payload_hex);
+
+    if (emit_cached_hash) {
+        ncc_buffer_printf(buf,
+                          "arg cached_hash_lo int %lld\n"
+                          "arg cached_hash_hi int %lld\n",
+                          (long long)(int64_t)cached_hash_lo,
+                          (long long)(int64_t)cached_hash_hi);
+    }
+
+    ncc_buffer_puts(buf, "end\n");
 
     ncc_free(type_hex);
     ncc_free(payload_hex);
@@ -3028,9 +3056,28 @@ build_buffer_literal_helper_request(ncc_xform_ctx_t *ctx,
     return ncc_buffer_take(buf);
 }
 
+// WP-011 Phase 3c.ii.b: shared lowering helper for b"..." literals.
+// `cached_hash_lo`/`cached_hash_hi` are zero in the common list/array
+// element / value case (the helper's `n00b_buffer_static_init`
+// short-circuits the cached_hash arg pair when both halves are zero,
+// preserving pre-3c.ii.b behavior).  Dict-key callers thread the
+// precomputed `compute_buffer_key_hash` value through so the
+// emitted buffer object descriptor's `.cached_hash` slot lands the
+// same XXH3_128bits the runtime would recompute on first lookup.
+//
+// `out_payload_bytes` / `out_payload_len` (if non-NULL) receive a
+// freshly allocated copy of the literal's decoded bytes so dict-key
+// callers can re-feed them to `compute_buffer_key_hash` without re-
+// parsing the call.  Caller owns the allocation; free with
+// `ncc_free`.  Pass `nullptr`/`nullptr` to ignore.
 static char *
-lower_buffer_literal_ref(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *call,
-                         string_list_t *decls)
+lower_buffer_literal_ref_with_hash(ncc_xform_ctx_t *ctx,
+                                   ncc_parse_tree_t *call,
+                                   string_list_t *decls,
+                                   uint64_t cached_hash_lo,
+                                   uint64_t cached_hash_hi,
+                                   unsigned char **out_payload_bytes,
+                                   size_t *out_payload_len)
 {
     ncc_buffer_t *payload = ncc_buffer_empty();
     int string_count = 0;
@@ -3040,13 +3087,24 @@ lower_buffer_literal_ref(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *call,
         array_error(call, "could not decode b-string list element", nullptr);
     }
 
+    if (out_payload_bytes && out_payload_len) {
+        size_t plen = payload->byte_len;
+        unsigned char *copy = nullptr;
+        if (plen > 0) {
+            copy = ncc_alloc_size(1, plen);
+            memcpy(copy, payload->data, plen);
+        }
+        *out_payload_bytes = copy;
+        *out_payload_len   = plen;
+    }
+
     int id = ctx->unique_id++;
     char prefix[64];
     snprintf(prefix, sizeof(prefix), "__ncc_buflit_%d", id);
 
-    char *request = build_buffer_literal_helper_request(ctx, call, prefix,
-                                                        payload->data,
-                                                        payload->byte_len);
+    char *request = build_buffer_literal_helper_request(
+        ctx, call, prefix, payload->data, payload->byte_len,
+        cached_hash_lo, cached_hash_hi);
     ncc_buffer_free(payload);
 
     const char *helper = ncc_xform_get_data(ctx)->static_init_helper;
@@ -3065,6 +3123,14 @@ lower_buffer_literal_ref(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *call,
     list_push(decls, helper_decls);
     ncc_free(request);
     return expr_name;
+}
+
+static char *
+lower_buffer_literal_ref(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *call,
+                         string_list_t *decls)
+{
+    return lower_buffer_literal_ref_with_hash(ctx, call, decls,
+                                              0, 0, nullptr, nullptr);
 }
 
 static bool
@@ -3778,14 +3844,14 @@ lower_list_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
     return expr_name;
 }
 
-// WP-011 Phase 3c.ii.a partial-stub: buffer-keyed and other
-// pointer-keyed dict literals fall back to the same
-// `literal_helper_error()` machinery as the original Phase 2 stub,
-// but with a narrower message scoped to the still-unimplemented
-// pointer-key kinds.  Phase 3c.ii.a shipped r-string-key support;
-// Phase 3c.ii.b will add b-buffer keys and remove this branch.
-// Scalar/enum-keyed and r-string-keyed lowering are implemented
-// inline below.
+// WP-011 Phase 3c.ii.b partial-stub: pointer-keyed dict literals
+// whose key type is neither n00b_string_t (r-string) nor
+// n00b_buffer_t (buffer) — e.g. typedef'd struct pointers — still
+// route to this stub.  Phase 3c.ii.a shipped r-string-key support;
+// Phase 3c.ii.b added b-buffer keys; a future phase will widen the
+// pointer-key surface to other registered pointer types.  Scalar /
+// enum-keyed, r-string-keyed, and buffer-keyed lowering are all
+// implemented inline below.
 static void
 lower_dict_literal_pointer_key_stub(ncc_parse_tree_t *literal,
                                     const char *target_type)
@@ -3793,9 +3859,8 @@ lower_dict_literal_pointer_key_stub(ncc_parse_tree_t *literal,
     literal_helper_error(literal, "dict literal",
                          target_type ? target_type : "<unknown>",
                          "dict pointer-key lowering not yet implemented "
-                         "for this pointer type in WP-011 Phase 3c.ii.a; "
-                         "r-string keys are supported; buffer keys "
-                         "coming in 3c.ii.b",
+                         "for this pointer type in WP-011 Phase 3c.ii.b; "
+                         "r-string and buffer keys are supported",
                          nullptr, 0);
 }
 
@@ -3882,7 +3947,7 @@ scalar_type_size_bytes(const char *type)
 typedef enum {
     DICT_KEY_KIND_SCALAR,   // ints, enums — hash via XXH3 over raw bytes.
     DICT_KEY_KIND_RSTRING,  // r"..." — hash via XXH3 over UTF-8 content.
-    DICT_KEY_KIND_BUFFER,   // b"..." — Phase 3c.ii.b; still stubbed.
+    DICT_KEY_KIND_BUFFER,   // b"..." — hash via XXH3 over raw bytes.
     DICT_KEY_KIND_POINTER,  // other pointer types — partial-stub.
     DICT_KEY_KIND_UNSUPPORTED,
 } dict_key_kind_t;
@@ -4069,6 +4134,33 @@ compute_scalar_key_hash(const unsigned char key_bytes[16], size_t ksz,
     *hash_hi = (uint64_t)h.high64;
 }
 
+// WP-011 Phase 3c.ii.b: compute the precomputed buffer-key hash that
+// the helper carries through to the bucket's `hv` slot AND that the
+// buffer-literal's descriptor caches at build time (D-066 perf path).
+// Mirrors `n00b_buffer_hash` in libn00b's `src/core/hash.c:145-153`:
+//
+//   if (!b || !b->byte_len) return n00b_hash_word(0ULL);
+//   return n00b_xxh_convert(XXH3_128bits(b->data, b->byte_len));
+//
+// Conversion is the same little-endian {low64,high64} → {hash_lo,hash_hi}
+// shape that `compute_string_key_hash` and `compute_scalar_key_hash`
+// use.  Empty buffer keys are rejected up-stream (they would map to
+// `n00b_hash_word(0ULL)` and the runtime fallback isn't reproducible
+// at build time without depending on libn00b's `n00b_word_t` layout).
+static void
+compute_buffer_key_hash(const unsigned char *bytes, size_t len,
+                        uint64_t *out_lo, uint64_t *out_hi)
+{
+    if (!bytes || len == 0) {
+        *out_lo = 0;
+        *out_hi = 0;
+        return;
+    }
+    XXH128_hash_t h = XXH3_128bits(bytes, len);
+    *out_lo = (uint64_t)h.low64;
+    *out_hi = (uint64_t)h.high64;
+}
+
 // WP-011 Phase 3c.ii.a: compute the precomputed r-string-key hash that
 // the helper carries through to the bucket's `hv` slot.  Mirrors
 // `n00b_string_hash` in libn00b's `src/core/hash.c`:
@@ -4192,13 +4284,14 @@ build_dict_helper_request(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *site,
 
     // Scan plans for keys[] and values[] arrays.  Scalar-keyed dicts
     // always have POD keys → N00B_GC_SCAN_KIND_NONE.  Pointer-keyed
-    // dicts (r-string keys in Phase 3c.ii.a) need
-    // N00B_GC_SCAN_KIND_ALL so the GC walks the keys[] array of
-    // n00b_string_t pointers.  Value arrays may hold pointer-bearing
-    // aggregates (nested lists, arrays); reuse the array_scan_plan
-    // machinery by treating the dict as a synthetic
+    // dicts (r-string keys in Phase 3c.ii.a, buffer keys in 3c.ii.b)
+    // need N00B_GC_SCAN_KIND_ALL so the GC walks the keys[] array of
+    // n00b_string_t / n00b_buffer_t pointers.  Value arrays may hold
+    // pointer-bearing aggregates (nested lists, arrays); reuse the
+    // array_scan_plan machinery by treating the dict as a synthetic
     // array_type_info_t whose elem_type is the value type.
-    bool  key_is_pointer = (key_kind == DICT_KEY_KIND_RSTRING);
+    bool  key_is_pointer = (key_kind == DICT_KEY_KIND_RSTRING)
+                           || (key_kind == DICT_KEY_KIND_BUFFER);
     char *key_scan_kind  = copy_cstr(key_is_pointer ? "2" : "1");
     char *key_scan_cb    = copy_cstr("nullptr");
     char *key_scan_user  = copy_cstr("nullptr");
@@ -4285,12 +4378,18 @@ build_dict_helper_request(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *site,
                       key_shape_decl_hex,
                       value_scan_kind, value_scan_cb_hex,
                       value_scan_user_hex, value_shape_decl_hex,
-                      // WP-011 Phase 3c.ii.a: r-string-keyed dicts call
-                      // `n00b_hash()` on the key pointer's target at
-                      // runtime (skip_obj_hash=0), but the descriptor's
+                      // WP-011 Phase 3c.ii.a/3c.ii.b: pointer-keyed
+                      // dicts (r-string and buffer) call `n00b_hash()`
+                      // on the key pointer's target at runtime
+                      // (skip_obj_hash=0), but the descriptor's
                       // cached_hash slot lets that call short-circuit;
                       // ncc emits the cached_hash via the helper's
                       // bucket `hv` slot, hence cached_hash_emit=1.
+                      // For buffer keys ncc additionally threads the
+                      // cached_hash into the buffer object descriptor
+                      // via `cached_hash_lo`/`cached_hash_hi` args on
+                      // the buffer literal request (handled in
+                      // `lower_buffer_literal_ref_with_hash`).
                       // Scalar-keyed dicts continue to hash raw key
                       // bytes via XXH3 (skip_obj_hash=1).
                       key_is_pointer ? 0u : 1u,
@@ -4386,10 +4485,13 @@ lower_dict_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
 
     // WP-011 Phase 3c.ii.a: r-string-keyed dicts get full lowering with
     // precomputed XXH3_128bits over UTF-8 content (mirroring
-    // `n00b_string_hash`).  Buffer keys and other pointer-typed keys
-    // still route to the partial-stub until Phase 3c.ii.b lands.
-    if (key_kind == DICT_KEY_KIND_BUFFER
-        || key_kind == DICT_KEY_KIND_POINTER) {
+    // `n00b_string_hash`).
+    // WP-011 Phase 3c.ii.b: buffer-keyed dicts now also get full
+    // lowering, mirroring `n00b_buffer_hash`.  Other pointer-typed
+    // keys (typedef'd struct pointers, etc.) still route to the
+    // partial-stub diagnostic until a future phase lands a generic
+    // pointer-key path.
+    if (key_kind == DICT_KEY_KIND_POINTER) {
         ncc_array_free(pairs_nodes);
         lower_dict_literal_pointer_key_stub(literal, type->object_type);
         return nullptr;
@@ -4400,8 +4502,7 @@ lower_dict_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                      "dict literal key type '%s' is not supported for "
                      "static initialization yet; allowed key types are "
                      "scalar integers/enums (Phase 3c.i), r-string keys "
-                     "(Phase 3c.ii.a), and buffer keys (Phase 3c.ii.b, "
-                     "not yet implemented)",
+                     "(Phase 3c.ii.a), and buffer keys (Phase 3c.ii.b)",
                      type->key_type);
     }
 
@@ -4490,8 +4591,73 @@ lower_dict_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                              found);
             }
 
-            ncc_rstr_static_ref_t rstr =
+            // Pre-flight: build the static ref with cached_hash=0 so
+            // we can read the UTF-8 content, then immediately throw
+            // that result away and rebuild via the `_ex` entrypoint
+            // with the precomputed XXH3 value formatted into the
+            // descriptor's `.cached_hash` slot expression (WP-011
+            // Phase 3c.ii.b realizes D-066's runtime perf path).
+            //
+            // The two-pass shape keeps the helper request's bucket
+            // `hv` slot and the descriptor's cached_hash slot bit-
+            // identical: both come from the same
+            // `compute_string_key_hash` invocation on the same
+            // post-rich-markup bytes.
+            ncc_rstr_static_ref_t rstr_probe =
                 ncc_rstr_build_static_ref(ctx, rstr_calls.data[0]);
+            if (!rstr_probe.decl || !rstr_probe.expr) {
+                ncc_free(rstr_probe.decl);
+                ncc_free(rstr_probe.expr);
+                ncc_free(rstr_probe.content);
+                ncc_array_free(rstr_calls);
+                ncc_array_free(pairs_nodes);
+                dict_pairs_free(pairs, i);
+                array_errorf(key_init,
+                             "could not lower r-string key for "
+                             "dict literal");
+            }
+            if (!rstr_probe.content || rstr_probe.content_len == 0) {
+                ncc_free(rstr_probe.decl);
+                ncc_free(rstr_probe.expr);
+                ncc_free(rstr_probe.content);
+                ncc_array_free(rstr_calls);
+                ncc_array_free(pairs_nodes);
+                dict_pairs_free(pairs, i);
+                array_errorf(key_init,
+                             "empty r-string key for dict literal is "
+                             "not supported (would map to the "
+                             "n00b_hash_word(0) fallback path)");
+            }
+
+            compute_string_key_hash(rstr_probe.content, rstr_probe.content_len,
+                                    &hash_lo, &hash_hi);
+
+            // Drop the probe's outputs; rebuild with the cached_hash
+            // expression threaded through.  The probe's `decl`/`expr`
+            // would otherwise leak generated decls that the static-
+            // ref's `_ex` rebuild renames via a fresh `unique_id`.
+            ncc_free(rstr_probe.decl);
+            ncc_free(rstr_probe.expr);
+            ncc_free(rstr_probe.content);
+
+            char cached_hash_expr[96];
+            // The descriptor template casts this expression to
+            // `n00b_uint128_t`.  We build `((HI<<64)|LO)` so the
+            // resulting integer is bit-identical to the 128-bit
+            // value `XXH3_128bits` produced — which is exactly the
+            // value the runtime probe loop compares against the
+            // bucket `hv` slot.  Using `n00b_uint128_t` casts on
+            // both operands keeps the shift safe (no UB from
+            // shifting a 64-bit value past its width).
+            snprintf(cached_hash_expr, sizeof(cached_hash_expr),
+                     "(((n00b_uint128_t)0x%016llxULL << 64)"
+                     "|(n00b_uint128_t)0x%016llxULL)",
+                     (unsigned long long)hash_hi,
+                     (unsigned long long)hash_lo);
+
+            ncc_rstr_static_ref_t rstr =
+                ncc_rstr_build_static_ref_ex(ctx, rstr_calls.data[0],
+                                             cached_hash_expr);
             ncc_array_free(rstr_calls);
             if (!rstr.decl || !rstr.expr) {
                 ncc_free(rstr.decl);
@@ -4501,26 +4667,100 @@ lower_dict_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                 dict_pairs_free(pairs, i);
                 array_errorf(key_init,
                              "could not lower r-string key for "
-                             "dict literal");
+                             "dict literal (cached_hash pass)");
             }
-            if (!rstr.content || rstr.content_len == 0) {
-                ncc_free(rstr.decl);
-                ncc_free(rstr.expr);
-                ncc_free(rstr.content);
-                ncc_array_free(pairs_nodes);
-                dict_pairs_free(pairs, i);
-                array_errorf(key_init,
-                             "empty r-string key for dict literal is "
-                             "not supported (would map to the "
-                             "n00b_hash_word(0) fallback path)");
-            }
-
-            compute_string_key_hash(rstr.content, rstr.content_len,
-                                    &hash_lo, &hash_hi);
 
             list_push(decls, rstr.decl);
             ncc_free(rstr.content);
             key_expr = rstr.expr;
+        }
+        else if (key_kind == DICT_KEY_KIND_BUFFER) {
+            // WP-011 Phase 3c.ii.b: buffer-keyed dicts mirror the
+            // r-string-keyed path.  Each key must be exactly one
+            // `b"..."` literal (computed / concatenated buffers are
+            // out of scope here, same as r-strings).  ncc decodes
+            // the literal's bytes, hashes them with the same
+            // `XXH3_128bits` sequence `n00b_buffer_hash` uses at
+            // runtime, threads the bucket `hv` slot AND the buffer
+            // object descriptor's `.cached_hash` slot through to
+            // realise D-066's runtime perf path.
+            ncc_array_t(ncc_parse_tree_ptr_t) buf_calls =
+                ncc_array_new(ncc_parse_tree_ptr_t, 1);
+            collect_buflit_calls(key_init, &buf_calls);
+            if (buf_calls.len != 1) {
+                size_t found = buf_calls.len;
+                ncc_array_free(buf_calls);
+                ncc_array_free(pairs_nodes);
+                dict_pairs_free(pairs, i);
+                array_errorf(key_init,
+                             "buffer-keyed dict literal requires each "
+                             "key to be a single `b\"...\"` literal "
+                             "(found %zu buffer literal calls in this "
+                             "key); computed/concatenated buffer keys "
+                             "are not supported in WP-011 Phase 3c.ii.b",
+                             found);
+            }
+
+            // First pass: decode bytes via the helper-backed path
+            // with cached_hash=0 just so we can recover the bytes
+            // (which the prescan stashed into the call subtree);
+            // but to keep parity with the rstring two-pass shape,
+            // we instead grab the bytes directly via the
+            // `out_payload_*` outputs and emit the real request
+            // with the cached_hash threaded through.  That is a
+            // single helper invocation, not two — the helper-
+            // emitted decl already names the buffer object
+            // (`_obj`), so we can splice that as the key expression.
+            unsigned char *bytes_copy   = nullptr;
+            size_t         bytes_len    = 0;
+
+            // Pre-decode the bytes so we know the hash before we
+            // invoke the helper.  We then call
+            // `lower_buffer_literal_ref_with_hash` with the hash
+            // already known; that function decodes the bytes a
+            // second time internally, but the cost is tiny and the
+            // shape stays simple.
+            ncc_buffer_t *probe = ncc_buffer_empty();
+            int probe_count = 0;
+            if (!decode_buflit_call_strings(buf_calls.data[0], probe,
+                                            &probe_count)
+                || probe_count == 0) {
+                ncc_buffer_free(probe);
+                ncc_array_free(buf_calls);
+                ncc_array_free(pairs_nodes);
+                dict_pairs_free(pairs, i);
+                array_errorf(key_init,
+                             "could not decode buffer key for "
+                             "dict literal");
+            }
+            if (probe->byte_len == 0) {
+                ncc_buffer_free(probe);
+                ncc_array_free(buf_calls);
+                ncc_array_free(pairs_nodes);
+                dict_pairs_free(pairs, i);
+                array_errorf(key_init,
+                             "empty buffer key for dict literal is "
+                             "not supported (would map to the "
+                             "n00b_hash_word(0) fallback path)");
+            }
+
+            compute_buffer_key_hash((const unsigned char *)probe->data,
+                                    probe->byte_len, &hash_lo, &hash_hi);
+            ncc_buffer_free(probe);
+
+            // Second pass: emit the static buffer image with the
+            // precomputed cached_hash threaded into the helper's
+            // arg list.  The helper returns the buffer object's
+            // address as the expression (e.g. `&_ncc_buflit_N_obj`).
+            char *buf_expr = lower_buffer_literal_ref_with_hash(
+                ctx, buf_calls.data[0], decls,
+                hash_lo, hash_hi, &bytes_copy, &bytes_len);
+            ncc_array_free(buf_calls);
+            // We have the bytes in `bytes_copy` already; the second
+            // decode is just used for hash-stability cross-check.
+            // No-op out here.
+            ncc_free(bytes_copy);
+            key_expr = buf_expr;
         }
         else {
             key_expr = node_text(key_init);

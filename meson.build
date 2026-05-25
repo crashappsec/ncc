@@ -1009,14 +1009,17 @@ ncc_error_contains_tests = {
     test_dir / 'err_dict_literal_local_mutable.c',
     'non-const local dict literal',
   ],
-  # Phase 3c.ii.a partial-stub: buffer-keyed dict literals route to a
-  # narrower diagnostic until Phase 3c.ii.b implements buffer-key
-  # hashing/emission.  R-string keys are supported as of 3c.ii.a, so
-  # this fixture's trigger is now `d{b"abc": 1}`.  Delete this entry
-  # along with the fixture once 3c.ii.b lands.
+  # Phase 3c.ii.b partial-stub: pointer-keyed dict literals whose
+  # key type is neither n00b_string_t (r-string) nor n00b_buffer_t
+  # (buffer) — e.g., generic struct pointers — still route to a
+  # narrower diagnostic until a future phase widens the pointer-key
+  # surface.  R-string and buffer keys are supported as of 3c.ii.b,
+  # so this fixture's trigger is now `d{nullptr: 1}` over a
+  # `struct foo *` key type.  Delete this entry along with the
+  # fixture once the pointer-key surface widens.
   'err_dict_literal_stub': [
     test_dir / 'err_dict_literal_stub.c',
-    'dict pointer-key lowering not yet implemented for this pointer type in WP-011 Phase 3c.ii.a',
+    'dict pointer-key lowering not yet implemented for this pointer type in WP-011 Phase 3c.ii.b',
   ],
   # Phase 3c.i duplicate-key compile-time rejection (D-065).
   'err_dict_literal_duplicate_key': [
