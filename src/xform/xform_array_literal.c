@@ -393,6 +393,45 @@ dict_type_friendly_name(const dict_type_info_t *info)
     return out;
 }
 
+// WP-011 Phase 3c.iv: parallel friendly-name helpers for list and
+// array diagnostics.  `object_type` is the post-typeid-mangle
+// `struct n00b_list_<HASH>` / `struct ncc_array_<HASH>` form, which
+// is stable but unreadable.  We synthesize `n00b_list_t(<elem>)` /
+// `n00b_array_t(<elem>)` from the recorded element type so error
+// messages name the type the way the user wrote it (or a close
+// paraphrase) instead of leaking the mangled runtime tag or the
+// `_generic_struct typeid(...)` expansion.  Both forms are accepted
+// list/array spellings in user code (the array spelling has two
+// equivalent surface forms `ncc_array_t(T)` and `n00b_array_t(T)`;
+// we standardize on `n00b_array_t(T)` to match the existing
+// diagnostic text in target-mismatch errors).  Returned buffers
+// are owned by the caller; free with `ncc_free`.
+static char *
+list_type_friendly_name(const list_type_info_t *info)
+{
+    if (!info) {
+        return copy_cstr("<unknown list>");
+    }
+    const char *elem = info->elem_type ? info->elem_type : "?";
+    size_t      len  = strlen(elem) + 32;
+    char       *out  = ncc_alloc_size(1, len);
+    snprintf(out, len, "n00b_list_t(%s)", elem);
+    return out;
+}
+
+static char *
+array_type_friendly_name(const array_type_info_t *info)
+{
+    if (!info) {
+        return copy_cstr("<unknown array>");
+    }
+    const char *elem = info->elem_type ? info->elem_type : "?";
+    size_t      len  = strlen(elem) + 32;
+    char       *out  = ncc_alloc_size(1, len);
+    snprintf(out, len, "n00b_array_t(%s)", elem);
+    return out;
+}
+
 static char *
 tag_runtime_name(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tag_node)
 {
@@ -3676,21 +3715,29 @@ lower_array_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                                      exprs.count);
 
         const char *helper = ncc_xform_get_data(ctx)->static_init_helper;
+        // Phase 3c.iv: friendly `n00b_array_t(T)` name in user-facing
+        // diagnostics, paralleling Phase 3c.iii's dict friendly form,
+        // so the missing-helper and helper-failure messages name the
+        // type the user wrote instead of leaking the post-mangle
+        // `struct ncc_array_<HASH>` symbol.
+        char *friendly_type = array_type_friendly_name(type);
         if (!helper || !*helper) {
             list_free(&exprs);
             ncc_array_free(elems);
             array_errorf(literal,
                          "array literal initializer for '%s' requires "
                          "--ncc-static-init-helper=PATH",
-                         type->object_type);
+                         friendly_type);
+            // array_errorf does not return.
         }
 
         char *request = build_array_helper_request(ctx, literal, type,
                                                    elem_array, prefix, &exprs);
         char *helper_decls = nullptr;
         run_literal_static_init_helper(literal, helper, "array literal",
-                                       type->object_type, request,
+                                       friendly_type, request,
                                        &data_expr, &helper_decls);
+        ncc_free(friendly_type);
         list_push(decls, helper_decls);
         ncc_free(request);
 
@@ -3854,13 +3901,20 @@ lower_list_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                                  prefix, list_static_capacity(exprs.count));
 
     const char *helper = ncc_xform_get_data(ctx)->static_init_helper;
+    // Phase 3c.iv: friendly `n00b_list_t(T)` name in user-facing
+    // diagnostics, paralleling Phase 3c.iii's dict friendly form,
+    // so the missing-helper and helper-failure messages name the
+    // type the user wrote instead of leaking the post-mangle
+    // `struct n00b_list_<HASH>` symbol.
+    char *friendly_type = list_type_friendly_name(type);
     if (!helper || !*helper) {
         list_free(&exprs);
         ncc_array_free(elems);
         array_errorf(literal,
                      "list literal initializer for '%s' requires "
                      "--ncc-static-init-helper=PATH",
-                     type->object_type);
+                     friendly_type);
+        // array_errorf does not return.
     }
 
     char *request = build_list_helper_request(ctx, literal, type, prefix,
@@ -3869,8 +3923,9 @@ lower_list_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
     char *expr_name = nullptr;
     char *helper_decls = nullptr;
     run_literal_static_init_helper(literal, helper, "list literal",
-                                   type->object_type, request,
+                                   friendly_type, request,
                                    &expr_name, &helper_decls);
+    ncc_free(friendly_type);
     list_push(decls, helper_decls);
 
     ncc_free(request);

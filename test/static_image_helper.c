@@ -51,6 +51,17 @@ typedef struct {
     dict_pair_t *dict_pairs;
     size_t       dict_pair_count;
     size_t       dict_pair_cap;
+    // WP-011 Phase 3c.iv (ncc test stub buffer cached_hash):
+    // when a b"..." literal is used as a dict key, ncc emits
+    // `arg cached_hash_lo int <val>` / `arg cached_hash_hi int <val>`
+    // alongside the buffer's raw payload (see ncc's
+    // `build_buffer_literal_helper_request`).  The test stub now
+    // captures these so the emitted `n00b_buffer_t` object
+    // descriptor's `.cached_hash` slot is populated to match the
+    // production `n00b_buffer_static_init` helper.  Both halves
+    // default to zero for non-dict-key buffer literals.
+    uint64_t     cached_hash_lo;
+    uint64_t     cached_hash_hi;
 } request_t;
 
 static char *
@@ -338,6 +349,24 @@ parse_request(char *input, request_t *req)
                 };
                 continue;
             }
+            // WP-011 Phase 3c.iv: capture `arg cached_hash_lo int <val>`
+            // / `arg cached_hash_hi int <val>` so the emitted buffer
+            // object descriptor's `.cached_hash` slot matches the
+            // production `n00b_buffer_static_init` helper.  ncc only
+            // emits these for dict-key buffer literals; non-key buffer
+            // literals omit them and both halves stay zero.
+            long long int_val = 0;
+            if (sscanf(line, "arg %127s int %lld", name, &int_val) == 2) {
+                if (strcmp(name, "cached_hash_lo") == 0) {
+                    req->cached_hash_lo = (uint64_t)int_val;
+                }
+                else if (strcmp(name, "cached_hash_hi") == 0) {
+                    req->cached_hash_hi = (uint64_t)int_val;
+                }
+                // Unknown int args are silently ignored to match the
+                // stub's pre-3c.iv tolerance of unrecognized lines.
+                continue;
+            }
             if (sscanf(line, "arg %127s %31s %zu", name, kind, &len) == 3
                 && strcmp(kind, "cinit") == 0) {
                 char *p = line;
@@ -587,7 +616,23 @@ emit_buffer_image(const request_t *req)
     else {
         printf("0");
     }
-    printf(",.flags=1};");
+    printf(",.flags=1");
+    // WP-011 Phase 3c.iv: mirror the production
+    // `n00b_buffer_static_init` helper by emitting `.cached_hash` as a
+    // 128-bit literal assembled from the high/low halves ncc threads
+    // through for dict-key buffer literals.  The production helper
+    // always emits the field (even when both halves are zero); we
+    // emit it conditionally so test fixtures whose stripped-down
+    // `n00b_static_object_desc_t` lacks the `.cached_hash` field stay
+    // compatible (the dict-key buffer case is exercised by future
+    // ncc-only tests whose struct definitions include the field).
+    if (req->cached_hash_lo != 0 || req->cached_hash_hi != 0) {
+        printf(",.cached_hash=(((n00b_uint128_t)0x%016llxULL<<64)"
+               "|(n00b_uint128_t)0x%016llxULL)",
+               (unsigned long long)req->cached_hash_hi,
+               (unsigned long long)req->cached_hash_lo);
+    }
+    printf("};");
     printf("static const n00b_static_object_desc_t * const "
            "%s_obj_entry=&%s_obj_desc;",
            req->prefix, req->prefix);
