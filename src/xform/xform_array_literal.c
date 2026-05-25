@@ -1945,14 +1945,28 @@ compact_type(const char *type)
 static bool
 is_rstr_element_type(ncc_xform_ctx_t *ctx, const char *type)
 {
+    // WP-011 Phase 5a (finding 2): the configured `rstr_string_type`
+    // is usually the *value* type (no `*`), but typeid-extracted dict
+    // key types arrive with the `*` already attached (e.g.
+    // `n00b_string_t *`). Whitespace gets compacted out, but the
+    // trailing `*` does not — so we also accept
+    // `<compacted rstr_string_type>*` as a match. The existing fixed
+    // `_ptr` / `_t_ptr` suffix forms stay; this is purely additive.
     ncc_xform_data_t *data = ncc_xform_get_data(ctx);
     char *compact = compact_type(type);
     char *rstr = compact_type(data->rstr_string_type);
+    size_t rstr_len = strlen(rstr);
+    char *rstr_ptr = ncc_alloc_size(1, rstr_len + 2);
+    memcpy(rstr_ptr, rstr, rstr_len);
+    rstr_ptr[rstr_len]     = '*';
+    rstr_ptr[rstr_len + 1] = '\0';
     bool result = strcmp(compact, rstr) == 0
+        || strcmp(compact, rstr_ptr) == 0
         || strcmp(compact, "ncc_string_ptr_t") == 0
         || strcmp(compact, "ncc_string_t_ptr") == 0
         || strcmp(compact, "n00b_string_ptr_t") == 0
         || strcmp(compact, "n00b_string_t_ptr") == 0;
+    ncc_free(rstr_ptr);
     ncc_free(compact);
     ncc_free(rstr);
     return result;
@@ -4422,7 +4436,19 @@ build_dict_helper_request(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *site,
                       // Scalar-keyed dicts continue to hash raw key
                       // bytes via XXH3 (skip_obj_hash=1).
                       key_is_pointer ? 0u : 1u,
-                      key_is_pointer ? "1" : "no",
+                      // WP-011 Phase 5a: the helper expects 'yes'/'no'
+                      // here (matches its other boolean fields).  Pre-
+                      // Phase 5a no existing fixture exercised this
+                      // path against the strict n00b helper — the
+                      // n00b-side rstr matcher rejected `n00b_string_t *`
+                      // so key_is_pointer was false for the canonical
+                      // key shape, and the ncc-side test helper silently
+                      // ignores this token.  Now that the matcher is
+                      // widened (Phase 5a finding 2) we route to the
+                      // strict helper for the regression test, so the
+                      // wire value must be 'yes'/'no' rather than
+                      // '1'/'0'.
+                      key_is_pointer ? "yes" : "no",
                       pair_count);
 
     for (size_t i = 0; i < pair_count; i++) {
