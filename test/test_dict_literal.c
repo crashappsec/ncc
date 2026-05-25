@@ -15,6 +15,11 @@
 // MUST stay in sync with the helper's emitted designated
 // initializer; see n00b_static-init-helper.c::emit_dict_image.
 
+// WP-011 Phase 3c.ii.a: positive r-string-keyed dict literal coverage
+// (added in addition to the Phase 3c.i scalar-keyed cases below).
+// Buffer-keyed dicts continue to trigger the partial-stub diagnostic
+// — see err_dict_literal_stub.c for that fixture (now using b"...").
+
 #include <assert.h>
 #include <stdatomic.h>
 #include <stddef.h>
@@ -249,6 +254,16 @@ n00b_dict_t(int, int) *ptr_dict = d{42: 4200};
 // Empty dict (D-064 — empty `d{}` is a valid empty dict literal).
 n00b_dict_t(int, int) empty_dict = d{};
 
+// WP-011 Phase 3c.ii.a: r-string-keyed dict.  ncc precomputes the
+// XXH3_128bits hash of each r-string's UTF-8 content (mirroring
+// `n00b_string_hash`) and threads it through the helper's `hash <lo>
+// <hi>` modifier so each pair is slot-assigned by linear probing
+// from `hash & mask` — same path as scalar-keyed dicts, just with
+// pointer keys whose payloads are static `ncc_string_t` instances.
+n00b_dict_t(ncc_string_t *, int) rstr_dict = d{
+    r"foo": 1, r"bar": 2, r"baz": 3
+};
+
 // ----------------------------------------------------------------------------
 // Tiny dict lookup that walks the helper-emitted buckets/keys/values.
 // Mirrors `compute_hash` + the runtime probe loop for scalar keys
@@ -417,6 +432,82 @@ test_pointer_target_dict(void)
     assert(int_dict_lookup(erased_store, 42, &v) && v == 4200);
 }
 
+// WP-011 Phase 3c.ii.a: content-based r-string-keyed lookup.  The
+// runtime n00b dict would call `n00b_string_hash` on the query key
+// pointer (which redirects to the static-range cached_hash when
+// available) and compare keys via `n00b_string_eq` (content equality).
+// This standalone fixture rolls both: hash via XXH3 over the UTF-8
+// content, then linear-probe with content-equality on the stored
+// `ncc_string_t *` keys.  This is the same comparison the runtime
+// would do; the equality is content-based regardless of pointer
+// identity, so two separately-emitted `r"foo"` pointers still match.
+//
+// The bucket's precomputed `hv` is also asserted non-zero per pair —
+// that is the load-bearing evidence that ncc's hash precomputation
+// fed the correct XXH3 value through to the helper's bucket record.
+static int
+rstr_dict_lookup(__n00b_internal_type_erased_store_t *store,
+                 const ncc_string_t *q, int *out)
+{
+    uint32_t       cap    = store->last_slot + 1u;
+    ncc_string_t **keys   = (ncc_string_t **)store->keys;
+    int           *values = (int *)store->values;
+    for (uint32_t s = 0; s < cap; s++) {
+        if (store->buckets[s].hv == (n00b_uint128_t)0) {
+            continue;
+        }
+        ncc_string_t *k = keys[s];
+        if (!k) {
+            continue;
+        }
+        if (k->u8_bytes == q->u8_bytes
+            && memcmp(k->data, q->data, q->u8_bytes) == 0) {
+            *out = values[s];
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void
+test_rstring_keyed_dict(void)
+{
+    auto store = rstr_dict.store;
+    assert(store != nullptr);
+    assert(store->last_slot == 15u);
+    assert(atomic_load_explicit(&store->used_count,
+                                memory_order_relaxed)
+           == 3u);
+    assert(atomic_load_explicit(&rstr_dict.length,
+                                memory_order_relaxed)
+           == 3);
+    // r-string-keyed dicts skip the runtime XXH3 raw-bytes path; the
+    // runtime calls n00b_string_hash on the key pointer instead.
+    assert(rstr_dict.skip_obj_hash == 0);
+
+    auto erased_store =
+        (__n00b_internal_type_erased_store_t *)store;
+    int v;
+    assert(rstr_dict_lookup(erased_store, r"foo", &v) && v == 1);
+    assert(rstr_dict_lookup(erased_store, r"bar", &v) && v == 2);
+    assert(rstr_dict_lookup(erased_store, r"baz", &v) && v == 3);
+    assert(!rstr_dict_lookup(erased_store, r"quux", &v));
+
+    // Every occupied bucket must carry a non-zero precomputed hash —
+    // this is the per-pair `hash <lo> <hi>` modifier coming through
+    // the helper into the `hv` slot.  A zero `hv` would mean ncc
+    // failed to thread the XXH3 result through, leaving the runtime
+    // dict store with no way to slot-match a lookup.
+    uint32_t cap = erased_store->last_slot + 1u;
+    int occupied = 0;
+    for (uint32_t s = 0; s < cap; s++) {
+        if (erased_store->buckets[s].hv != (n00b_uint128_t)0) {
+            occupied++;
+        }
+    }
+    assert(occupied == 3);
+}
+
 static void
 test_empty_dict(void)
 {
@@ -445,6 +536,7 @@ main(void)
     test_aliased_dict();
     test_pointer_target_dict();
     test_empty_dict();
+    test_rstring_keyed_dict();
     (void)dict_length;
     return 0;
 }

@@ -2934,6 +2934,7 @@ lower_rstrings_in_initializer_expr(ncc_xform_ctx_t *ctx,
                                                                calls.data[i]);
         if (!rstr.decl || !rstr.expr) {
             ncc_free(call_text);
+            ncc_free(rstr.content);
             ncc_array_free(calls);
             array_error(init, "could not lower r-string array element",
                         nullptr);
@@ -2945,6 +2946,7 @@ lower_rstrings_in_initializer_expr(ncc_xform_ctx_t *ctx,
             ncc_free(call_text);
             ncc_free(rstr.decl);
             ncc_free(rstr.expr);
+            ncc_free(rstr.content);
             ncc_array_free(calls);
             array_error(init,
                         "could not splice generated r-string reference into "
@@ -2957,6 +2959,7 @@ lower_rstrings_in_initializer_expr(ncc_xform_ctx_t *ctx,
         *expr_inout = rewritten;
         ncc_free(call_text);
         ncc_free(rstr.expr);
+        ncc_free(rstr.content);
     }
 
     ncc_array_free(calls);
@@ -3775,12 +3778,14 @@ lower_list_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
     return expr_name;
 }
 
-// WP-011 Phase 3c.i partial-stub: pointer-keyed dict literals fall
-// back to the same `literal_helper_error()` machinery as the Phase 2
-// stub, but with a narrower message scoped to pointer-key lowering.
-// Phase 3c.ii will implement r-string and b-buffer key hashing/
-// emission and remove this branch.  Scalar/enum-keyed lowering is
-// implemented inline below.
+// WP-011 Phase 3c.ii.a partial-stub: buffer-keyed and other
+// pointer-keyed dict literals fall back to the same
+// `literal_helper_error()` machinery as the original Phase 2 stub,
+// but with a narrower message scoped to the still-unimplemented
+// pointer-key kinds.  Phase 3c.ii.a shipped r-string-key support;
+// Phase 3c.ii.b will add b-buffer keys and remove this branch.
+// Scalar/enum-keyed and r-string-keyed lowering are implemented
+// inline below.
 static void
 lower_dict_literal_pointer_key_stub(ncc_parse_tree_t *literal,
                                     const char *target_type)
@@ -3788,7 +3793,9 @@ lower_dict_literal_pointer_key_stub(ncc_parse_tree_t *literal,
     literal_helper_error(literal, "dict literal",
                          target_type ? target_type : "<unknown>",
                          "dict pointer-key lowering not yet implemented "
-                         "in WP-011 Phase 3c.i; coming in Phase 3c.ii",
+                         "for this pointer type in WP-011 Phase 3c.ii.a; "
+                         "r-string keys are supported; buffer keys "
+                         "coming in 3c.ii.b",
                          nullptr, 0);
 }
 
@@ -3866,9 +3873,17 @@ scalar_type_size_bytes(const char *type)
 // to gate the scalar-only lowering path; pointer-typed keys route to
 // the partial-stub diagnostic so Phase 3c.ii can ship r-string/buffer
 // support without disturbing the scalar path.
+//
+// Phase 3c.ii.a adds DICT_KEY_KIND_RSTRING as a first-class kind so the
+// lowering pass can take the r-string-specific path (XXH3 over UTF-8
+// content, splice a static rstr ref as the key expression) instead of
+// the generic pointer stub.  Buffer keys stay routed to the stub until
+// Phase 3c.ii.b lands.
 typedef enum {
     DICT_KEY_KIND_SCALAR,   // ints, enums — hash via XXH3 over raw bytes.
-    DICT_KEY_KIND_POINTER,  // r-string, buffer, other pointer types.
+    DICT_KEY_KIND_RSTRING,  // r"..." — hash via XXH3 over UTF-8 content.
+    DICT_KEY_KIND_BUFFER,   // b"..." — Phase 3c.ii.b; still stubbed.
+    DICT_KEY_KIND_POINTER,  // other pointer types — partial-stub.
     DICT_KEY_KIND_UNSUPPORTED,
 } dict_key_kind_t;
 
@@ -3877,6 +3892,12 @@ classify_dict_key_type(ncc_xform_ctx_t *ctx, const char *type)
 {
     if (!type || !*type) {
         return DICT_KEY_KIND_UNSUPPORTED;
+    }
+    if (is_rstr_element_type(ctx, type)) {
+        return DICT_KEY_KIND_RSTRING;
+    }
+    if (is_buffer_pointer_element_type(type)) {
+        return DICT_KEY_KIND_BUFFER;
     }
     if (is_static_pointer_type(ctx, type)) {
         return DICT_KEY_KIND_POINTER;
@@ -4048,6 +4069,44 @@ compute_scalar_key_hash(const unsigned char key_bytes[16], size_t ksz,
     *hash_hi = (uint64_t)h.high64;
 }
 
+// WP-011 Phase 3c.ii.a: compute the precomputed r-string-key hash that
+// the helper carries through to the bucket's `hv` slot.  Mirrors
+// `n00b_string_hash` in libn00b's `src/core/hash.c`:
+//
+//   if (!s || !s->u8_bytes || !s->data) return n00b_hash_word(0ULL);
+//   return n00b_xxh_convert(XXH3_128bits(s->data, s->u8_bytes));
+//
+// Conversion: XXH128_hash_t has `{.low64, .high64}`; `n00b_xxh_convert`
+// reinterprets the struct as a 128-bit integer.  On any little-endian
+// host (the only supported target) the low 64 bits map to `low64` and
+// the high 64 bits map to `high64`, so we copy them across directly,
+// the same way `compute_scalar_key_hash` does.
+//
+// MUST NOT be replaced by any other primitive — the runtime branch
+// this mirrors hashes the post-rich-markup UTF-8 bytes, which is what
+// `ncc_rstr_build_static_ref` exposes through its `content` /
+// `content_len` pair so callers in the dict-key path can feed exactly
+// those bytes into XXH3 without re-parsing the r-string literal.
+//
+// Empty-input fallback: when `u8_len == 0` (or `u8_bytes == nullptr`),
+// `n00b_string_hash` returns `n00b_hash_word(0ULL)` — a value this
+// helper cannot replicate without depending on libn00b's `n00b_word_t`
+// layout.  The lowering pass rejects empty r-string keys ahead of
+// time, so this branch returns `(0, 0)` strictly as a placeholder.
+static void
+compute_string_key_hash(const char *u8_bytes, size_t u8_len,
+                        uint64_t *out_lo, uint64_t *out_hi)
+{
+    if (!u8_bytes || u8_len == 0) {
+        *out_lo = 0;
+        *out_hi = 0;
+        return;
+    }
+    XXH128_hash_t h = XXH3_128bits(u8_bytes, u8_len);
+    *out_lo = (uint64_t)h.low64;
+    *out_hi = (uint64_t)h.high64;
+}
+
 typedef struct {
     char *key_expr;
     char *value_expr;
@@ -4082,6 +4141,7 @@ static char *
 build_dict_helper_request(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *site,
                           dict_type_info_t *type, const char *prefix,
                           bool readonly, bool pointer_target,
+                          dict_key_kind_t key_kind,
                           dict_pair_t *pairs, size_t pair_count)
 {
     uint64_t entry_count = (uint64_t)pair_count;
@@ -4131,11 +4191,15 @@ build_dict_helper_request(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *site,
         hex_string(identity_payload_key, strlen(identity_payload_key));
 
     // Scan plans for keys[] and values[] arrays.  Scalar-keyed dicts
-    // always have POD keys → N00B_GC_SCAN_KIND_NONE.  Value arrays may
-    // hold pointer-bearing aggregates (nested lists, arrays); reuse
-    // the array_scan_plan machinery by treating the dict as a
-    // synthetic array_type_info_t whose elem_type is the value type.
-    char *key_scan_kind  = copy_cstr("1");           // NONE
+    // always have POD keys → N00B_GC_SCAN_KIND_NONE.  Pointer-keyed
+    // dicts (r-string keys in Phase 3c.ii.a) need
+    // N00B_GC_SCAN_KIND_ALL so the GC walks the keys[] array of
+    // n00b_string_t pointers.  Value arrays may hold pointer-bearing
+    // aggregates (nested lists, arrays); reuse the array_scan_plan
+    // machinery by treating the dict as a synthetic
+    // array_type_info_t whose elem_type is the value type.
+    bool  key_is_pointer = (key_kind == DICT_KEY_KIND_RSTRING);
+    char *key_scan_kind  = copy_cstr(key_is_pointer ? "2" : "1");
     char *key_scan_cb    = copy_cstr("nullptr");
     char *key_scan_user  = copy_cstr("nullptr");
     char *key_shape_decl = copy_cstr("");
@@ -4206,8 +4270,8 @@ build_dict_helper_request(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *site,
                       "value_scan_cb_hex %s\n"
                       "value_scan_user_hex %s\n"
                       "value_shape_decl_hex %s\n"
-                      "skip_obj_hash 1\n"
-                      "cached_hash_emit no\n"
+                      "skip_obj_hash %u\n"
+                      "cached_hash_emit %s\n"
                       "arg_count %zu\n",
                       pointer_target ? "pointer" : "value",
                       type_hex, type_hash, key_hex, key_hash, value_hex,
@@ -4221,6 +4285,16 @@ build_dict_helper_request(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *site,
                       key_shape_decl_hex,
                       value_scan_kind, value_scan_cb_hex,
                       value_scan_user_hex, value_shape_decl_hex,
+                      // WP-011 Phase 3c.ii.a: r-string-keyed dicts call
+                      // `n00b_hash()` on the key pointer's target at
+                      // runtime (skip_obj_hash=0), but the descriptor's
+                      // cached_hash slot lets that call short-circuit;
+                      // ncc emits the cached_hash via the helper's
+                      // bucket `hv` slot, hence cached_hash_emit=1.
+                      // Scalar-keyed dicts continue to hash raw key
+                      // bytes via XXH3 (skip_obj_hash=1).
+                      key_is_pointer ? 0u : 1u,
+                      key_is_pointer ? "1" : "no",
                       pair_count);
 
     for (size_t i = 0; i < pair_count; i++) {
@@ -4273,14 +4347,18 @@ build_dict_helper_request(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *site,
     return ncc_buffer_take(buf);
 }
 
-// WP-011 Phase 3c.i: full scalar/enum-keyed dict literal lowering.
-// Replaces the Phase 2 stub.  Inspects each key's classified type:
-// scalar/enum keys are precomputed via XXH3_128bits and sent through
-// the helper protocol; pointer keys (any key) route to the Phase
-// 3c.i partial-stub diagnostic so Phase 3c.ii can implement
-// r-string/buffer-key hashing without disturbing the scalar path.
-// Duplicate keys at compile time (D-065) are rejected here by
-// hash comparison so the diagnostic can name BOTH source positions.
+// WP-011 Phase 3c.i+3c.ii.a: scalar/enum and r-string-keyed dict
+// literal lowering.  Inspects each key's classified type: scalar/enum
+// keys are precomputed via XXH3_128bits over raw key bytes (matching
+// `n00b_hash_raw`); r-string keys are precomputed via XXH3_128bits
+// over the post-rich-markup UTF-8 content (matching
+// `n00b_string_hash`).  Both feed the helper's `hash <lo> <hi>` pair
+// modifier so the bucket `hv` field carries the correct value at
+// startup.  Buffer-keyed and other pointer-typed dicts route to the
+// Phase 3c.ii.a partial-stub diagnostic so Phase 3c.ii.b can ship
+// buffer-key hashing without disturbing the existing paths.
+// Duplicate keys at compile time (D-065) are rejected here by hash
+// comparison so the diagnostic can name BOTH source positions.
 static char *
 lower_dict_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                    ncc_parse_tree_t *literal, dict_type_info_t *type,
@@ -4306,7 +4384,12 @@ lower_dict_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
         key_kind = classify_dict_key_type(ctx, type->key_type);
     }
 
-    if (key_kind == DICT_KEY_KIND_POINTER) {
+    // WP-011 Phase 3c.ii.a: r-string-keyed dicts get full lowering with
+    // precomputed XXH3_128bits over UTF-8 content (mirroring
+    // `n00b_string_hash`).  Buffer keys and other pointer-typed keys
+    // still route to the partial-stub until Phase 3c.ii.b lands.
+    if (key_kind == DICT_KEY_KIND_BUFFER
+        || key_kind == DICT_KEY_KIND_POINTER) {
         ncc_array_free(pairs_nodes);
         lower_dict_literal_pointer_key_stub(literal, type->object_type);
         return nullptr;
@@ -4316,9 +4399,9 @@ lower_dict_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
         array_errorf(literal,
                      "dict literal key type '%s' is not supported for "
                      "static initialization yet; allowed key types are "
-                     "scalar integers/enums (Phase 3c.i) and r-string/"
-                     "buffer pointer keys (Phase 3c.ii, not yet "
-                     "implemented)",
+                     "scalar integers/enums (Phase 3c.i), r-string keys "
+                     "(Phase 3c.ii.a), and buffer keys (Phase 3c.ii.b, "
+                     "not yet implemented)",
                      type->key_type);
     }
 
@@ -4374,25 +4457,89 @@ lower_dict_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
         uint32_t col  = 0;
         ncc_xform_first_leaf_pos(key_init, &line, &col);
 
-        // Key expression.  For scalar keys we render the textual form
-        // and also parse the value bytes to feed XXH3.
-        char *key_expr = node_text(key_init);
-        unsigned char key_bytes[16];
-        if (!parse_scalar_key_to_bytes(key_expr, ksz, key_bytes)) {
-            ncc_free(key_expr);
-            ncc_array_free(pairs_nodes);
-            dict_pairs_free(pairs, i);
-            array_errorf(key_init,
-                         "dict literal key for type '%s' must be a "
-                         "compile-time integer/character literal (Phase "
-                         "3c.i scalar-key lowering); non-literal "
-                         "expressions are reserved for a future phase",
-                         type->key_type);
-        }
+        // Key expression and hash.  For scalar keys we render the
+        // textual form and parse the value bytes to feed XXH3.  For
+        // r-string keys (Phase 3c.ii.a) we locate the embedded
+        // `__ncc_rstr(...)` call, emit a static r-string descriptor
+        // via `ncc_rstr_build_static_ref`, push that decl into the
+        // generated decls list, and use the static-ref expression
+        // (e.g., `&_ncc_rs_N`) as the dict key expression.  The hash
+        // matches what `n00b_string_hash` would compute at runtime
+        // (`XXH3_128bits(s->data, s->u8_bytes)`), precomputed by
+        // `ncc_rstr_build_static_ref` from the post-rich-markup
+        // UTF-8 content bytes.
+        char    *key_expr = nullptr;
+        uint64_t hash_lo  = 0;
+        uint64_t hash_hi  = 0;
 
-        uint64_t hash_lo = 0;
-        uint64_t hash_hi = 0;
-        compute_scalar_key_hash(key_bytes, ksz, &hash_lo, &hash_hi);
+        if (key_kind == DICT_KEY_KIND_RSTRING) {
+            ncc_array_t(ncc_parse_tree_ptr_t) rstr_calls =
+                ncc_array_new(ncc_parse_tree_ptr_t, 1);
+            collect_rstr_calls(key_init, &rstr_calls);
+            if (rstr_calls.len != 1) {
+                size_t found = rstr_calls.len;
+                ncc_array_free(rstr_calls);
+                ncc_array_free(pairs_nodes);
+                dict_pairs_free(pairs, i);
+                array_errorf(key_init,
+                             "r-string-keyed dict literal requires each "
+                             "key to be a single `r\"...\"` literal "
+                             "(found %zu r-string calls in this key); "
+                             "computed/concatenated r-string keys are "
+                             "not supported in WP-011 Phase 3c.ii.a",
+                             found);
+            }
+
+            ncc_rstr_static_ref_t rstr =
+                ncc_rstr_build_static_ref(ctx, rstr_calls.data[0]);
+            ncc_array_free(rstr_calls);
+            if (!rstr.decl || !rstr.expr) {
+                ncc_free(rstr.decl);
+                ncc_free(rstr.expr);
+                ncc_free(rstr.content);
+                ncc_array_free(pairs_nodes);
+                dict_pairs_free(pairs, i);
+                array_errorf(key_init,
+                             "could not lower r-string key for "
+                             "dict literal");
+            }
+            if (!rstr.content || rstr.content_len == 0) {
+                ncc_free(rstr.decl);
+                ncc_free(rstr.expr);
+                ncc_free(rstr.content);
+                ncc_array_free(pairs_nodes);
+                dict_pairs_free(pairs, i);
+                array_errorf(key_init,
+                             "empty r-string key for dict literal is "
+                             "not supported (would map to the "
+                             "n00b_hash_word(0) fallback path)");
+            }
+
+            compute_string_key_hash(rstr.content, rstr.content_len,
+                                    &hash_lo, &hash_hi);
+
+            list_push(decls, rstr.decl);
+            ncc_free(rstr.content);
+            key_expr = rstr.expr;
+        }
+        else {
+            key_expr = node_text(key_init);
+            unsigned char key_bytes[16];
+            if (!parse_scalar_key_to_bytes(key_expr, ksz, key_bytes)) {
+                ncc_free(key_expr);
+                ncc_array_free(pairs_nodes);
+                dict_pairs_free(pairs, i);
+                array_errorf(key_init,
+                             "dict literal key for type '%s' must be a "
+                             "compile-time integer/character literal "
+                             "(Phase 3c.i scalar-key lowering); "
+                             "non-literal expressions are reserved for "
+                             "a future phase",
+                             type->key_type);
+            }
+
+            compute_scalar_key_hash(key_bytes, ksz, &hash_lo, &hash_hi);
+        }
 
         // Value expression handling: nested array/list/dict literals
         // recurse through their respective lowering paths; r-string
@@ -4558,6 +4705,7 @@ lower_dict_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
 
     char *request = build_dict_helper_request(ctx, literal, type, prefix,
                                               readonly, pointer_target,
+                                              key_kind,
                                               pairs, pair_count);
     char *expr_name = nullptr;
     char *helper_decls = nullptr;

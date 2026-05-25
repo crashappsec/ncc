@@ -1059,6 +1059,21 @@ ncc_rstr_static_ref_t ncc_rstr_build_static_ref(ncc_xform_ctx_t *ctx,
         get_rstr_static_ref_expr_plain(ctx), all_args, 16);
   }
 
+  // WP-011 Phase 3c.ii.a: copy out the post-rich-markup UTF-8 content
+  // so callers (the dict-key path) can hash it via the same
+  // XXH3_128bits sequence `n00b_string_hash` uses at runtime
+  // (`XXH3_128bits(s->data, s->u8_bytes)`).  The buffer is the bytes
+  // backing the static `ncc_string_t`'s `.data` field — same sequence,
+  // copied here so the caller doesn't need to depend on `tb`'s
+  // lifetime.  Returned via the result struct; caller owns the
+  // allocation.
+  char  *content_copy = nullptr;
+  size_t copy_len     = tb->byte_len;
+  if (copy_len > 0) {
+      content_copy = ncc_alloc_size(1, copy_len);
+      memcpy(content_copy, tb->data, copy_len);
+  }
+
   ncc_static_object_slots_cleanup(&stobj);
   ncc_free(content);
   ncc_free(data_str);
@@ -1068,8 +1083,10 @@ ncc_rstr_static_ref_t ncc_rstr_build_static_ref(ncc_xform_ctx_t *ctx,
   ncc_free(out.items);
 
   return (ncc_rstr_static_ref_t){
-      .decl = decl_str,
-      .expr = expr_str,
+      .decl        = decl_str,
+      .expr        = expr_str,
+      .content     = content_copy,
+      .content_len = copy_len,
   };
 }
 
