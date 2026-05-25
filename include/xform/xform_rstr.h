@@ -24,15 +24,19 @@ typedef struct {
 ncc_rstr_static_ref_t ncc_rstr_build_static_ref(ncc_xform_ctx_t *ctx,
                                                 ncc_parse_tree_t *node);
 
-// WP-011 Phase 3c.ii.b: variant that also fills the descriptor's
+// WP-011 Phase 3c.ii.b / Phase 5d: variant that fills the descriptor's
 // `cached_hash` slot.  `cached_hash_expr` is a C expression string
 // (e.g., a compile-time integer literal) that the rstr template will
-// cast to `n00b_uint128_t` for the `.cached_hash=$N` slot.  Pass
-// `nullptr` (or `"0"`) for non-key emission; pass a precomputed
-// `n00b_uint128_t`-shaped literal for r-string-key emission so the
-// runtime `n00b_hash()` short-circuit (D-066) lands the right value
-// when a dict lookup walks the static range.  String ownership: the
-// caller owns the buffer pointed at by `cached_hash_expr`.
+// cast to `n00b_uint128_t` for the `.cached_hash=$N` slot.
+//
+// Phase 5d changed the default-path contract: pass `nullptr` (or `""`)
+// and the implementation computes XXH3_128bits over the post-rich-
+// markup UTF-8 content and emits an equivalent `_BitInt(128)`
+// expression itself.  Pass a precomputed value to override (e.g., from
+// the dict-key path, which threads the same XXH3 through both the
+// bucket `hv` slot and this expression for bit-identity).  String
+// ownership: the caller owns the buffer pointed at by
+// `cached_hash_expr`.
 ncc_rstr_static_ref_t ncc_rstr_build_static_ref_ex(
     ncc_xform_ctx_t *ctx,
     ncc_parse_tree_t *node,

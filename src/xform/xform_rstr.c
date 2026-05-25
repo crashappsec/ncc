@@ -20,6 +20,70 @@
 #include <stdlib.h>
 #include <string.h>
 
+// WP-011 Phase 5d: vendored XXH3_128bits so every r-string emission
+// site can precompute the descriptor's `.cached_hash` slot.  Matches
+// the runtime branch in `n00b_string_hash` (libn00b src/core/hash.c):
+//
+//   if (!s || !s->u8_bytes || !s->data) return n00b_hash_word(0ULL);
+//   return n00b_xxh_convert(XXH3_128bits(s->data, s->u8_bytes));
+//
+// `n00b_xxh_convert` reinterprets `XXH128_hash_t{low64,high64}` as a
+// 128-bit integer.  We emit the result as a `_BitInt(128)` literal
+// expression and let the rstr template cast it through the
+// descriptor's `.cached_hash` slot — same conversion as
+// `compute_string_key_hash` in xform_array_literal.c.
+#define XXH_INLINE_ALL
+#define XXH_STATIC_LINKING_ONLY
+#include "vendor/xxhash.h"
+
+// =========================================================================
+// WP-011 Phase 5d: cached-hash precomputation for the descriptor's
+// `.cached_hash` slot.
+// =========================================================================
+//
+// Every r-string emission (standalone, list element, struct field,
+// dict key, ...) now populates the descriptor's `cached_hash` slot
+// with the XXH3_128bits of the post-rich-markup UTF-8 content,
+// mirroring `n00b_string_hash` exactly.  Runtime `n00b_hash()`
+// short-circuits on this slot (D-066), so content-equal r-strings
+// produce content-equal hashes regardless of which call site emitted
+// them.
+//
+// Format: `(((n00b_uint128_t)0xHIULL << 64) | (n00b_uint128_t)0xLOULL)`.
+// The descriptor template casts this through `n00b_uint128_t` so the
+// shift is well-defined (both halves are cast to 128 bits before the
+// shift / OR).  The empty-string case (`content_len == 0`) emits "0"
+// — `n00b_string_hash` falls back to `n00b_hash_word(0ULL)` for empty
+// inputs, which we cannot reproduce at ncc compile time without
+// pulling in libn00b's `n00b_word_t` layout.  Empty r-string
+// emissions are pre-Phase-5d behavior (cached_hash unset), so leaving
+// them at 0 preserves the prior short-circuit semantics — a runtime
+// `n00b_hash(rstr)` on an empty r-string still falls through to the
+// vtable, which then takes the `n00b_hash_word(0ULL)` branch.
+//
+// Returned buffer is owned by the caller (free with `ncc_free`).
+static char *
+format_rstr_cached_hash_expr(const char *content, size_t content_len) {
+  if (!content || content_len == 0) {
+    char *out = ncc_alloc_size(1, 2);
+    out[0] = '0';
+    out[1] = '\0';
+    return out;
+  }
+
+  XXH128_hash_t h = XXH3_128bits(content, content_len);
+
+  // Buffer sized to hold `(((n00b_uint128_t)0xHHHHHHHHHHHHHHHHULL <<
+  // 64) | (n00b_uint128_t)0xLLLLLLLLLLLLLLLLULL)` plus terminator.
+  char *out = ncc_alloc_size(1, 96);
+  snprintf(out, 96,
+           "(((n00b_uint128_t)0x%016llxULL << 64)"
+           "|(n00b_uint128_t)0x%016llxULL)",
+           (unsigned long long)h.high64,
+           (unsigned long long)h.low64);
+  return out;
+}
+
 // =========================================================================
 // Access to ncc_xform_data_t fields
 // =========================================================================
@@ -950,10 +1014,13 @@ static ncc_parse_tree_t *find_rstr_call(ncc_parse_tree_t *node) {
 
 ncc_rstr_static_ref_t ncc_rstr_build_static_ref(ncc_xform_ctx_t *ctx,
                                                 ncc_parse_tree_t *node) {
-  // WP-011 Phase 3c.ii.b: default cached_hash expression is "0".  The
-  // descriptor template casts this to `n00b_uint128_t`, so zero-fill
-  // semantics are preserved for non-dict-key call sites.
-  return ncc_rstr_build_static_ref_ex(ctx, node, "0");
+  // WP-011 Phase 5d: the default entry point now delegates to the
+  // `_ex` variant with `nullptr`, which causes `_ex` to compute the
+  // descriptor's `.cached_hash` slot from the post-rich-markup UTF-8
+  // bytes (matching `n00b_string_hash` exactly).  Callers no longer
+  // need to thread a precomputed expression through the default
+  // path — every emission gets the content hash.
+  return ncc_rstr_build_static_ref_ex(ctx, node, nullptr);
 }
 
 ncc_rstr_static_ref_t ncc_rstr_build_static_ref_ex(
@@ -963,14 +1030,6 @@ ncc_rstr_static_ref_t ncc_rstr_build_static_ref_ex(
   ncc_parse_tree_t *call = find_rstr_call(node);
   if (!call) {
     return (ncc_rstr_static_ref_t){0};
-  }
-
-  // WP-011 Phase 3c.ii.b: `cached_hash_expr` defaults to "0" when the
-  // caller routes through the legacy entrypoint.  An empty / NULL
-  // expression is treated as "0" for the same reason — the rstr
-  // template casts the slot to n00b_uint128_t unconditionally.
-  if (!cached_hash_expr || !*cached_hash_expr) {
-    cached_hash_expr = "0";
   }
 
   ncc_parse_tree_t *kid2 = ncc_tree_child(call, 2);
@@ -990,6 +1049,21 @@ ncc_rstr_static_ref_t ncc_rstr_build_static_ref_ex(
   rstr_seg_list_t sl = {0};
   ncc_buffer_t *tb = ncc_buffer_empty();
   parse_rich_markup(content, content_len, &sl, tb);
+
+  // WP-011 Phase 5d: if the caller did not supply a precomputed
+  // cached_hash expression (the dict-key path does — see
+  // xform_array_literal.c), derive one from the post-rich-markup
+  // bytes here so every emitted descriptor carries the same XXH3
+  // content hash a runtime `n00b_string_hash` would compute.  The
+  // dict-key path's explicit expression takes precedence and is
+  // bit-identical (same algorithm over the same bytes).
+  char *computed_cached_hash = nullptr;
+  const char *effective_cached_hash_expr = cached_hash_expr;
+  if (!effective_cached_hash_expr || !*effective_cached_hash_expr) {
+    computed_cached_hash =
+        format_rstr_cached_hash_expr(tb->data, tb->byte_len);
+    effective_cached_hash_expr = computed_cached_hash;
+  }
 
   out_style_list_t out = {0};
   build_style_records(&sl, &out);
@@ -1041,15 +1115,16 @@ ncc_rstr_static_ref_t ncc_rstr_build_static_ref_ex(
     // $8=descriptor $9=entry $10=object_id $11=flags
     // $12=scan_kind $13=scan_cb $14=scan_user $15=entry_attr
     // $16=identity_decl $17=identity_expr
-    // $18=cached_hash (WP-011 Phase 3c.ii.b — descriptor cached_hash
-    //                  expression; "0" for non-dict-key emission).
+    // $18=cached_hash (WP-011 Phase 5d — descriptor cached_hash
+    //                  expression; XXH3_128bits over the post-rich-
+    //                  markup UTF-8 content for every emission).
     const char *all_args[] = {
         style_decls, var_name, bytes_str, data_str,
         cp_str,      styling_str, typehash_str, wrapper_var,
         stobj.desc_name,    stobj.entry_name, stobj.object_id, stobj.flags,
         stobj.scan_kind,    stobj.scan_cb,    stobj.scan_user, stobj.entry_attr,
         stobj.identity_decl, stobj.identity_expr,
-        cached_hash_expr,
+        effective_cached_hash_expr,
     };
 
     decl_str = ncc_static_object_expand_template(
@@ -1065,14 +1140,15 @@ ncc_rstr_static_ref_t ncc_rstr_build_static_ref_ex(
     // $6=descriptor $7=entry $8=object_id $9=flags
     // $10=scan_kind $11=scan_cb $12=scan_user $13=entry_attr
     // $14=identity_decl $15=identity_expr
-    // $16=cached_hash (WP-011 Phase 3c.ii.b — descriptor cached_hash
-    //                  expression; "0" for non-dict-key emission).
+    // $16=cached_hash (WP-011 Phase 5d — descriptor cached_hash
+    //                  expression; XXH3_128bits over the post-rich-
+    //                  markup UTF-8 content for every emission).
     const char *all_args[] = {
         var_name, bytes_str, data_str, cp_str, typehash_str, wrapper_var,
         stobj.desc_name, stobj.entry_name, stobj.object_id, stobj.flags,
         stobj.scan_kind, stobj.scan_cb,    stobj.scan_user, stobj.entry_attr,
         stobj.identity_decl, stobj.identity_expr,
-        cached_hash_expr,
+        effective_cached_hash_expr,
     };
 
     decl_str = ncc_static_object_expand_template(
@@ -1105,6 +1181,9 @@ ncc_rstr_static_ref_t ncc_rstr_build_static_ref_ex(
   ncc_free(sl.segs);
   ncc_buffer_free(tb);
   ncc_free(out.items);
+  if (computed_cached_hash) {
+    ncc_free(computed_cached_hash);
+  }
 
   return (ncc_rstr_static_ref_t){
       .decl        = decl_str,
@@ -1175,6 +1254,16 @@ static ncc_parse_tree_t *xform_rstr(ncc_xform_ctx_t *ctx,
 
   parse_rich_markup(content, content_len, &sl, tb);
 
+  // WP-011 Phase 5d: precompute the descriptor's `.cached_hash` slot
+  // from the post-rich-markup UTF-8 content.  Every r-string emission
+  // (not just dict-key paths) now lands the content-XXH3 in the
+  // descriptor so the runtime `n00b_hash()` short-circuit (D-066)
+  // returns the same value regardless of which call site emitted the
+  // r-string.  See `format_rstr_cached_hash_expr` near the top of this
+  // file for the algorithm and the `_BitInt(128)` literal shape.
+  char *cached_hash_expr =
+      format_rstr_cached_hash_expr(tb->data, tb->byte_len);
+
   // Build style records.
   out_style_list_t out = {0};
 
@@ -1229,10 +1318,9 @@ static ncc_parse_tree_t *xform_rstr(ncc_xform_ctx_t *ctx,
     //              $8=descriptor $9=entry $10=object_id $11=flags
     //              $12=scan_kind $13=scan_cb $14=scan_user $15=entry_attr
     //              $16=identity_decl $17=identity_expr
-    //              $18=cached_hash (WP-011 Phase 3c.ii.b — always
-    //                  "0" for standalone r-string emission; only
-    //                  the static-ref path threads a precomputed
-    //                  XXH3 value here for dict-key emission).
+    //              $18=cached_hash (WP-011 Phase 5d — XXH3_128bits over
+    //                  the post-rich-markup UTF-8 content for every
+    //                  emission, including standalone r-string sites).
     char *style_decls = emit_style_declarations(ctx, &out, uid);
 
     char styling_str[64];
@@ -1244,7 +1332,7 @@ static ncc_parse_tree_t *xform_rstr(ncc_xform_ctx_t *ctx,
         stobj.desc_name,    stobj.entry_name,  stobj.object_id, stobj.flags,
         stobj.scan_kind,    stobj.scan_cb,     stobj.scan_user, stobj.entry_attr,
         stobj.identity_decl, stobj.identity_expr,
-        "0",
+        cached_hash_expr,
     };
     int nslots = ncc_template_slot_count(tmpl_reg, "rstr_styled");
     require_rstr_template_slots("rstr_styled", nslots, 19);
@@ -1257,14 +1345,15 @@ static ncc_parse_tree_t *xform_rstr(ncc_xform_ctx_t *ctx,
     //              $6=descriptor $7=entry $8=object_id $9=flags
     //              $10=scan_kind $11=scan_cb $12=scan_user $13=entry_attr
     //              $14=identity_decl $15=identity_expr
-    //              $16=cached_hash (WP-011 Phase 3c.ii.b — always
-    //                  "0" for standalone r-string emission).
+    //              $16=cached_hash (WP-011 Phase 5d — XXH3_128bits over
+    //                  the post-rich-markup UTF-8 content for every
+    //                  emission, including standalone r-string sites).
     const char *all_args[] = {
         var_name, bytes_str, data_str, cp_str, typehash_str, wrapper_var,
         stobj.desc_name, stobj.entry_name, stobj.object_id, stobj.flags,
         stobj.scan_kind, stobj.scan_cb,    stobj.scan_user, stobj.entry_attr,
         stobj.identity_decl, stobj.identity_expr,
-        "0",
+        cached_hash_expr,
     };
     int nslots = ncc_template_slot_count(tmpl_reg, "rstr_plain");
     require_rstr_template_slots("rstr_plain", nslots, 17);
@@ -1286,6 +1375,7 @@ static ncc_parse_tree_t *xform_rstr(ncc_xform_ctx_t *ctx,
   ncc_free(content);
   ncc_free(data_str);
   ncc_free(typehash_str);
+  ncc_free(cached_hash_expr);
   ncc_free(sl.segs);
   ncc_buffer_free(tb);
   ncc_free(out.items);
