@@ -307,6 +307,29 @@ test_process_run = executable('test_process_run',
 )
 test('process_run', test_process_run, suite : 'ncc', timeout : 10)
 
+# WP-012 Phase 4: drift-prevention regression test that compares the
+# standalone ncc stub helper (test/static_image_helper.c) against the
+# n00b production helper (src/tools/n00b-static-init-helper.c).  The
+# test runs the stub as a subprocess for every representative request
+# shape and, when the n00b helper is available, also runs the same
+# request through production and enforces a field-subset comparison.
+# See test/test_helper_drift.c for the full normalization scheme and
+# the documented tradeoff (subprocess vs golden).  Production-helper
+# absence is treated as a SKIP, not a failure, so CI builds that do
+# not have the n00b workspace mounted still exercise the stub-only
+# sanity path.
+test_helper_drift = executable('test_helper_drift',
+  'test/test_helper_drift.c',
+  c_args : c_args + coverage_args,
+  link_args : coverage_link_args,
+  dependencies : libncc_internal_dep,
+)
+test('helper_drift', test_helper_drift,
+  args : [static_image_helper.full_path()],
+  suite : 'ncc',
+  depends : [static_image_helper],
+)
+
 test_fake_binary_compiler = executable('test_fake_binary_compiler',
   'test/fake_binary_compiler.c',
   c_args : c_args + coverage_args,
