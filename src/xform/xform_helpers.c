@@ -67,6 +67,33 @@ void ncc_xform_first_leaf_pos(ncc_parse_tree_t *node, uint32_t *line,
   }
 }
 
+const char *
+ncc_xform_first_leaf_file(ncc_parse_tree_t *node)
+{
+  if (!node) {
+    return nullptr;
+  }
+
+  if (ncc_tree_is_leaf(node)) {
+    ncc_token_info_t *tok = ncc_tree_leaf_value(node);
+    if (!tok || !ncc_option_is_set(tok->file)) {
+      return nullptr;
+    }
+    ncc_string_t file = ncc_option_get(tok->file);
+    return file.data;
+  }
+
+  size_t nc = ncc_tree_num_children(node);
+  for (size_t i = 0; i < nc; i++) {
+    const char *file = ncc_xform_first_leaf_file(ncc_tree_child(node, i));
+    if (file) {
+      return file;
+    }
+  }
+
+  return nullptr;
+}
+
 
 // ============================================================================
 // NT name check and child search

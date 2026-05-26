@@ -49,12 +49,15 @@ typedef struct ncc_gc_stack_root_t {
 
 typedef struct {
     const char                *compiler;
+    const char                *input_file;
     const char                *constexpr_headers;
     ncc_meta_table_t           func_meta;
     ncc_dict_t                 option_meta;
     ncc_dict_t                 option_decls;
     ncc_dict_t                 generic_struct_decls;
     ncc_dict_t                 array_types;
+    ncc_dict_t                 list_types;
+    ncc_dict_t                 dict_types;
     ncc_dict_t                 gc_aggregate_types;
     ncc_dict_t                 gc_pointer_typedefs;
     ncc_template_registry_t   *template_reg;
@@ -69,6 +72,9 @@ typedef struct {
     const char                *rstr_static_ref_expr_plain;
     const char                *array_literal_data_template;
     const char                *array_literal_data_expr;
+    const char                *static_object_entry_attr;
+    const char                *static_init_helper;
+    bool                       static_identity_generate_namespace;
     bool                       gc_stack_maps;
     bool                       gc_stack_maps_relaxed;
     ncc_gc_stack_root_t       *gc_stack_roots;

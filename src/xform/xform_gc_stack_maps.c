@@ -4,6 +4,7 @@
 #include "lib/buffer.h"
 #include "xform/xform_data.h"
 #include "xform/xform_helpers.h"
+#include "xform/xform_type_layout.h"
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -103,25 +104,9 @@ cstr_has_prefix(const char *s, const char *prefix)
     return s && prefix && strncmp(s, prefix, strlen(prefix)) == 0;
 }
 
-typedef struct {
-    ncc_parse_tree_t **data;
-    size_t             len;
-    size_t             cap;
-} parse_tree_list_t;
-
-typedef struct {
-    uint64_t *data;
-    size_t    len;
-    size_t    cap;
-} uint64_list_t;
-
-typedef struct {
-    char             *key;
-    ncc_parse_tree_t *specifier;
-    char             *offset_type;
-    bool              is_atomic;
-    bool              is_union;
-} aggregate_type_info_t;
+typedef ncc_layout_parse_tree_list_t parse_tree_list_t;
+typedef ncc_layout_uint64_list_t uint64_list_t;
+typedef ncc_layout_aggregate_type_info_t aggregate_type_info_t;
 
 static void
 parse_tree_list_push(parse_tree_list_t *list, ncc_parse_tree_t *node)
@@ -164,6 +149,24 @@ collect_nt_children(ncc_parse_tree_t *node, const char *name,
     size_t nc = ncc_tree_num_children(node);
     for (size_t i = 0; i < nc; i++) {
         collect_nt_children(ncc_tree_child(node, i), name, out);
+    }
+}
+
+static void
+collect_leaf_nodes(ncc_parse_tree_t *node, parse_tree_list_t *out)
+{
+    if (!node) {
+        return;
+    }
+
+    if (ncc_tree_is_leaf(node)) {
+        parse_tree_list_push(out, node);
+        return;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        collect_leaf_nodes(ncc_tree_child(node, i), out);
     }
 }
 
@@ -322,6 +325,28 @@ node_mentions_manual_gc_stack_api(ncc_parse_tree_t *node)
     }
 
     return false;
+}
+
+static ncc_parse_tree_t *
+first_leaf_node(ncc_parse_tree_t *node)
+{
+    if (!node) {
+        return nullptr;
+    }
+
+    if (ncc_tree_is_leaf(node)) {
+        return node;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        ncc_parse_tree_t *leaf = first_leaf_node(ncc_tree_child(node, i));
+        if (leaf) {
+            return leaf;
+        }
+    }
+
+    return nullptr;
 }
 
 static void
@@ -794,6 +819,254 @@ gc_stack_errorf(ncc_parse_tree_t *node, const char *fmt, ...)
 }
 
 static bool
+path_contains_portable(const char *path, const char *needle)
+{
+    if (!path || !needle) {
+        return false;
+    }
+
+    size_t needle_len = strlen(needle);
+    if (needle_len == 0) {
+        return false;
+    }
+
+    for (const char *p = path; *p; p++) {
+        size_t i = 0;
+        while (i < needle_len && p[i]) {
+            char pc = p[i] == '\\' ? '/' : p[i];
+            char nc = needle[i] == '\\' ? '/' : needle[i];
+            if (pc != nc) {
+                break;
+            }
+            i++;
+        }
+        if (i == needle_len) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool
+token_source_is_sanctioned_stw_header(ncc_parse_tree_t *leaf)
+{
+    if (!leaf || !ncc_tree_is_leaf(leaf)) {
+        return false;
+    }
+
+    ncc_token_info_t *tok = ncc_tree_leaf_value(leaf);
+    const char       *file = token_file(tok);
+    return path_contains_portable(file, "include/core/stw.h");
+}
+
+static bool
+leaf_text_is_nonlocal_exit_call(const char *text)
+{
+    return text
+        && (strcmp(text, "setjmp") == 0
+            || strcmp(text, "_setjmp") == 0
+            || strcmp(text, "__sigsetjmp") == 0
+            || strcmp(text, "sigsetjmp") == 0
+            || strcmp(text, "__builtin_setjmp") == 0
+            || strcmp(text, "longjmp") == 0
+            || strcmp(text, "_longjmp") == 0
+            || strcmp(text, "siglongjmp") == 0
+            || strcmp(text, "__builtin_longjmp") == 0);
+}
+
+static bool
+leaf_text_is_setjmp_call(const char *text)
+{
+    return text
+        && (strcmp(text, "setjmp") == 0
+            || strcmp(text, "_setjmp") == 0
+            || strcmp(text, "__sigsetjmp") == 0
+            || strcmp(text, "sigsetjmp") == 0
+            || strcmp(text, "__builtin_setjmp") == 0);
+}
+
+static ncc_parse_tree_t *
+nonlocal_exit_call_leaf(ncc_parse_tree_t *node, ncc_parse_tree_t **call_out)
+{
+    if (!node || ncc_tree_is_leaf(node)
+        || !ncc_xform_nt_name_is(node, "postfix_expression")
+        || ncc_tree_num_children(node) < 3
+        || !ncc_xform_leaf_text_eq(ncc_tree_child(node, 1), "(")) {
+        return nullptr;
+    }
+
+    ncc_parse_tree_t *callee = first_leaf_node(ncc_tree_child(node, 0));
+    if (!callee || !ncc_tree_is_leaf(callee)) {
+        return nullptr;
+    }
+
+    const char *name = ncc_xform_leaf_text(callee);
+    if (!leaf_text_is_nonlocal_exit_call(name)) {
+        return nullptr;
+    }
+
+    if (call_out) {
+        *call_out = node;
+    }
+    return callee;
+}
+
+static bool
+compound_looks_like_stw_run_blocking_macro(ncc_parse_tree_t *compound)
+{
+    if (!compound || ncc_tree_is_leaf(compound)
+        || !ncc_xform_nt_name_is(compound, "compound_statement")) {
+        return false;
+    }
+
+    char *text = node_text(compound);
+    bool  result =
+        strncmp(text, "{ jmp_buf save_state", strlen("{ jmp_buf save_state"))
+            == 0
+        && contains_leaf_text(compound, "setjmp")
+        && contains_leaf_text(compound, "n00b_capture_stack_top")
+        && contains_leaf_text(compound, "_n00b_thread_suspend")
+        && contains_leaf_text(compound, "_n00b_thread_resume")
+        && contains_leaf_text(compound, "longjmp")
+        && contains_leaf_text(compound, "n00b_thread_checkin");
+    ncc_free(text);
+    return result;
+}
+
+static bool
+call_first_argument_is(ncc_parse_tree_t *call, const char *name)
+{
+    if (!call || !name || ncc_tree_is_leaf(call)
+        || ncc_tree_num_children(call) < 3) {
+        return false;
+    }
+
+    ncc_parse_tree_t *args = ncc_tree_child(call, 2);
+    ncc_parse_tree_t *leaf = first_leaf_node(args);
+    return leaf && ncc_tree_is_leaf(leaf)
+        && ncc_xform_leaf_text_eq(leaf, name);
+}
+
+static bool
+setjmp_uses_n00b_nonlocal_api(ncc_parse_tree_t *call)
+{
+    if (!call || ncc_tree_is_leaf(call) || ncc_tree_num_children(call) < 3) {
+        return false;
+    }
+
+    ncc_parse_tree_t *args = ncc_tree_child(call, 2);
+    parse_tree_list_t leaves = {0};
+    collect_leaf_nodes(args, &leaves);
+
+    size_t start = 0;
+    size_t end   = leaves.len;
+    while (start < end && ncc_xform_leaf_text_eq(leaves.data[start], "(")) {
+        start++;
+    }
+    while (end > start && ncc_xform_leaf_text_eq(leaves.data[end - 1], ")")) {
+        end--;
+    }
+
+    bool result = false;
+    if (end > start + 4
+        && ncc_xform_leaf_text_eq(leaves.data[start],
+                                  "n00b_gc_stack_prepare_jmp")
+        && ncc_xform_leaf_text_eq(leaves.data[start + 1], "(")) {
+        int    depth = 0;
+        size_t close = (size_t)-1;
+        for (size_t i = start + 1; i < end; i++) {
+            if (ncc_xform_leaf_text_eq(leaves.data[i], "(")) {
+                depth++;
+            }
+            else if (ncc_xform_leaf_text_eq(leaves.data[i], ")")) {
+                depth--;
+                if (depth == 0) {
+                    close = i;
+                    break;
+                }
+            }
+        }
+
+        result = close != (size_t)-1
+              && close + 3 == end
+              && ncc_xform_leaf_text_eq(leaves.data[close + 1], "->")
+              && ncc_xform_leaf_text_eq(leaves.data[close + 2],
+                                        "n00b_jmp_env");
+    }
+
+    ncc_free(leaves.data);
+    return result;
+}
+
+static bool
+nonlocal_exit_call_is_sanctioned(ncc_parse_tree_t *call,
+                                 ncc_parse_tree_t *leaf,
+                                 bool in_stw_run_blocking_macro)
+{
+    if (token_source_is_sanctioned_stw_header(leaf)) {
+        return true;
+    }
+
+    const char *name = ncc_xform_leaf_text(leaf);
+    if (leaf_text_is_setjmp_call(name) && setjmp_uses_n00b_nonlocal_api(call)) {
+        return true;
+    }
+
+    return in_stw_run_blocking_macro
+        && call_first_argument_is(call, "save_state");
+}
+
+static ncc_parse_tree_t *
+find_unsafe_nonlocal_exit_call_r(ncc_parse_tree_t *node, const char **name_out,
+                                 bool in_stw_run_blocking_macro)
+{
+    if (!node) {
+        return nullptr;
+    }
+
+    if (compound_looks_like_stw_run_blocking_macro(node)) {
+        in_stw_run_blocking_macro = true;
+    }
+
+    ncc_parse_tree_t *call = nullptr;
+    ncc_parse_tree_t *leaf = nonlocal_exit_call_leaf(node, &call);
+    if (leaf) {
+        if (!nonlocal_exit_call_is_sanctioned(call, leaf,
+                                              in_stw_run_blocking_macro)) {
+            if (name_out) {
+                *name_out = ncc_xform_leaf_text(leaf);
+            }
+            return leaf;
+        }
+        return nullptr;
+    }
+
+    if (ncc_tree_is_leaf(node)) {
+        return nullptr;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        ncc_parse_tree_t *found =
+            find_unsafe_nonlocal_exit_call_r(ncc_tree_child(node, i),
+                                             name_out,
+                                             in_stw_run_blocking_macro);
+        if (found) {
+            return found;
+        }
+    }
+
+    return nullptr;
+}
+
+static ncc_parse_tree_t *
+find_unsafe_nonlocal_exit_call(ncc_parse_tree_t *node, const char **name_out)
+{
+    return find_unsafe_nonlocal_exit_call_r(node, name_out, false);
+}
+
+static bool
 decl_is_stack_storage(ncc_parse_tree_t *decl_specs)
 {
     return !contains_leaf_text(decl_specs, "static")
@@ -953,15 +1226,6 @@ struct_or_union_kind_text(ncc_parse_tree_t *su)
     return kind ? node_text(kind) : nullptr;
 }
 
-static bool
-struct_or_union_is_union(ncc_parse_tree_t *su)
-{
-    char *kind = struct_or_union_kind_text(su);
-    bool  r    = kind && strcmp(kind, "union") == 0;
-    ncc_free(kind);
-    return r;
-}
-
 static char *
 aggregate_key_from_specifier(ncc_parse_tree_t *su)
 {
@@ -1002,25 +1266,6 @@ lookup_aggregate_type(ncc_xform_ctx_t *ctx, const char *key)
     bool found = false;
     aggregate_type_info_t *info = ncc_dict_get(types, (void *)key, &found);
     return found ? info : nullptr;
-}
-
-static void
-record_aggregate_type(ncc_xform_ctx_t *ctx, const char *key,
-                      ncc_parse_tree_t *specifier, bool is_atomic,
-                      const char *offset_type)
-{
-    ncc_dict_t *types = gc_aggregate_types(ctx);
-    if (!types || !key || !specifier) {
-        return;
-    }
-
-    aggregate_type_info_t *info = ncc_alloc(aggregate_type_info_t);
-    info->key         = copy_cstr(key);
-    info->specifier   = specifier;
-    info->offset_type = copy_cstr(offset_type ? offset_type : key);
-    info->is_atomic   = is_atomic;
-    info->is_union    = struct_or_union_is_union(specifier);
-    ncc_dict_put(types, info->key, info);
 }
 
 static ncc_parse_tree_t *
@@ -1319,17 +1564,6 @@ pointer_depth_for_declarator(ncc_xform_ctx_t *ctx,
          + pointer_depth_for_specs(ctx, specs);
 }
 
-static void
-record_pointer_typedef(ncc_xform_ctx_t *ctx, const char *name)
-{
-    ncc_dict_t *ptrs = gc_pointer_typedefs(ctx);
-    if (!ptrs || !name || !*name) {
-        return;
-    }
-
-    ncc_dict_put(ptrs, copy_cstr(name), (void *)(uintptr_t)1);
-}
-
 static uint64_t
 count_top_level_initializers(ncc_parse_tree_t *list)
 {
@@ -1434,101 +1668,9 @@ num_words_expr_for_pointer_array(ncc_parse_tree_t *declarator,
 }
 
 static void
-collect_aggregate_definitions(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *node)
-{
-    if (!node || ncc_tree_is_leaf(node)) {
-        return;
-    }
-
-    if (ncc_xform_nt_name_is(node, "struct_or_union_specifier")
-        && aggregate_specifier_has_members(node)) {
-        if (!node_starts_in_system_header(node)) {
-            char *key = aggregate_key_from_specifier(node);
-            if (key) {
-                record_aggregate_type(ctx, key, node, false, key);
-                ncc_free(key);
-            }
-        }
-    }
-
-    size_t nc = ncc_tree_num_children(node);
-    for (size_t i = 0; i < nc; i++) {
-        collect_aggregate_definitions(ctx, ncc_tree_child(node, i));
-    }
-}
-
-static void
-collect_typedef_aliases_from_decl(ncc_xform_ctx_t *ctx,
-                                  ncc_parse_tree_t *decl)
-{
-    ncc_parse_tree_t *decl_specs = ncc_xform_find_child_nt(
-        decl, "declaration_specifiers");
-    ncc_parse_tree_t *list = ncc_xform_find_child_nt(decl,
-                                                     "init_declarator_list");
-    if (!decl_specs || !list || !contains_leaf_text(decl_specs, "typedef")) {
-        return;
-    }
-
-    parse_tree_list_t inits = {0};
-    collect_nt_children(list, "init_declarator", &inits);
-
-    for (size_t i = 0; i < inits.len; i++) {
-        ncc_parse_tree_t *declarator = ncc_xform_find_child_nt(
-            inits.data[i], "declarator");
-        char *name = declarator_name(declarator);
-        if (!name) {
-            continue;
-        }
-
-        if (pointer_depth_in_declarator(declarator) > 0
-            || decl_specs_use_pointer_typedef(ctx, decl_specs)) {
-            record_pointer_typedef(ctx, name);
-            ncc_free(name);
-            continue;
-        }
-
-        ncc_parse_tree_t *aggregate = aggregate_spec_from_specs(ctx,
-                                                                decl_specs);
-        if (aggregate) {
-            bool  is_atomic   = specs_have_atomic_type_wrapper(decl_specs);
-            char *offset_type = is_atomic
-                                  ? aggregate_offset_type_from_specs(ctx,
-                                                                     decl_specs)
-                                  : nullptr;
-            record_aggregate_type(ctx, name, aggregate, is_atomic,
-                                  offset_type ? offset_type : name);
-            ncc_free(offset_type);
-        }
-
-        ncc_free(name);
-    }
-
-    ncc_free(inits.data);
-}
-
-static void
-collect_typedef_aliases(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *node)
-{
-    if (!node || ncc_tree_is_leaf(node)) {
-        return;
-    }
-
-    if (ncc_xform_nt_name_is(node, "declaration")
-        && !node_starts_in_system_header(node)) {
-        collect_typedef_aliases_from_decl(ctx, node);
-    }
-
-    size_t nc = ncc_tree_num_children(node);
-    for (size_t i = 0; i < nc; i++) {
-        collect_typedef_aliases(ctx, ncc_tree_child(node, i));
-    }
-}
-
-static void
 collect_gc_type_info(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu)
 {
-    collect_aggregate_definitions(ctx, tu);
-    collect_typedef_aliases(ctx, tu);
+    ncc_layout_collect_type_info(ctx, tu);
 }
 
 static ncc_gc_stack_root_t *
@@ -2294,6 +2436,8 @@ scan_function_definition(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *fn)
         || cstr_has_prefix(fname, "_n00b_thread_")
         || cstr_has_prefix(fname, "n00b_capture_stack_")
         || cstr_has_prefix(fname, "n00b_futex_")
+        || strcmp(fname, "n00b_collect") == 0
+        || strcmp(fname, "n00b_longjmp") == 0
         || strcmp(fname, "_n00b_stop_the_world") == 0
         || strcmp(fname, "_n00b_restart_the_world") == 0
         || strcmp(fname, "n00b_wait_for_stw_release") == 0
@@ -2302,6 +2446,19 @@ scan_function_definition(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *fn)
         || cstr_has_prefix(fname, "ncplane_")) {
         ncc_free(fname);
         return;
+    }
+
+    const char *nonlocal_name = nullptr;
+    ncc_parse_tree_t *bad_nonlocal =
+        find_unsafe_nonlocal_exit_call(compound, &nonlocal_name);
+    if (bad_nonlocal) {
+        gc_stack_errorf(bad_nonlocal,
+                        "unsafe non-local exit call '%s' in function '%s' is "
+                        "not supported with n00b GC stack maps; use "
+                        "n00b_setjmp()/n00b_longjmp(), a sanctioned n00b "
+                        "safepoint wrapper, compile this function without "
+                        "stack maps, or use ordinary error propagation",
+                        nonlocal_name ? nonlocal_name : "<unknown>", fname);
     }
 
     ncc_parse_tree_t *params = first_descendant_nt(declarator,

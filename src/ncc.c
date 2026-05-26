@@ -61,6 +61,7 @@ extern void ncc_register_typehash_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_once_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_bang_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_rstr_xform(ncc_xform_registry_t *reg);
+extern void ncc_register_static_image_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_gc_stack_maps_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_constexpr_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_constexpr_paste_xform(ncc_xform_registry_t *reg);
@@ -233,6 +234,7 @@ typedef struct {
     bool         dump_output;
     bool         gc_stack_maps;
     bool         gc_stack_maps_relaxed;
+    bool         static_identity_generate_namespace;
 
     // Dependency file generation (handled separately from compilation).
     bool         has_dep_flags; // -MD or -MMD present
@@ -250,6 +252,8 @@ typedef struct {
     const char  *rstr_static_ref_expr_plain;
     const char  *array_literal_data_template;
     const char  *array_literal_data_expr;
+    const char  *static_object_entry_attr;
+    const char  *static_init_helper;
 
     // vargs/once/rstr overrides (CLI > meson define > default).
     const char  *vargs_type;
@@ -583,6 +587,25 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
                 continue;
             }
         }
+        {
+            static const char prefix[] = "--ncc-static-object-entry-attr=";
+            if (strncmp(arg, prefix, sizeof(prefix) - 1) == 0) {
+                opts->static_object_entry_attr =
+                    arg + sizeof(prefix) - 1;
+                continue;
+            }
+        }
+        {
+            static const char prefix[] = "--ncc-static-init-helper=";
+            if (strncmp(arg, prefix, sizeof(prefix) - 1) == 0) {
+                opts->static_init_helper = arg + sizeof(prefix) - 1;
+                continue;
+            }
+        }
+        if (strcmp(arg, "--ncc-static-identity-generate-namespace") == 0) {
+            opts->static_identity_generate_namespace = true;
+            continue;
+        }
         if (strncmp(arg, "--ncc-vargs-type=", 17) == 0) {
             opts->vargs_type = arg + 17;
             continue;
@@ -774,9 +797,20 @@ print_help(void)
         "                       Override r-string address expressions used by\n"
         "                       array literal static initializers\n"
         "  --ncc-array-literal-data-template=TMPL\n"
-        "                       Override array literal backing storage template\n"
+        "                       Legacy compatibility flag; ignored by\n"
+        "                       helper-backed array literals\n"
         "  --ncc-array-literal-data-expr=EXPR\n"
-        "                       Override expression used as array .data pointer\n"
+        "                       Legacy compatibility flag; ignored by\n"
+        "                       helper-backed array literals\n"
+        "  --ncc-static-object-entry-attr=ATTR\n"
+        "                       Attribute text for generated static-object\n"
+        "                       descriptor section entries\n"
+        "  --ncc-static-init-helper=PATH\n"
+        "                       Build-time helper for constructor-backed\n"
+        "                       static image literals\n"
+        "  --ncc-static-identity-generate-namespace\n"
+        "                       Write .namespace.toml beside the source file\n"
+        "                       when stable static identity metadata is absent\n"
         "\n"
         "Standard flags:\n"
         "  -E                   Preprocess + transform, emit C to stdout\n"
@@ -944,7 +978,9 @@ wrap_system_headers(const char *src, size_t src_len, size_t *out_len)
 }
 
 // ============================================================================
-// Pre-CPP scan: r"..." → __ncc_rstr("...")
+// Pre-CPP scan:
+//   r"..." -> __ncc_rstr("...")
+//   b"..." -> __ncc_buflit("...")
 // ============================================================================
 
 static bool
@@ -955,31 +991,31 @@ is_id_char(char c)
 }
 
 /**
- * @brief Rewrite r"..." to __ncc_rstr("...") in a source buffer.
+ * @brief Rewrite ncc prefixed string literals in a source buffer.
  *
  * Scans the raw source before the C preprocessor runs. Tracks comment
- * and string context to avoid false matches. Handles adjacent string
- * concatenation (r"a" "b" → __ncc_rstr("a" "b")).
+ * and string context to avoid false matches. Handles adjacent ordinary
+ * string concatenation (r"a" "b" -> __ncc_rstr("a" "b")).
  *
- * Returns a new buffer if any r"..." were found (caller frees old),
+ * Returns a new buffer if any supported prefixed literals were found,
  * or the original buffer unchanged.
  */
 static char *
-rstr_prescan(char *src, size_t len, size_t *out_len)
+ncc_literal_prescan(char *src, size_t len, size_t *out_len)
 {
-    // Quick check: does the buffer contain r" at all?
-    bool has_rstr = false;
+    // Quick check: does the buffer contain r" or b" at all?
+    bool has_prefixed_literal = false;
 
     for (size_t i = 0; i + 1 < len; i++) {
-        if (src[i] == 'r' && src[i + 1] == '"') {
+        if ((src[i] == 'r' || src[i] == 'b') && src[i + 1] == '"') {
             if (i == 0 || !is_id_char(src[i - 1])) {
-                has_rstr = true;
+                has_prefixed_literal = true;
                 break;
             }
         }
     }
 
-    if (!has_rstr) {
+    if (!has_prefixed_literal) {
         *out_len = len;
         return src;
     }
@@ -1022,16 +1058,20 @@ rstr_prescan(char *src, size_t len, size_t *out_len)
                 i++;
                 continue;
             }
-            // r"..." match?
-            if (src[i] == 'r' && i + 1 < len && src[i + 1] == '"') {
+            // r"..." / b"..." match?
+            if ((src[i] == 'r' || src[i] == 'b')
+                && i + 1 < len && src[i + 1] == '"') {
                 if (i == 0 || !is_id_char(src[i - 1])) {
+                    const char *callee = src[i] == 'r'
+                                       ? "__ncc_rstr("
+                                       : "__ncc_buflit(";
                     // Flush everything before the 'r'.
                     if (i > flush_from) {
                         ncc_buffer_append(buf, src + flush_from, i - flush_from);
                     }
-                    // Emit __ncc_rstr( instead of r.
-                    ncc_buffer_append(buf, "__ncc_rstr(", 11);
-                    i++; // skip the 'r', keep the '"'
+                    // Emit the internal call instead of the prefix.
+                    ncc_buffer_append(buf, callee, strlen(callee));
+                    i++; // skip the prefix, keep the '"'
 
                     // Scan forward to find the end of the string.
                     size_t str_start = i;
@@ -1171,9 +1211,9 @@ run_preprocessor(const ncc_opts_t *opts, size_t *out_len)
 
     ncc_verbose("preprocess: read %zu bytes from %s", raw_len, input_file);
 
-    // Prescan: rewrite r"..." → __ncc_rstr("...") before CPP.
+    // Prescan: rewrite ncc prefixed literals before CPP.
     // This must happen on the raw source before preprocessing.
-    char  *wrapped     = rstr_prescan(raw_src, raw_len, &raw_len);
+    char  *wrapped     = ncc_literal_prescan(raw_src, raw_len, &raw_len);
     size_t wrapped_len = raw_len;
 
     // Prepend a line marker so CPP attributes output to the original file.
@@ -1938,6 +1978,7 @@ compile_file(ncc_opts_t *opts)
     ncc_register_once_xform(&xreg);
     ncc_register_bang_xform(&xreg);
     ncc_register_rstr_xform(&xreg);
+    ncc_register_static_image_xform(&xreg);
     ncc_register_gc_stack_maps_xform(&xreg);
     ncc_register_constexpr_xform(&xreg);
     ncc_register_constexpr_paste_xform(&xreg);
@@ -1964,6 +2005,7 @@ compile_file(ncc_opts_t *opts)
     static const char *default_array_literal_data_template =
         "static $0 $1[]={$3};";
     static const char *default_array_literal_data_expr = "$1";
+    static const char *default_static_object_entry_attr = "";
 
     // Resolution order: CLI flag > meson define > built-in default.
     const char *rstr_styled = default_rstr_styled;
@@ -1979,6 +2021,8 @@ compile_file(ncc_opts_t *opts)
     const char *array_literal_data_template =
         default_array_literal_data_template;
     const char *array_literal_data_expr = default_array_literal_data_expr;
+    const char *static_object_entry_attr =
+        default_static_object_entry_attr;
 
 #ifdef NCC_RSTR_TEMPLATE_STYLED
     rstr_styled = NCC_RSTR_TEMPLATE_STYLED;
@@ -2004,6 +2048,9 @@ compile_file(ncc_opts_t *opts)
 #ifdef NCC_ARRAY_LITERAL_DATA_EXPR
     array_literal_data_expr = NCC_ARRAY_LITERAL_DATA_EXPR;
 #endif
+#ifdef NCC_STATIC_OBJECT_ENTRY_ATTR
+    static_object_entry_attr = NCC_STATIC_OBJECT_ENTRY_ATTR;
+#endif
 
     if (opts->rstr_template_styled) {
         rstr_styled = opts->rstr_template_styled;
@@ -2028,6 +2075,9 @@ compile_file(ncc_opts_t *opts)
     }
     if (opts->array_literal_data_expr) {
         array_literal_data_expr = opts->array_literal_data_expr;
+    }
+    if (opts->static_object_entry_attr) {
+        static_object_entry_attr = opts->static_object_entry_attr;
     }
 
     ncc_template_register(&tmpl_reg, "rstr_styled",
@@ -2117,6 +2167,7 @@ compile_file(ncc_opts_t *opts)
     ncc_xform_ctx_init(&xctx, g, &xreg, tree);
     ncc_xform_data_t xdata = {
         .compiler          = opts->compiler,
+        .input_file        = opts->input_file,
         .constexpr_headers = opts->constexpr_headers,
         .func_meta         = {0},
         .template_reg      = &tmpl_reg,
@@ -2131,6 +2182,10 @@ compile_file(ncc_opts_t *opts)
         .rstr_static_ref_expr_plain  = rstr_static_ref_expr_plain,
         .array_literal_data_template = array_literal_data_template,
         .array_literal_data_expr     = array_literal_data_expr,
+        .static_object_entry_attr    = static_object_entry_attr,
+        .static_init_helper          = opts->static_init_helper,
+        .static_identity_generate_namespace =
+            opts->static_identity_generate_namespace,
         .gc_stack_maps               = opts->gc_stack_maps,
         .gc_stack_maps_relaxed       = opts->gc_stack_maps_relaxed,
     };
@@ -2141,6 +2196,10 @@ compile_file(ncc_opts_t *opts)
     ncc_dict_init(&xdata.generic_struct_decls,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
     ncc_dict_init(&xdata.array_types,
+                            ncc_hash_cstring, ncc_dict_cstr_eq);
+    ncc_dict_init(&xdata.list_types,
+                            ncc_hash_cstring, ncc_dict_cstr_eq);
+    ncc_dict_init(&xdata.dict_types,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
     ncc_dict_init(&xdata.gc_aggregate_types,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
@@ -2162,6 +2221,8 @@ compile_file(ncc_opts_t *opts)
     ncc_dict_free(&xdata.option_decls);
     ncc_dict_free(&xdata.generic_struct_decls);
     ncc_dict_free(&xdata.array_types);
+    ncc_dict_free(&xdata.list_types);
+    ncc_dict_free(&xdata.dict_types);
     ncc_dict_free(&xdata.gc_aggregate_types);
     ncc_dict_free(&xdata.gc_pointer_typedefs);
     free_gc_stack_roots(xdata.gc_stack_roots);

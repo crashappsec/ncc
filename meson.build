@@ -91,6 +91,10 @@ array_literal_data_expr = get_option('array_literal_data_expr')
 if array_literal_data_expr != ''
   c_args += ['-DNCC_ARRAY_LITERAL_DATA_EXPR="' + array_literal_data_expr + '"']
 endif
+static_object_entry_attr = get_option('static_object_entry_attr')
+if static_object_entry_attr != ''
+  c_args += ['-DNCC_STATIC_OBJECT_ENTRY_ATTR="' + static_object_entry_attr + '"']
+endif
 vargs_type_opt = get_option('vargs_type')
 if vargs_type_opt != ''
   c_args += ['-DNCC_VARGS_TYPE="' + vargs_type_opt + '"']
@@ -182,6 +186,9 @@ src_xform = files(
   'src/xform/xform_option.c',
   'src/xform/xform_rpc.c',
   'src/xform/xform_rstr.c',
+  'src/xform/xform_static_image.c',
+  'src/xform/xform_static_object.c',
+  'src/xform/xform_type_layout.c',
   'src/xform/xform_typeid.c',
   'src/xform/xform_typestr.c',
   'src/xform/xform_typehash.c',
@@ -242,6 +249,15 @@ ncc_exe = executable('ncc',
 test_runner = find_program('test/run_test.sh')
 test_dir    = meson.current_source_dir() / 'test'
 
+static_image_helper = executable('test_static_image_helper',
+  'test/static_image_helper.c',
+  c_args : c_args + coverage_args,
+  link_args : coverage_link_args,
+)
+static_image_helper_flags = [
+  '--ncc-static-init-helper=' + static_image_helper.full_path(),
+]
+
 # Library-level tests (link against libncc directly)
 test_pwz = executable('test_pwz',
   'test/test_pwz.c',
@@ -291,6 +307,29 @@ test_process_run = executable('test_process_run',
 )
 test('process_run', test_process_run, suite : 'ncc', timeout : 10)
 
+# WP-012 Phase 4: drift-prevention regression test that compares the
+# standalone ncc stub helper (test/static_image_helper.c) against the
+# n00b production helper (src/tools/n00b-static-init-helper.c).  The
+# test runs the stub as a subprocess for every representative request
+# shape and, when the n00b helper is available, also runs the same
+# request through production and enforces a field-subset comparison.
+# See test/test_helper_drift.c for the full normalization scheme and
+# the documented tradeoff (subprocess vs golden).  Production-helper
+# absence is treated as a SKIP, not a failure, so CI builds that do
+# not have the n00b workspace mounted still exercise the stub-only
+# sanity path.
+test_helper_drift = executable('test_helper_drift',
+  'test/test_helper_drift.c',
+  c_args : c_args + coverage_args,
+  link_args : coverage_link_args,
+  dependencies : libncc_internal_dep,
+)
+test('helper_drift', test_helper_drift,
+  args : [static_image_helper.full_path()],
+  suite : 'ncc',
+  depends : [static_image_helper],
+)
+
 test_fake_binary_compiler = executable('test_fake_binary_compiler',
   'test/fake_binary_compiler.c',
   c_args : c_args + coverage_args,
@@ -330,10 +369,22 @@ ncc_test_flags = [
   '-I' + ncc_include_dir,
 ]
 
+ncc_static_descriptor_flags = [
+  '--ncc-static-object-entry-attr=__attribute__((used))',
+  '--ncc-rstr-template-styled=({$0 static ncc_string_t $1={.u8_bytes=$2,.data=$3,.codepoints=$4,.styling=$5};$16 static const n00b_static_object_desc_t $8={.start=(const void*)&$1,.len=(uint64_t)sizeof($1),.tinfo=$6,.scan_kind=$12,.scan_cb=$13,.scan_user=$14,.object_id=$10,.file=__FILE__,.identity=$17,.flags=$11};static const n00b_static_object_desc_t * const $9 $15=&$8;&$1;})',
+  '--ncc-rstr-template-plain=({static ncc_string_t $0={.u8_bytes=$1,.data=$2,.codepoints=$3,.styling=((void*)0)};$14 static const n00b_static_object_desc_t $6={.start=(const void*)&$0,.len=(uint64_t)sizeof($0),.tinfo=$4,.scan_kind=$10,.scan_cb=$11,.scan_user=$12,.object_id=$8,.file=__FILE__,.identity=$15,.flags=$9};static const n00b_static_object_desc_t * const $7 $13=&$6;&$0;})',
+  '--ncc-rstr-static-ref-template-styled=$0 static ncc_string_t $1={.u8_bytes=$2,.data=$3,.codepoints=$4,.styling=$5};$16 static const n00b_static_object_desc_t $8={.start=(const void*)&$1,.len=(uint64_t)sizeof($1),.tinfo=$6,.scan_kind=$12,.scan_cb=$13,.scan_user=$14,.object_id=$10,.file=__FILE__,.identity=$17,.flags=$11};static const n00b_static_object_desc_t * const $9 $15=&$8;',
+  '--ncc-rstr-static-ref-template-plain=static ncc_string_t $0={.u8_bytes=$1,.data=$2,.codepoints=$3,.styling=((void*)0)};$14 static const n00b_static_object_desc_t $6={.start=(const void*)&$0,.len=(uint64_t)sizeof($0),.tinfo=$4,.scan_kind=$10,.scan_cb=$11,.scan_user=$12,.object_id=$8,.file=__FILE__,.identity=$15,.flags=$9};static const n00b_static_object_desc_t * const $7 $13=&$6;',
+  '--ncc-array-literal-data-template=$13 static $0 $1[]={$3};$20 static const n00b_static_object_desc_t $15={.start=(const void*)$1,.len=(uint64_t)sizeof($1),.tinfo=$4,.scan_kind=$6,.scan_cb=$7,.scan_user=$8,.object_id=$17,.file=__FILE__,.identity=$21,.flags=$18};static const n00b_static_object_desc_t * const $16 $19=&$15;',
+]
+
 # Compiler-level tests (run through ncc executable)
 ncc_compile_tests = {
   'bang':          ['compile_run',  test_dir / 'test_bang.c'],
   'array_literal': ['compile_run',  test_dir / 'test_array_literal.c'],
+  'list_literal':  ['compile_run',  test_dir / 'test_list_literal.c'],
+  'dict_literal':  ['compile_run',  test_dir / 'test_dict_literal.c'],
+  'static_image': ['compile_run', test_dir / 'test_static_image.c'],
   'constexpr':    ['compile_run',  test_dir / 'test_constexpr.c'],
   'kargs':        ['compile_run',  test_dir / 'test_kargs.c'],
   'kargs_vargs':  ['compile_run',  test_dir / 'test_kargs_vargs.c'],
@@ -358,12 +409,107 @@ ncc_compile_tests = {
 }
 
 foreach name, params : ncc_compile_tests
+  extra_args = []
+  test_deps = [ncc_exe]
+  if name == 'static_image' or name == 'list_literal' or name == 'array_literal' or name == 'dict_literal'
+    extra_args = static_image_helper_flags
+    test_deps += [static_image_helper]
+  endif
   test('ncc_' + name, test_runner,
-    args : [ncc_exe, params[0], params[1]] + ncc_test_flags,
+    args : [ncc_exe, params[0], params[1]] + ncc_test_flags + extra_args,
     suite : 'ncc',
-    depends : ncc_exe,
+    depends : test_deps,
   )
 endforeach
+
+test('ncc_static_object_descriptors', test_runner,
+  args : [ncc_exe, 'compile_run',
+          test_dir / 'test_static_object_descriptors.c']
+         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
+  suite : 'ncc',
+  depends : [ncc_exe, static_image_helper],
+)
+
+test('ncc_static_object_descriptors_array_desc', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_static_object_descriptors.c',
+          'n00b_static_object_desc_t __ncc_arraylit_']
+         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
+  suite : 'ncc',
+  depends : [ncc_exe, static_image_helper],
+)
+
+test('ncc_static_object_descriptors_rstr_desc', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_static_object_descriptors.c',
+          'n00b_static_object_desc_t _ncc_rsd_']
+         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
+  suite : 'ncc',
+  depends : [ncc_exe, static_image_helper],
+)
+
+test('ncc_static_object_descriptors_pointer_scan', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_static_object_descriptors.c',
+          '.scan_kind = 2']
+         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
+  suite : 'ncc',
+  depends : [ncc_exe, static_image_helper],
+)
+
+test('ncc_static_object_descriptors_nested_scan', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_static_object_descriptors.c',
+          'n00b_gc_scan_cb_struct_field']
+         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
+  suite : 'ncc',
+  depends : [ncc_exe, static_image_helper],
+)
+
+test('ncc_static_object_descriptors_sparse_scan', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_static_object_descriptors.c',
+          'n00b_gc_scan_cb_struct_layout']
+         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
+  suite : 'ncc',
+  depends : [ncc_exe, static_image_helper],
+)
+
+test('ncc_static_object_descriptors_sparse_offset', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_static_object_descriptors.c',
+          '__builtin_offsetof (descriptor_sparse_item_t, left)']
+         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
+  suite : 'ncc',
+  depends : [ncc_exe, static_image_helper],
+)
+
+test('ncc_static_object_descriptors_entry_attr', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_static_object_descriptors.c',
+          '__attribute__ ((used))']
+         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
+  suite : 'ncc',
+  depends : [ncc_exe, static_image_helper],
+)
+
+test('ncc_static_image_response_contract', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_static_image.c',
+          'n00b_static_image_response_t __ncc_static_image_']
+         + ncc_test_flags + static_image_helper_flags,
+  suite : 'ncc',
+  depends : [ncc_exe, static_image_helper],
+)
+
+test('ncc_static_image_dependency_contract', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_static_image.c',
+          '.dependency_count = 1']
+         + ncc_test_flags + static_image_helper_flags,
+  suite : 'ncc',
+  depends : [ncc_exe, static_image_helper],
+)
 
 if host_machine.system() != 'windows' and cc.has_header('pthread.h')
   test('ncc_constexpr_pthread', test_runner,
@@ -579,9 +725,81 @@ test('ncc_gc_stack_maps_system_header_user_function_kept', test_runner,
   depends : ncc_exe,
 )
 
+test('ncc_gc_stack_maps_homebrew_header_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_homebrew_header.c',
+          '.function_name = "ncc_fake_homebrew_inline"']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 test('ncc_gc_stack_maps_thread_runtime_skipped', test_runner,
   args : [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_stack_maps_thread_runtime_skip.c',
+          'n00b_gc_stack_push']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_setjmp_diagnostic', test_runner,
+  args : [ncc_exe, 'expect_error_contains',
+          test_dir / 'err_gc_stack_maps_setjmp.c',
+          'unsafe non-local exit call']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_setjmp_spoof_diagnostic', test_runner,
+  args : [ncc_exe, 'expect_error_contains',
+          test_dir / 'err_gc_stack_maps_setjmp_spoof.c',
+          'unsafe non-local exit call']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_longjmp_diagnostic', test_runner,
+  args : [ncc_exe, 'expect_error_contains',
+          test_dir / 'err_gc_stack_maps_longjmp.c',
+          'unsafe non-local exit call']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_stw_macro_allowed', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_stw_macro.c',
+          'n00b_gc_stack_push']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_nonlocal_api_allowed', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_nonlocal_api.c',
+          'n00b_gc_stack_push']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_nonlocal_runtime_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_nonlocal_runtime_skip.c',
+          'n00b_gc_stack_push']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_collect_runtime_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_collect_skip.c',
           'n00b_gc_stack_push']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
@@ -738,6 +956,10 @@ ncc_error_contains_tests = {
     test_dir / 'err_array_literal_non_array_target.c',
     'requires an ncc_array_t(T) or n00b_array_t(T) object target',
   ],
+  'err_array_literal_explicit_non_array_target': [
+    test_dir / 'err_array_literal_explicit_non_array_target.c',
+    'requires an ncc_array_t(T) or n00b_array_t(T) object target',
+  ],
   'err_array_literal_pointer_target': [
     test_dir / 'err_array_literal_pointer_target.c',
     'must target an array object, not a pointer',
@@ -757,6 +979,121 @@ ncc_error_contains_tests = {
   'err_array_literal_unsupported_elem': [
     test_dir / 'err_array_literal_unsupported_elem.c',
     'is not supported for static initialization yet',
+  ],
+  'err_array_literal_union_pointer': [
+    test_dir / 'err_array_literal_union_pointer.c',
+    'precise active-member static layout is not supported yet',
+  ],
+  'err_array_literal_transient_field': [
+    test_dir / 'err_array_literal_transient_field.c',
+    'transient type',
+  ],
+  'err_array_literal_field_bound_expr': [
+    test_dir / 'err_array_literal_field_bound_expr.c',
+    'non-numeric bounds',
+  ],
+  'err_array_literal_missing_field_policy': [
+    test_dir / 'err_array_literal_missing_field_policy.c',
+    'no static-layout policy',
+  ],
+  'err_array_literal_missing_helper': [
+    test_dir / 'err_array_literal_missing_helper.c',
+    'requires --ncc-static-init-helper=PATH',
+  ],
+  'err_list_literal_non_list_target': [
+    test_dir / 'err_list_literal_non_list_target.c',
+    'list literal initializer',
+  ],
+  'err_list_literal_local_mutable': [
+    test_dir / 'err_list_literal_local_mutable.c',
+    'non-const local list literal',
+  ],
+  'err_list_literal_bstr_type': [
+    test_dir / 'err_list_literal_bstr_type.c',
+    'b-string list element requires element type',
+  ],
+  'err_list_literal_missing_helper': [
+    test_dir / 'err_list_literal_missing_helper.c',
+    'requires --ncc-static-init-helper=PATH',
+  ],
+  # WP-011 Phase 2 dict literal fixtures.  These all expect targeted
+  # diagnostics; the helper-backed lowering lands in Phase 3.  The
+  # `_stub` fixture pins the Phase 2 stub message and is DELETED when
+  # Phase 3 implements real dict lowering.
+  'err_dict_literal_non_dict_target': [
+    test_dir / 'err_dict_literal_non_dict_target.c',
+    'dict literal initializer',
+  ],
+  'err_dict_literal_bare_in_non_dict_target': [
+    test_dir / 'err_dict_literal_bare_in_non_dict_target.c',
+    'dict literal initializer',
+  ],
+  'err_dict_literal_local_mutable': [
+    test_dir / 'err_dict_literal_local_mutable.c',
+    'non-const local dict literal',
+  ],
+  # Phase 3c.iii permanent fixture: generic struct-pointer key
+  # (DICT_KEY_KIND_POINTER, not r-string and not buffer) routes to
+  # the dict pointer-key partial-stub diagnostic.  Renamed from
+  # `err_dict_literal_stub` in Phase 3c.iii; see the fixture's
+  # leading comment.
+  'err_dict_literal_struct_pointer_key': [
+    test_dir / 'err_dict_literal_struct_pointer_key.c',
+    'dict pointer-key lowering not yet implemented for this pointer type in WP-011 Phase 3c.ii.b',
+  ],
+  # Phase 3c.iii: non-pointer-non-scalar key types (e.g. `float`)
+  # land in DICT_KEY_KIND_UNSUPPORTED and emit a friendly
+  # "dict literal key type ... is not supported" diagnostic.
+  'err_dict_literal_unsupported_key_type': [
+    test_dir / 'err_dict_literal_unsupported_key_type.c',
+    'dict literal key type',
+  ],
+  # Phase 3c.iii: value types outside the scalar / pointer /
+  # registered-aggregate / nested-container set (e.g.
+  # `_Complex double`) emit a friendly "dict literal value type
+  # ... is not supported" diagnostic.
+  'err_dict_literal_unsupported_value_type': [
+    test_dir / 'err_dict_literal_unsupported_value_type.c',
+    'dict literal value type',
+  ],
+  # Phase 3c.iii: a valid dict literal compiled without
+  # `--ncc-static-init-helper=PATH` fails with the missing-helper
+  # diagnostic (parallel to the list / array missing-helper
+  # fixtures).
+  'err_dict_literal_missing_helper': [
+    test_dir / 'err_dict_literal_missing_helper.c',
+    'requires --ncc-static-init-helper=PATH',
+  ],
+  # Phase 3c.i duplicate-key compile-time rejection (D-065).
+  'err_dict_literal_duplicate_key': [
+    test_dir / 'err_dict_literal_duplicate_key.c',
+    'duplicate key',
+  ],
+  'err_static_image_bad_payload': [
+    test_dir / 'err_static_image_bad_payload.c',
+    'requires a string payload',
+    '--ncc-static-init-helper=' + static_image_helper.full_path(),
+  ],
+  'err_static_image_non_pointer': [
+    test_dir / 'err_static_image_non_pointer.c',
+    'must target a pointer',
+  ],
+  'err_static_image_local_mutable': [
+    test_dir / 'err_static_image_local_mutable.c',
+    'must be declared at file scope',
+  ],
+  'err_static_image_not_initializer': [
+    test_dir / 'err_static_image_not_initializer.c',
+    'must be used as the whole initializer expression',
+  ],
+  'err_static_image_unsupported_target': [
+    test_dir / 'err_static_image_unsupported_target.c',
+    'not supported',
+    '--ncc-static-init-helper=' + static_image_helper.full_path(),
+  ],
+  'err_buffer_literal_target': [
+    test_dir / 'err_buffer_literal_target.c',
+    'buffer literal initializer must target n00b_buffer_t *',
   ],
   'err_gc_stack_maps_unnamed_param': [
     test_dir / 'err_gc_stack_maps_unnamed_param.c',
@@ -784,6 +1121,6 @@ foreach name, params : ncc_error_contains_tests
     args : [ncc_exe, 'expect_error_contains', params[0], params[1]]
            + ncc_test_flags + extra_args,
     suite : 'ncc',
-    depends : ncc_exe,
+    depends : [ncc_exe, static_image_helper],
   )
 endforeach

@@ -53,7 +53,7 @@ ncc_c_tokenizer_is_ncc_off(ncc_scanner_t *s)
 }
 
 // ============================================================================
-// Internal: mark last emitted token with system_header flag
+// Internal: attach current preprocessor source context to last emitted token.
 // ============================================================================
 
 static void
@@ -65,12 +65,20 @@ mark_system_header(ncc_scanner_t *s)
         return;
     }
 
-    if (st->ncc_off || st->in_system_header) {
-        ncc_token_stream_t *ts = s->stream;
+    ncc_token_stream_t *ts = s->stream;
 
-        if (ts && ts->token_count > 0) {
-            ts->tokens[ts->token_count - 1]->system_header = true;
-        }
+    if (!ts || ts->token_count == 0) {
+        return;
+    }
+
+    ncc_token_info_t *tok = ts->tokens[ts->token_count - 1];
+
+    if (st->current_file.data && st->current_file.u8_bytes > 0) {
+        tok->file = ncc_option_set(ncc_string_t, st->current_file);
+    }
+
+    if (st->ncc_off || st->in_system_header) {
+        tok->system_header = true;
     }
 }
 
