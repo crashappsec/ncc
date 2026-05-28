@@ -8,6 +8,8 @@
 #   preprocess   — run with -E, expect exit 0 and non-empty output
 #   preprocess_contains — run with -E, expect output to contain substring
 #   preprocess_not_contains — run with -E, expect output to omit substring
+#   preprocess_stderr_contains — run with -E, expect exit 0 AND stderr substring
+#                                 AND a second substring absent from stdout
 #   no_ncc       — compile with --no-ncc, run the binary, expect exit 0
 #   expect_error — compile, expect non-zero exit
 #   expect_error_contains — compile, expect non-zero exit and stderr substring
@@ -99,6 +101,37 @@ case "$MODE" in
             echo "FAIL: transformed output contained unexpected text:" \
                  "$UNEXPECTED" >&2
             cat "$OUTBIN.c" >&2
+            exit 1
+        fi
+        ;;
+
+    preprocess_stderr_contains)
+        # Asserts on `ncc -E` paths that exit 0 (no error) AND produce
+        # a stderr diagnostic AND omit a substring from stdout. Used for
+        # warn-and-skip diagnostics (D-009 / Phase 5 incomplete-struct
+        # warning) where the build is supposed to succeed but a specific
+        # warning must appear and the decl must NOT be auto-registered.
+        EXPECTED_STDERR="$1"
+        shift || true
+        UNEXPECTED_STDOUT="$1"
+        shift || true
+        if [ -z "$EXPECTED_STDERR" ] || [ -z "$UNEXPECTED_STDOUT" ]; then
+            echo "FAIL: preprocess_stderr_contains needs <stderr-substring>" \
+                 "<stdout-omit-substring>" >&2
+            exit 1
+        fi
+        "$NCC" "$@" -E "$SRC" \
+            > "$OUTBIN.stdout" 2> "$OUTBIN.stderr"
+        if ! grep -F -q "$EXPECTED_STDERR" "$OUTBIN.stderr"; then
+            echo "FAIL: stderr did not contain expected text:" \
+                 "$EXPECTED_STDERR" >&2
+            cat "$OUTBIN.stderr" >&2
+            exit 1
+        fi
+        if grep -F -q "$UNEXPECTED_STDOUT" "$OUTBIN.stdout"; then
+            echo "FAIL: stdout contained text that should have been skipped:" \
+                 "$UNEXPECTED_STDOUT" >&2
+            cat "$OUTBIN.stdout" >&2
             exit 1
         fi
         ;;

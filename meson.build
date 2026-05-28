@@ -129,6 +129,15 @@ if gc_stack_maps_default
   c_args += ['-DNCC_GC_STACK_MAPS_DEFAULT']
 endif
 
+# Build-time default for ncc auto-registration of TU-scope pointer globals as
+# libn00b GC roots. The upstream ncc default remains off; n00b opts in via
+# its own meson build, and the migration of manual n00b_gc_register_root
+# call sites lands in the same diff (D-008, D-006).
+auto_gc_roots_default = get_option('auto_gc_roots')
+if auto_gc_roots_default
+  c_args += ['-DNCC_AUTO_GC_ROOTS_DEFAULT']
+endif
+
 # Clang source-based code coverage
 coverage_enabled = get_option('coverage')
 coverage_args = []
@@ -180,6 +189,7 @@ src_xform = files(
   'src/xform/xform_constexpr.c',
   'src/xform/xform_constexpr_paste.c',
   'src/xform/xform_generic_struct.c',
+  'src/xform/xform_gc_globals.c',
   'src/xform/xform_gc_stack_maps.c',
   'src/xform/xform_kargs_vargs.c',
   'src/xform/xform_once.c',
@@ -415,8 +425,13 @@ foreach name, params : ncc_compile_tests
     extra_args = static_image_helper_flags
     test_deps += [static_image_helper]
   endif
+  # WP-002 Phase 1 (D-031): stack-maps default flipped to on. These
+  # compile_run fixtures don't link the libn00b runtime that
+  # provides n00b_gc_stack_push / _pop, so the transform would emit
+  # references that fail to compile. Opt out per-test.
   test('ncc_' + name, test_runner,
-    args : [ncc_exe, params[0], params[1]] + ncc_test_flags + extra_args,
+    args : [ncc_exe, params[0], params[1]] + ncc_test_flags + extra_args
+           + ['--ncc-no-gc-stack-maps'],
     suite : 'ncc',
     depends : test_deps,
   )
@@ -425,7 +440,8 @@ endforeach
 test('ncc_static_object_descriptors', test_runner,
   args : [ncc_exe, 'compile_run',
           test_dir / 'test_static_object_descriptors.c']
-         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
+         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags
+         + ['--ncc-no-gc-stack-maps'],
   suite : 'ncc',
   depends : [ncc_exe, static_image_helper],
 )
@@ -514,7 +530,7 @@ test('ncc_static_image_dependency_contract', test_runner,
 if host_machine.system() != 'windows' and cc.has_header('pthread.h')
   test('ncc_constexpr_pthread', test_runner,
     args : [ncc_exe, 'compile_run', test_dir / 'test_constexpr_pthread.c']
-           + ncc_test_flags,
+           + ncc_test_flags + ['--ncc-no-gc-stack-maps'],
     suite : 'ncc',
     depends : ncc_exe,
   )
@@ -523,7 +539,7 @@ endif
 # rstr_ansi test links against libncc (ncc_string_to_ansi lives there).
 test('ncc_rstr_ansi', test_runner,
   args : [ncc_exe, 'compile_run', test_dir / 'test_rstr_ansi.c']
-         + ncc_test_flags + [libncc.full_path()],
+         + ncc_test_flags + [libncc.full_path()] + ['--ncc-no-gc-stack-maps'],
   suite : 'ncc',
   depends : [ncc_exe, libncc],
 )
@@ -531,7 +547,315 @@ test('ncc_rstr_ansi', test_runner,
 test('ncc_gc_stack_maps_default_off', test_runner,
   args : [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_stack_maps_flag.c', 'n00b_gc_stack_']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# WP-002 Phase 1: pins the stack-maps default-on invariant (D-031).
+# With the `gc_stack_maps` meson option's default flipped to `true`
+# (and NCC_GC_STACK_MAPS_DEFAULT defined accordingly), ncc invoked
+# WITHOUT any --ncc-gc-stack-maps flag must still fire the transform
+# on a function with an eligible stack-local pointer slot. Locks the
+# default-on behavior against future regressions.
+test('ncc_gc_stack_maps_default_on', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_default_on.c', 'n00b_gc_stack_']
          + ncc_test_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# WP-001 Phase 1: pins the no-op-when-off contract for the
+# xform_gc_globals transform (spec § 6.1, D-006). Even when the
+# source contains a TU-scope pointer-bearing static that would
+# qualify under the eligibility rules of later phases, ncc invoked
+# WITHOUT --ncc-auto-gc-roots must emit zero auto-roots output.
+test('ncc_auto_gc_roots_flag_off_no_op', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_auto_gc_roots_flag_off_no_op.c',
+          '__ncc_gc_root_table_']
+         + ncc_test_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# WP-001 Phase 2: pointer-scalar TU-scope decls register. The
+# emit shape per spec § 4.1 / D-005 is one table-and-ctor trio per
+# TU. Three assertions pin the per-symbol entries (`& x` and
+# `& y` in declaration order) and the forward declaration of the
+# batch runtime API (`n00b_gc_register_roots`, per D-012). All
+# four use the same source so a missing emit fails every check.
+test('ncc_auto_gc_roots_pointer_scalar_x', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_pointer_scalar.c',
+          '(void *) & x']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_auto_gc_roots_pointer_scalar_y', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_pointer_scalar.c',
+          '(void *) & y']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_auto_gc_roots_pointer_scalar_fwd_decl', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_pointer_scalar.c',
+          'extern void n00b_gc_register_roots']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# WP-001 Phase 2: `extern` declarations do NOT register
+# (spec § 2.2 row 1). The source includes a registering decl
+# alongside so the per-decl skip rule is exercised (not the
+# zero-qualifying-decls emit-nothing rule of spec § 4.3).
+test('ncc_auto_gc_roots_extern_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_auto_gc_roots_extern_skipped.c',
+          '(void *) & extern_singleton']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_auto_gc_roots_extern_skipped_local_registered', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_extern_skipped.c',
+          '(void *) & local_root']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# WP-001 Phase 2: function pointers do NOT register
+# (spec § 2.2 row 2).
+test('ncc_auto_gc_roots_function_pointer_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_auto_gc_roots_function_pointer_skipped.c',
+          '(void *) & fn_ptr']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_auto_gc_roots_function_pointer_other_registered', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_function_pointer_skipped.c',
+          '(void *) & registered']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# WP-001 Phase 2: TU-scope decls whose name begins with `__ncc_`
+# do NOT register (they belong to ncc-emitted static-object
+# pipelines — static-image, once-guard, buflit, future ones — and
+# are registered by their own machinery; spec § 2.2 row 3).
+test('ncc_auto_gc_roots_ncc_emitted_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_auto_gc_roots_ncc_emitted_skipped.c',
+          '(void *) & __ncc_marker_static']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_auto_gc_roots_ncc_emitted_other_registered', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_ncc_emitted_skipped.c',
+          '(void *) & regular_static']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# WP-001 Phase 2: `const char *s = "literal"` does NOT register
+# (spec § 2.2 row 3 — the one initializer-aware skip rule). A
+# `const char *t = some_non_literal_expression;` DOES register.
+# Both assertions are needed: the contains-check confirms the
+# transform fires on this source; the not-contains-check confirms
+# the per-decl skip rule.
+test('ncc_auto_gc_roots_const_char_literal_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_auto_gc_roots_const_char_star_skipped.c',
+          '(void *) & literal_str']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_auto_gc_roots_const_char_non_literal_registered', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_const_char_star_skipped.c',
+          '(void *) & buffer_ref']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# WP-001 Phase 3: pointer-array TU-scope decls register as a SINGLE
+# table entry with `num_words = N` (spec § 4.1, plan Phase 3 DoD #1).
+test('ncc_auto_gc_roots_pointer_array_addr', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_pointer_array.c',
+          '(void *) & xs']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_auto_gc_roots_pointer_array_num_words', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_pointer_array.c',
+          '.num_words = 8']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# WP-001 Phase 3: function-pointer arrays do NOT register
+# (spec § 2.2 row 2 extended to arrays). The source carries a
+# pointer-array decl alongside so the per-decl skip rule is the
+# subject of the assertion, not the zero-decls emit-nothing rule.
+test('ncc_auto_gc_roots_function_pointer_array_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_auto_gc_roots_function_pointer_array_skipped.c',
+          '(void *) & fns']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_auto_gc_roots_function_pointer_array_other_registered', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_function_pointer_array_skipped.c',
+          '(void *) & registered']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# WP-001 Phase 4: pointer-bearing structs emit ONE table entry per
+# pointer-run (spec § 4.1). For a struct with two pointer fields
+# separated by a non-pointer slot, the emit produces two entries
+# (one per run), each addressed via `__builtin_offsetof(typeof(...))`.
+test('ncc_auto_gc_roots_struct_with_pointers_field_a', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_struct_with_pointers.c',
+          '(void *) & (mixed).a']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_auto_gc_roots_struct_with_pointers_field_c', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_struct_with_pointers.c',
+          '(void *) & (mixed).c']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# WP-001 Phase 4: nested struct fields are recognized; the emit's
+# address-of operator targets the dotted path to the inner field.
+# Note: ncc's grammar restricts `__builtin_offsetof`'s 2nd argument
+# to a single identifier (c_ncc.bnf line 599), so we emit the
+# equivalent `&(name).a.b.c` form instead — clang's address-of
+# applied to a designated subobject expression yields the same
+# byte address.
+test('ncc_auto_gc_roots_nested_struct_offset', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_nested_struct.c',
+          '(void *) & (outer).in.p']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# WP-001 Phase 4: adjacent pointer fields COALESCE into one entry
+# with `num_words = 2` (spec § 4.1). The struct in the source has
+# two pointer fields followed by an `int`; the emit must show one
+# 2-word run, NOT two 1-word entries.
+test('ncc_auto_gc_roots_pointer_run_coalescing_num_words', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_pointer_run_coalescing.c',
+          '.num_words = 2']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_auto_gc_roots_pointer_run_coalescing_no_split', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_auto_gc_roots_pointer_run_coalescing.c',
+          '(void *) & (pair).b']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# WP-001 Phase 5: `[[n00b::nomap]]` skips the decl silently (no
+# table entry) but a sibling unannotated decl still registers.
+test('ncc_auto_gc_roots_nomap_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_auto_gc_roots_nomap_attribute.c',
+          '(void *) & legacy_singleton']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_auto_gc_roots_nomap_sibling_registered', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_nomap_attribute.c',
+          '(void *) & registered_root']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# WP-001 Phase 5: trailing-position `[[n00b::nomap]]` (after the
+# declarator, before the `;`) also skips the decl. Spec § 3.1.
+test('ncc_auto_gc_roots_nomap_trailing_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_auto_gc_roots_nomap_attribute.c',
+          '(void *) & trailing_nomap']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# WP-001 Phase 5: the `[[n00b::nomap]]` attribute is STRIPPED from
+# the post-transform emit so clang never sees an unknown attribute.
+test('ncc_auto_gc_roots_nomap_attribute_stripped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_auto_gc_roots_nomap_attribute.c',
+          'n00b :: nomap']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# WP-001 Phase 5: incomplete struct types trigger the D-009 warn-
+# and-skip diagnostic (severity warning, build does not fail).
+# Uses the new `preprocess_stderr_contains` runner mode (added in
+# this dispatch) because none of the existing modes covers
+# "exit 0 + stderr substring + stdout omits substring".
+test('ncc_auto_gc_roots_incomplete_struct_warn', test_runner,
+  args : [ncc_exe, 'preprocess_stderr_contains',
+          test_dir / 'err_auto_gc_roots_incomplete_struct.c',
+          'forward_obj',
+          '(void *) & forward_obj']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
   suite : 'ncc',
   depends : ncc_exe,
 )
@@ -689,6 +1013,57 @@ test('ncc_gc_stack_maps_array_sizeof_bounds', test_runner,
   depends : ncc_exe,
 )
 
+# D-033 positive case: VLA of a pointer-bearing struct must compile
+# and emit a single conservative whole-buffer scan root.  We assert
+# both that the runtime-sized num_words expression appears and that
+# the address-of-element-zero is recorded as a root.
+test('ncc_gc_stack_maps_vla_pointer_aggregate_num_words', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_vla_pointer_aggregate.c',
+          'sizeof (fields) / (sizeof (void *))']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_vla_pointer_aggregate_address', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_stack_maps_vla_pointer_aggregate.c',
+          '& fields [0]']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# D-033 negative case: VLA of a pointerless aggregate must NOT
+# emit any scan address for the VLA -- there are no roots to track.
+test('ncc_gc_stack_maps_vla_scalar_aggregate_no_root', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_vla_scalar_aggregate.c',
+          '& pairs [0]']
+         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# D-033 regression: the runtime-bounded VLA num_words expression must
+# NOT trigger clang's `-Wsizeof-array-div` warning, which fires when
+# `sizeof(arr) / sizeof(void *)` is computed for an array whose element
+# type is not `void *`.  The fix is parenthesizing the divisor:
+# `sizeof(arr) / (sizeof(void *))`.  We verify by compiling the same
+# pointer-aggregate VLA fixture with `-Werror=sizeof-array-div`; if the
+# warning ever regresses, this test fails.
+test('ncc_gc_stack_maps_vla_pointer_aggregate_no_sizeof_array_div',
+  test_runner,
+  args : [ncc_exe, 'compile_run',
+          test_dir / 'test_gc_stack_maps_vla_pointer_aggregate_main.c']
+         + ncc_test_flags
+         + ['--ncc-gc-stack-maps',
+            '-Wsizeof-array-div', '-Werror=sizeof-array-div'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 test('ncc_gc_stack_maps_computed_goto_skipped', test_runner,
   args : [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_stack_maps_computed_goto.c',
@@ -823,7 +1198,8 @@ test('ncc_gc_stack_maps_control_flow', test_runner,
 
 test('ncc_force_include_not_replayed', test_runner,
   args : [ncc_exe, 'compile_run', test_dir / 'test_force_include_once.c']
-         + ncc_test_flags + ['-include', test_dir / 'force_include_once.h'],
+         + ncc_test_flags + ['-include', test_dir / 'force_include_once.h',
+                              '--ncc-no-gc-stack-maps'],
   suite : 'ncc',
   depends : ncc_exe,
 )

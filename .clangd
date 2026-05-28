@@ -1,0 +1,25 @@
+# clangd config for the gc-auto-roots workspace.
+#
+# ncc's source language is a C23 superset with extensions
+# (`r"..."` rich literals, `_kargs`, `+` variadics, `[[n00b::*]]`
+# namespaced attributes, `@rpc(...)` annotations, `b"..."` buffer
+# literals, ...). clangd parses the files as raw C and emits noise
+# diagnostics it can't suppress on its own.
+#
+# The test/*.c sources are particularly affected because they are
+# registered with meson as input to `test/run_test.sh -E` (which
+# invokes ncc), not as build targets — so clangd has no
+# `compile_commands.json` entry for them and falls back to default
+# flags (pre-C23 + no include path), producing
+# `-Wempty-translation-unit`, `-Wunknown-attributes`, etc.
+#
+# The transform suppresses all diagnostics on those test sources.
+# Navigation (go-to-definition, find-references) still works where
+# clangd can parse enough of the file. The actual `meson test`
+# pipeline runs through ncc and is unaffected by this config.
+
+If:
+  PathMatch: test/.*\.c
+
+Diagnostics:
+  Suppress: "*"

@@ -42,6 +42,12 @@ typedef struct ncc_gc_stack_root_t {
     uint64_t                    num_words;
     uint32_t                    line;
     uint32_t                    col;
+    // True when num_words_expr is a runtime-evaluated expression (e.g.,
+    // sizeof(some_VLA)/sizeof(void *)) rather than a compile-time integer
+    // constant.  The slot table / map for any group containing such a root
+    // must be emitted as block-scope (not `static const`) so the slot's
+    // num_words initializer can reference the VLA's runtime size.
+    bool                        num_words_runtime;
     ncc_parse_tree_t           *scope;
     ncc_parse_tree_t           *declaration;
     struct ncc_gc_stack_root_t *next;
@@ -77,6 +83,7 @@ typedef struct {
     bool                       static_identity_generate_namespace;
     bool                       gc_stack_maps;
     bool                       gc_stack_maps_relaxed;
+    bool                       auto_gc_roots;
     ncc_gc_stack_root_t       *gc_stack_roots;
     size_t                     gc_stack_root_count;
 } ncc_xform_data_t;
