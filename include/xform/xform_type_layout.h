@@ -65,6 +65,7 @@ int ncc_layout_pointer_depth_for_specs(ncc_xform_ctx_t *ctx,
 int ncc_layout_pointer_depth_for_declarator(ncc_xform_ctx_t *ctx,
                                             ncc_parse_tree_t *specs,
                                             ncc_parse_tree_t *declarator);
+bool ncc_layout_declarator_is_function_pointer(ncc_parse_tree_t *declarator);
 
 bool ncc_layout_struct_or_union_is_union(ncc_parse_tree_t *su);
 bool ncc_layout_aggregate_specifier_has_members(ncc_parse_tree_t *su);
@@ -88,5 +89,9 @@ char *ncc_layout_implicit_member_field_name(ncc_parse_tree_t *member,
 
 bool ncc_layout_typedef_name_is_pointer(ncc_xform_ctx_t *ctx,
                                         const char *name);
+// True if `name` is a typedef for a FUNCTION pointer (code pointer). Used to
+// exclude such fields from GC pointer maps.
+bool ncc_layout_typedef_name_is_function_pointer(ncc_xform_ctx_t *ctx,
+                                                 const char *name);
 void ncc_layout_collect_type_info(ncc_xform_ctx_t *ctx,
                                   ncc_parse_tree_t *tu);

@@ -66,6 +66,9 @@ typedef struct {
     ncc_dict_t                 dict_types;
     ncc_dict_t                 gc_aggregate_types;
     ncc_dict_t                 gc_pointer_typedefs;
+    // Subset of gc_pointer_typedefs that are FUNCTION pointers (code, not
+    // heap). The gc-typemap walker excludes these from GC pointer maps.
+    ncc_dict_t                 gc_function_pointer_typedefs;
     ncc_template_registry_t   *template_reg;
     const char                *vargs_type;
     const char                *once_prefix;
