@@ -10,6 +10,7 @@
 //   --ncc-dump-tree-raw    Dump parse tree with group wrapper nodes visible
 //   --ncc-dump-output      Dump emitted C to stderr
 //   --ncc-gc-stack-maps    Emit n00b GC stack-map metadata
+//   --ncc-auto-gc-roots    Auto-register TU-scope pointer globals as GC roots
 //   -E                     Preprocess + transform, emit to stdout
 //   -c                     Compile only (pipe to clang)
 //   -o FILE                Output file
@@ -63,6 +64,7 @@ extern void ncc_register_bang_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_rstr_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_static_image_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_gc_stack_maps_xform(ncc_xform_registry_t *reg);
+extern void ncc_register_gc_globals_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_constexpr_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_constexpr_paste_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_kargs_vargs_xform(ncc_xform_registry_t *reg);
@@ -234,6 +236,7 @@ typedef struct {
     bool         dump_output;
     bool         gc_stack_maps;
     bool         gc_stack_maps_relaxed;
+    bool         auto_gc_roots;
     bool         static_identity_generate_namespace;
 
     // Dependency file generation (handled separately from compilation).
@@ -416,6 +419,10 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
     opts->gc_stack_maps = true;
 #endif
 
+#ifdef NCC_AUTO_GC_ROOTS_DEFAULT
+    opts->auto_gc_roots = true;
+#endif
+
     opts->compiler = getenv("NCC_COMPILER");
     if (opts->compiler) {
         ncc_verbose("using NCC_COMPILER=%s", opts->compiler);
@@ -506,6 +513,14 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
         if (strcmp(arg, "--ncc-no-gc-stack-maps") == 0) {
             opts->gc_stack_maps         = false;
             opts->gc_stack_maps_relaxed = false;
+            continue;
+        }
+        if (strcmp(arg, "--ncc-auto-gc-roots") == 0) {
+            opts->auto_gc_roots = true;
+            continue;
+        }
+        if (strcmp(arg, "--ncc-no-auto-gc-roots") == 0) {
+            opts->auto_gc_roots = false;
             continue;
         }
         if (strcmp(arg, "--ncc-constexpr-include") == 0) {
@@ -740,10 +755,10 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
                                            : opts->has_c ? "compile-only"
                                                          : "compile-and-link",
                 opts->compiler, opts->n_clang_args);
-    ncc_verbose("flags: -E=%d -c=%d std=%d dep=%d dump_tokens=%d dump_tree=%d dump_output=%d gc_stack_maps=%d",
+    ncc_verbose("flags: -E=%d -c=%d std=%d dep=%d dump_tokens=%d dump_tree=%d dump_output=%d gc_stack_maps=%d auto_gc_roots=%d",
                 opts->has_E, opts->has_c, opts->has_std, opts->has_dep_flags,
                 opts->dump_tokens, opts->dump_tree, opts->dump_output,
-                opts->gc_stack_maps);
+                opts->gc_stack_maps, opts->auto_gc_roots);
     if (opts->constexpr_headers) {
         ncc_verbose("constexpr headers=%s", opts->constexpr_headers);
     }
@@ -780,6 +795,10 @@ print_help(void)
         "                       Emit n00b GC stack maps, skipping unsupported roots\n"
         "  --ncc-no-gc-stack-maps\n"
         "                       Disable n00b GC stack-map metadata\n"
+        "  --ncc-auto-gc-roots  Auto-register TU-scope pointer-bearing globals\n"
+        "                       as libn00b GC roots\n"
+        "  --ncc-no-auto-gc-roots\n"
+        "                       Disable auto-registration of TU-scope GC roots\n"
         "  --ncc-constexpr-include HDRS\n"
         "                       Comma-separated headers for constexpr eval\n"
         "                       (e.g. '<myheader.h>,\"local.h\"')\n"
@@ -1982,6 +2001,10 @@ compile_file(ncc_opts_t *opts)
     ncc_register_gc_stack_maps_xform(&xreg);
     ncc_register_constexpr_xform(&xreg);
     ncc_register_constexpr_paste_xform(&xreg);
+    // gc_globals must run LAST: it walks the final flattened TU
+    // (including any synthetic decls earlier passes — rpc, once,
+    // kargs_vargs, static_image — produced) per spec § 8.3.
+    ncc_register_gc_globals_xform(&xreg);
 
     // Template registry for rstr (and future template-based transforms).
     ncc_template_registry_t tmpl_reg;
@@ -2188,6 +2211,7 @@ compile_file(ncc_opts_t *opts)
             opts->static_identity_generate_namespace,
         .gc_stack_maps               = opts->gc_stack_maps,
         .gc_stack_maps_relaxed       = opts->gc_stack_maps_relaxed,
+        .auto_gc_roots               = opts->auto_gc_roots,
     };
     ncc_dict_init(&xdata.option_meta,
                             ncc_hash_cstring, ncc_dict_cstr_eq);

@@ -68,5 +68,9 @@ option('mem_debug',
        description: 'Enable memory allocation tracking and per-stage reporting')
 option('gc_stack_maps',
        type: 'boolean',
-       value: false,
+       value: true,
        description: 'Enable n00b GC stack-map emission by default for this ncc binary')
+option('auto_gc_roots',
+       type: 'boolean',
+       value: false,
+       description: 'Enable ncc auto-registration of TU-scope pointer globals as GC roots by default')

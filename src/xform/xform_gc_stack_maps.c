@@ -1860,6 +1860,119 @@ expand_aggregate_array_elements(ncc_xform_ctx_t *ctx, const char *function,
     return total;
 }
 
+// Returns true if `aggregate_spec` (a struct/union specifier) contains any
+// pointer-bearing field, recursively walking nested aggregate members.
+//
+// Used by `expand_aggregate_array` to decide what to do when an aggregate
+// array's bounds are not a compile-time integer literal.  If the element
+// type has no pointer fields, the array contributes no GC roots regardless
+// of its length and we silently skip it.  Otherwise we fall back to a
+// conservative whole-buffer scan whose size is computed at runtime from
+// the VLA's sizeof.
+//
+// The walk mirrors `expand_member_declaration` / `expand_member_declarator`
+// at a structural level, but only checks for pointer presence; it never
+// records roots.  Bounded recursion depth matches `expand_aggregate_fields`.
+static bool aggregate_spec_has_pointer_fields(ncc_xform_ctx_t *ctx,
+                                              ncc_parse_tree_t *aggregate_spec,
+                                              int depth);
+
+static bool
+member_declaration_has_pointer_field(ncc_xform_ctx_t *ctx,
+                                     ncc_parse_tree_t *member,
+                                     int depth)
+{
+    ncc_parse_tree_t *member_specs = ncc_xform_find_child_nt(
+        member, "specifier_qualifier_list");
+    if (!member_specs) {
+        return false;
+    }
+
+    ncc_parse_tree_t *member_list = ncc_xform_find_child_nt(
+        member, "member_declarator_list");
+    if (!member_list) {
+        // Anonymous member: either a bare pointer (rare) or an inline
+        // anonymous aggregate; recurse into the latter.
+        int ptr_depth = pointer_depth_for_specs(ctx, member_specs);
+        if (ptr_depth > 0) {
+            return true;
+        }
+        ncc_parse_tree_t *nested = aggregate_spec_from_specs(ctx, member_specs);
+        if (nested) {
+            return aggregate_spec_has_pointer_fields(ctx, nested, depth + 1);
+        }
+        return false;
+    }
+
+    parse_tree_list_t declarators = {0};
+    collect_nt_children(member_list, "member_declarator", &declarators);
+
+    bool found = false;
+    for (size_t i = 0; i < declarators.len && !found; i++) {
+        ncc_parse_tree_t *declarator = ncc_xform_find_child_nt(
+            declarators.data[i], "declarator");
+        if (!declarator) {
+            continue;
+        }
+
+        int ptr_depth = pointer_depth_for_declarator(ctx, member_specs,
+                                                     declarator);
+        if (ptr_depth > 0) {
+            found = true;
+            break;
+        }
+
+        // No pointer on this declarator; if the field's type is itself an
+        // aggregate, recurse.
+        ncc_parse_tree_t *nested = aggregate_spec_from_specs(ctx, member_specs);
+        if (nested && aggregate_spec_has_pointer_fields(ctx, nested,
+                                                        depth + 1)) {
+            found = true;
+        }
+    }
+
+    ncc_free(declarators.data);
+    return found;
+}
+
+static bool
+aggregate_spec_has_pointer_fields(ncc_xform_ctx_t *ctx,
+                                  ncc_parse_tree_t *aggregate_spec,
+                                  int depth)
+{
+    if (!aggregate_spec || depth > 64) {
+        return false;
+    }
+
+    aggregate_spec = resolve_aggregate_specifier(ctx, aggregate_spec);
+    if (!aggregate_spec) {
+        // Opaque / unresolved: treat conservatively as if it could carry
+        // pointers, matching the existing warn-and-skip stance for
+        // incomplete types in `expand_aggregate_fields`.
+        return true;
+    }
+
+    ncc_parse_tree_t *members = ncc_xform_find_child_nt(
+        aggregate_spec, "member_declaration_list");
+    if (!members) {
+        return true;
+    }
+
+    parse_tree_list_t member_decls = {0};
+    collect_nt_children(members, "member_declaration", &member_decls);
+
+    bool found = false;
+    for (size_t i = 0; i < member_decls.len && !found; i++) {
+        if (member_declaration_has_pointer_field(ctx, member_decls.data[i],
+                                                 depth)) {
+            found = true;
+        }
+    }
+
+    ncc_free(member_decls.data);
+    return found;
+}
+
 static size_t
 expand_aggregate_array(ncc_xform_ctx_t *ctx, const char *function,
                        const char *root_name, const char *array_expr,
@@ -1880,12 +1993,58 @@ expand_aggregate_array(ncc_xform_ctx_t *ctx, const char *function,
         if (data && data->gc_stack_maps_relaxed) {
             return 0;
         }
-        gc_stack_errorf(declarator,
-                        "GC stack-map aggregate root '%s' in function '%s' "
-                        "uses an aggregate array with non-literal bounds; "
-                        "pointer-bearing aggregate arrays need fixed literal "
-                        "bounds so field roots can be enumerated",
-                        root_name, function);
+
+        // Non-literal bound: either a true VLA (e.g. `T arr[n]`) or a
+        // bound expressed as a non-trivial compile-time constant
+        // expression that the transform doesn't constant-fold (e.g.
+        // `T arr[((size_t)1024u)]` after macro expansion).  Either way
+        // we can't statically enumerate per-element field roots.
+        //
+        // Two subcases (D-033):
+        //
+        //   1. The element type has no pointer fields anywhere in its
+        //      transitive layout.  The array contributes no GC roots
+        //      regardless of length; silently skip it.
+        //
+        //   2. The element type IS pointer-bearing.  We emit ONE
+        //      conservative root covering the entire array storage:
+        //      address = &arr[0], num_words = sizeof(arr)/sizeof(void*).
+        //      Every word in the array is scanned as a potential
+        //      pointer; non-pointer interleaved bytes are harmless
+        //      (the collector ignores misaligned / non-arena bits).
+        //
+        //      For a true VLA, sizeof(arr) is a runtime expression and
+        //      cannot appear in a `static const` slot-table initializer.
+        //      The root is flagged `num_words_runtime`, and the emitter
+        //      (build_frame_source) generates a non-static slot table /
+        //      map for any group that contains such a root.
+        if (!aggregate_spec_has_pointer_fields(ctx, aggregate_spec, 0)) {
+            return 0;
+        }
+
+        // array_expr at this entry-point is the locally-declared array's
+        // identifier (set by classify_declarator / expand_aggregate_fields
+        // at depth=0).  Use it directly for sizeof / address.
+        //
+        // The divisor's `sizeof(void *)` is wrapped in extra parentheses to
+        // silence clang's `-Wsizeof-array-div` warning, which fires when the
+        // array's element type is not `void *` (here it is an aggregate).
+        // Clang's diagnostic note explicitly recommends this form.
+        char *addr  = format_cstr("&%s[0]", array_expr);
+        char *words = format_cstr("(sizeof(%s)/(sizeof(void *)))", array_expr);
+
+        ncc_gc_stack_root_t *root = record_root_expr(ctx, function, root_name,
+                                                     aggregate_spec, kind,
+                                                     NCC_GC_STACK_ROOT_POINTER_ARRAY,
+                                                     addr, words, scope,
+                                                     decl_node);
+        if (root) {
+            root->num_words_runtime = true;
+        }
+
+        ncc_free(words);
+        ncc_free(addr);
+        return 1;
     }
 
     size_t total = expand_aggregate_array_elements(ctx, function, root_name,
@@ -2225,6 +2384,18 @@ classify_declarator(ncc_xform_ctx_t *ctx, const char *function,
     if (kind == NCC_GC_STACK_ROOT_LOCAL) {
         ncc_parse_tree_t *anchor = declaration_block_item(declarator);
         if (!anchor) {
+            // If this is a pure-scalar aggregate (no pointer fields anywhere
+            // in its transitive layout), the transform would record zero
+            // roots even with a valid insertion point.  Skip silently rather
+            // than forcing a rewrite of harmless for-init scaffolding (e.g.,
+            // for-iteration "once" sentinels via inline anonymous structs).
+            // Pointer-bearing aggregates still error: those need an anchor
+            // so their fields can be scanned.
+            if (ptr_depth == 0 && aggregate && !is_array
+                && !aggregate_spec_has_pointer_fields(ctx, aggregate, 0)) {
+                ncc_free(name);
+                return;
+            }
             if (data && data->gc_stack_maps_relaxed) {
                 ncc_free(name);
                 return;
@@ -2647,6 +2818,18 @@ append_slot_num_words(ncc_buffer_t *buf, ncc_gc_stack_root_t *root)
     ncc_buffer_printf(buf, "%llu", (unsigned long long)root->num_words);
 }
 
+static bool
+group_has_runtime_size_root(gc_frame_group_t *group,
+                            ncc_gc_stack_root_t *roots)
+{
+    for (ncc_gc_stack_root_t *root = roots; root; root = root->next) {
+        if (group_matches_root(group, root) && root->num_words_runtime) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static char *
 build_frame_source(gc_frame_group_t *group, ncc_gc_stack_root_t *roots)
 {
@@ -2665,10 +2848,19 @@ build_frame_source(gc_frame_group_t *group, ncc_gc_stack_root_t *roots)
 
     char *function_lit = c_string_literal(function);
 
+    // If any root in this group has a runtime-determined num_words (D-033:
+    // VLAs of pointer-bearing aggregates), the slot table and map cannot
+    // be `static const` because a static initializer can't reference a
+    // VLA's sizeof.  Emit them as block-scope locals in that case.  The
+    // lifetimes are still bounded by the cleanup attribute on the frame.
+    bool runtime_sized = group_has_runtime_size_root(group, roots);
+    const char *slot_storage = runtime_sized ? "" : "static const ";
+    const char *map_storage  = runtime_sized ? "" : "static const ";
+
     ncc_buffer_printf(buf,
-                      "static const n00b_gc_stack_slot_t "
+                      "%sn00b_gc_stack_slot_t "
                       "__ncc_gc_slots_%d[] = {",
-                      group->id);
+                      slot_storage, group->id);
 
     size_t root_index = 0;
     for (ncc_gc_stack_root_t *root = roots; root; root = root->next) {
@@ -2684,11 +2876,12 @@ build_frame_source(gc_frame_group_t *group, ncc_gc_stack_root_t *roots)
 
     ncc_buffer_puts(buf, "};");
     ncc_buffer_printf(buf,
-                      "static const n00b_gc_stack_map_t __ncc_gc_map_%d="
+                      "%sn00b_gc_stack_map_t __ncc_gc_map_%d="
                       "{.num_roots=%zu,.num_slots=%zu,"
                       ".slots=__ncc_gc_slots_%d,"
                       ".function_name=%s,.file_name=__FILE__,.line=%u};",
-                      group->id, count, count, group->id, function_lit, line);
+                      map_storage, group->id, count, count, group->id,
+                      function_lit, line);
     ncc_buffer_printf(buf, "void *__ncc_gc_roots_%d[]={", group->id);
 
     for (ncc_gc_stack_root_t *root = roots; root; root = root->next) {

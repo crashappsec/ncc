@@ -2,6 +2,7 @@ build/
 .#*
 **/.cache/*
 docker/sdk/*.tar.*
+a.out
 
 # AI-assisted-work state — not part of the source tree.
 AGENTS.md
