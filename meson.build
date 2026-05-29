@@ -429,9 +429,12 @@ foreach name, params : ncc_compile_tests
   # compile_run fixtures don't link the libn00b runtime that
   # provides n00b_gc_stack_push / _pop, so the transform would emit
   # references that fail to compile. Opt out per-test.
+  # WP-003 Phase 1 (D-031): auto-roots default flipped to on. Same
+  # reason — these fixtures don't link libn00b and therefore have
+  # no n00b_gc_register_roots / n00b_gc_root_t. Opt out per-test.
   test('ncc_' + name, test_runner,
     args : [ncc_exe, params[0], params[1]] + ncc_test_flags + extra_args
-           + ['--ncc-no-gc-stack-maps'],
+           + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
     suite : 'ncc',
     depends : test_deps,
   )
@@ -441,7 +444,7 @@ test('ncc_static_object_descriptors', test_runner,
   args : [ncc_exe, 'compile_run',
           test_dir / 'test_static_object_descriptors.c']
          + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags
-         + ['--ncc-no-gc-stack-maps'],
+         + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
   suite : 'ncc',
   depends : [ncc_exe, static_image_helper],
 )
@@ -571,9 +574,27 @@ test('ncc_gc_stack_maps_default_on', test_runner,
 # source contains a TU-scope pointer-bearing static that would
 # qualify under the eligibility rules of later phases, ncc invoked
 # WITHOUT --ncc-auto-gc-roots must emit zero auto-roots output.
+# Under WP-003 Phase 1 (D-031) the auto-roots default flipped to
+# on, so this test must explicitly pass --ncc-no-auto-gc-roots to
+# exercise the off path that the assertion pins.
 test('ncc_auto_gc_roots_flag_off_no_op', test_runner,
   args : [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_auto_gc_roots_flag_off_no_op.c',
+          '__ncc_gc_root_table_']
+         + ncc_test_flags + ['--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# WP-003 Phase 1: pins the auto-roots default-on invariant (D-031).
+# With the `auto_gc_roots` meson option's default flipped to `true`
+# (and NCC_AUTO_GC_ROOTS_DEFAULT defined accordingly), ncc invoked
+# WITHOUT any --ncc-auto-gc-roots flag must still fire the
+# xform_gc_globals transform on a TU-scope pointer-bearing decl.
+# Locks the default-on behavior against future regressions.
+test('ncc_auto_gc_roots_default_on', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_default_on.c',
           '__ncc_gc_root_table_']
          + ncc_test_flags,
   suite : 'ncc',
@@ -855,6 +876,71 @@ test('ncc_auto_gc_roots_incomplete_struct_warn', test_runner,
           test_dir / 'err_auto_gc_roots_incomplete_struct.c',
           'forward_obj',
           '(void *) & forward_obj']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# WP-003 / D-036 (F-2): thread_local / _Thread_local decls have
+# per-thread storage; their address is not a compile-time constant,
+# so a static `n00b_gc_root_t[]` table cannot embed `&var`. The
+# transform must skip these decls (mirrors the `extern` skip).
+test('ncc_auto_gc_roots_thread_local_c23_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_auto_gc_roots_thread_local_skipped.c',
+          '(void *) & tls_singleton_c23']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_auto_gc_roots_thread_local_c11_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_auto_gc_roots_thread_local_skipped.c',
+          '(void *) & tls_singleton_c11']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# Anchor: ensure the plain decl in the same file IS registered so
+# the assertions above pin the skip rule, not the zero-decls path.
+test('ncc_auto_gc_roots_thread_local_plain_registered', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_thread_local_skipped.c',
+          '(void *) & plain_root']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# WP-003 / D-036 (F-3): `_Atomic(T *)` globals are a single opaque
+# pointer-word root, not a struct whose fields can be walked. The
+# transform must register one scalar entry (num_words = 1) and
+# never descend into the wrapped type's fields. `_Atomic(scalar)`
+# (non-pointer payload) must be skipped entirely.
+test('ncc_auto_gc_roots_atomic_pointer_registered', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_atomic_pointer_scalar.c',
+          '(void *) & atomic_ptr']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_auto_gc_roots_atomic_pointer_num_words', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_atomic_pointer_scalar.c',
+          '.num_words = 1']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_auto_gc_roots_atomic_scalar_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_auto_gc_roots_atomic_pointer_scalar.c',
+          '(void *) & atomic_scalar']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
   suite : 'ncc',
   depends : ncc_exe,
@@ -1191,7 +1277,7 @@ test('ncc_gc_stack_maps_runtime_compile', test_runner,
 test('ncc_gc_stack_maps_control_flow', test_runner,
   args : [ncc_exe, 'compile_run',
           test_dir / 'test_gc_stack_maps_control_flow.c']
-         + ncc_test_flags + ['--ncc-gc-stack-maps'],
+         + ncc_test_flags + ['--ncc-gc-stack-maps', '--ncc-no-auto-gc-roots'],
   suite : 'ncc',
   depends : ncc_exe,
 )
