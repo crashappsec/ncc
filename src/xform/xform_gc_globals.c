@@ -281,6 +281,53 @@ declarator_has_outer_pointer(ncc_parse_tree_t *declarator)
     return ncc_xform_find_child_nt(declarator, "pointer") != nullptr;
 }
 
+// Returns true if `decl_specs` contain a `thread_local` (C23) or
+// `_Thread_local` (C11) storage-class specifier. Such decls are not
+// eligible for auto-registration: their address is not a compile-
+// time constant (each thread gets its own copy), so the static-table
+// emit path cannot reference them.
+static bool
+specs_contain_thread_local(ncc_parse_tree_t *decl_specs)
+{
+    return specs_contain_leaf_text(decl_specs, "thread_local")
+           || specs_contain_leaf_text(decl_specs, "_Thread_local");
+}
+
+// Returns the top-level `atomic_type_specifier` node within
+// `decl_specs`, or nullptr if the spec list does not use `_Atomic(T)`.
+// Grammar: `atomic_type_specifier ::= _Atomic ( type_name )`. We
+// only care about the type-specifier form (`_Atomic(T)`) — the
+// type-qualifier form (`_Atomic T`) does not parse as an
+// `atomic_type_specifier` and is handled correctly by the existing
+// struct/scalar paths.
+static ncc_parse_tree_t *
+specs_atomic_type_specifier(ncc_parse_tree_t *decl_specs)
+{
+    return ncc_layout_first_descendant_nt(decl_specs,
+                                          "atomic_type_specifier");
+}
+
+// Within an `atomic_type_specifier` (i.e., `_Atomic(T)`), return true
+// iff the wrapped `type_name` has at least one outer `pointer` node in
+// its abstract_declarator. That tells us `_Atomic(T *)` (or deeper)
+// vs. `_Atomic(scalar)`.
+static bool
+atomic_type_specifier_wraps_pointer(ncc_parse_tree_t *atomic_spec)
+{
+    if (!atomic_spec) {
+        return false;
+    }
+    ncc_parse_tree_t *type_name = ncc_xform_find_child_nt(atomic_spec,
+                                                           "type_name");
+    if (!type_name) {
+        return false;
+    }
+    // The abstract_declarator (when present) carries the pointer.
+    // A bare `type_name` of `T *` parses with a `pointer` somewhere
+    // inside the abstract_declarator subtree.
+    return ncc_layout_first_descendant_nt(type_name, "pointer") != nullptr;
+}
+
 static ncc_parse_tree_t *
 declarator_direct(ncc_parse_tree_t *declarator)
 {
@@ -1087,6 +1134,15 @@ classify_declaration(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
         return;
     }
 
+    // Storage-class gate (F-2 / D-036): thread_local decls have
+    // per-thread storage; their address is not a compile-time
+    // constant, so a static `n00b_gc_root_t[]` table cannot embed
+    // `&var`. clang rejects the emit; the only correct disposition
+    // is to skip. Mirrors the `extern` skip above.
+    if (specs_contain_thread_local(decl_specs)) {
+        return;
+    }
+
     ncc_parse_tree_t *init_list
         = ncc_xform_find_child_nt(decl, "init_declarator_list");
     if (!init_list) {
@@ -1097,24 +1153,54 @@ classify_declaration(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
 
     bool const_char = base_type_is_const_char(decl_specs);
 
+    // Atomic-type gate (F-3 / D-036): `_Atomic(T *)` globals are a
+    // single opaque pointer word, NOT a struct whose fields can be
+    // walked. The wrapper hides the pointed-to type from the field-
+    // walking path; without this gate, the struct path would treat
+    // the inner type as the variable's type and emit incorrect
+    // per-field entries (or worse, recurse into an unrelated
+    // struct). Disposition:
+    //   * `_Atomic(T *)` (any pointer depth inside the wrapper):
+    //     register as a scalar pointer with num_words = 1.
+    //   * `_Atomic(scalar)` (non-pointer inside): not GC-relevant,
+    //     silent skip.
+    // Either way we bypass the struct/scalar branches below.
+    ncc_parse_tree_t *atomic_spec = specs_atomic_type_specifier(decl_specs);
+    bool atomic_wraps_ptr = atomic_spec
+        ? atomic_type_specifier_wraps_pointer(atomic_spec) : false;
+
     // Is the base type a struct/union/typedef-resolved aggregate?
     // Used both for the "pointer-bearing struct" candidate path and
     // the D-009 unresolved-struct warn-and-skip.
+    //
+    // Suppressed when the decl uses `_Atomic(...)`: the inner type
+    // is opaque to the GC and must not drive struct/aggregate
+    // analysis (F-3 above).
     ncc_layout_aggregate_type_info_t *agg_info
-        = ncc_layout_aggregate_info_from_specs(ctx, decl_specs);
-    ncc_parse_tree_t *agg = agg_info
-                              ? agg_info->specifier
-                              : ncc_layout_aggregate_spec_from_specs(ctx,
-                                                                     decl_specs);
+        = atomic_spec
+              ? nullptr
+              : ncc_layout_aggregate_info_from_specs(ctx, decl_specs);
+    ncc_parse_tree_t *agg = atomic_spec
+                              ? nullptr
+                              : (agg_info
+                                     ? agg_info->specifier
+                                     : ncc_layout_aggregate_spec_from_specs(
+                                         ctx, decl_specs));
 
     // Detect whether the spec MENTIONS a struct/union keyword or a
     // typedef name that resolves to one. We use the same machinery
     // `xform_static_image.c` / `xform_gc_stack_maps.c` use, plus a
     // grammar check on `struct_or_union_specifier`.
+    //
+    // When the spec is `_Atomic(...)`, any `struct_or_union_specifier`
+    // descendant lives INSIDE the wrapper and refers to the pointed-
+    // to type, not the variable's type. Suppress the aggregate path
+    // entirely in that case (F-3).
     bool specs_mention_aggregate
-        = ncc_layout_first_descendant_nt(decl_specs,
-                                         "struct_or_union_specifier")
-          != nullptr;
+        = (!atomic_spec)
+          && ncc_layout_first_descendant_nt(decl_specs,
+                                            "struct_or_union_specifier")
+                 != nullptr;
 
     size_t nc = ncc_tree_num_children(init_list);
     for (size_t i = 0; i < nc; i++) {
@@ -1140,6 +1226,53 @@ classify_declaration(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
         // Function-declarator outer: function or function-pointer-
         // array. Either way: skip.
         if (shape == DD_FUNCTION) {
+            continue;
+        }
+
+        // Atomic-wrapper path (F-3 / D-036). When the base type is
+        // `_Atomic(...)`, the wrapper governs eligibility — not the
+        // wrapped type. We never recurse into the wrapped type; the
+        // atomic object is a single opaque word.
+        //
+        //   * `_Atomic(T *) x;`  → register as scalar pointer.
+        //     (Arrays of atomic pointers, `_Atomic(T *) xs[N];`, are
+        //     handled the same way the regular pointer-array shape
+        //     would handle them, with shape == DD_ARRAY.)
+        //   * `_Atomic(T) x;`    → skip (no GC-relevant pointer).
+        //
+        // Atomic-of-struct is intentionally not supported: the
+        // wrapper makes the value opaque to the GC by design, and
+        // there is no consumer in libn00b that needs scanning into a
+        // struct held atomically as a value.
+        if (atomic_spec) {
+            if (!atomic_wraps_ptr) {
+                continue;
+            }
+            if (shape != DD_IDENT && shape != DD_ARRAY) {
+                continue;
+            }
+            char *name = extract_name_from_declarator(dd);
+            if (!name) {
+                continue;
+            }
+            if (name_is_ncc_internal(name)) {
+                ncc_free(name);
+                continue;
+            }
+            uint64_t n_words = 1;
+            if (shape == DD_ARRAY) {
+                if (!classify_array_candidate(declarator, &n_words)) {
+                    ncc_free(name);
+                    continue;
+                }
+            }
+            cand_t cand = {
+                .kind       = (shape == DD_ARRAY) ? CAND_ARRAY : CAND_SCALAR,
+                .name       = name,
+                .num_words  = n_words,
+                .field_path = nullptr,
+            };
+            candvec_push(out_cands, cand);
             continue;
         }
 
