@@ -657,6 +657,25 @@ walk_union(ncc_xform_ctx_t *ctx, const char *elem_type,
     }
 
     if (any_complex || (first_ptr && any_scalar)) {
+        // The union can't be statically described as all-pointer or
+        // all-scalar, so the whole type gets NO precise GC pointer-map and
+        // silently falls back to conservative scanning. That conservative
+        // scan can misread a scalar union payload (e.g. a packed {min,max}
+        // like 0x100000000) as a pointer, which makes the type
+        // unmarshalable at runtime. Warn (don't fail) so the build still
+        // completes but every offending type is surfaced; the fix is to
+        // split the union into separate pointer / non-pointer fields.
+        fprintf(stderr,
+                "ncc: warning: gc-typemap: type '%s' has a union that cannot "
+                "be statically described for GC scanning (%s); the type loses "
+                "its precise pointer map and falls back to conservative scan "
+                "(not precisely marshalable). Split the union into separate "
+                "pointer and non-pointer fields.\n",
+                elem_type ? elem_type : "(anonymous)",
+                any_complex
+                    ? "a member is a by-value aggregate, an unnamed pointer, "
+                      "or a non-function-pointer array"
+                    : "it mixes pointer and non-pointer members");
         *ok = false; // can't statically describe this union
     }
     else if (first_ptr && !any_scalar) {
