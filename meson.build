@@ -188,6 +188,7 @@ src_xform = files(
   'src/xform/xform_bang.c',
   'src/xform/xform_constexpr.c',
   'src/xform/xform_constexpr_paste.c',
+  'src/xform/xform_contracts.c',
   'src/xform/xform_generic_struct.c',
   'src/xform/xform_gc_globals.c',
   'src/xform/xform_gc_stack_maps.c',
@@ -399,6 +400,8 @@ ncc_compile_tests = {
   'constexpr':    ['compile_run',  test_dir / 'test_constexpr.c'],
   'kargs':        ['compile_run',  test_dir / 'test_kargs.c'],
   'kargs_vargs':  ['compile_run',  test_dir / 'test_kargs_vargs.c'],
+  'function_contracts': ['compile_run',
+                         test_dir / 'test_function_contracts.c'],
   'function_contracts_parse': ['preprocess',
                                test_dir / 'test_function_contracts_parse.c'],
   'function_contract_keyword_collision': ['compile_run',
@@ -444,6 +447,165 @@ foreach name, params : ncc_compile_tests
     depends : test_deps,
   )
 endforeach
+
+test('ncc_function_contracts_helper_shape', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_function_contracts_wrapper_shape.c',
+          'static int __ncc_cw_shaped_body']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_function_contracts_result_return', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_function_contracts_wrapper_shape.c',
+          'return result']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_function_contracts_debug_gate', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_function_contracts_wrapper_shape.c',
+          '#ifndef NDEBUG']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_function_contracts_trap', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_function_contracts_wrapper_shape.c',
+          '__builtin_trap']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_function_contracts_later_requires_lowered', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_function_contracts_wrapper_shape.c',
+          'x < 1000']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_function_contracts_later_ensures_lowered', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_function_contracts_wrapper_shape.c',
+          'result < 1000']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_function_contracts_requires_removed', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_function_contracts_wrapper_shape.c',
+          'requires']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_function_contracts_ensures_removed', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_function_contracts_wrapper_shape.c',
+          'ensures']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_function_contracts_kargs_requires_removed', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_function_contracts.c',
+          'requires']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_function_contracts_kargs_ensures_removed', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_function_contracts.c',
+          'ensures']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_function_contracts_fnptr_arg_forwarding', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_function_contracts_wrapper_shape.c',
+          '__ncc_cw_apply_fn_body (fn, x)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_function_contracts_array_arg_forwarding', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_function_contracts_wrapper_shape.c',
+          '__ncc_cw_first_value_body (values)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_function_contracts_support_statements_preserved', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_function_contracts_wrapper_shape.c',
+          'support_shadow = x + 1']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_function_contracts_kargs_helper_uses_local', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_function_contracts_wrapper_shape.c',
+          '__ncc_cw_shaped_kargs_body (x, bias)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_function_contracts_extension_helper_shape', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_function_contracts_wrapper_shape.c',
+          'static int __ncc_cw_extension_contract_body']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_function_contracts_release_kargs_statement_default', test_runner,
+  args : [ncc_exe, 'compile_run',
+          test_dir / 'test_function_contracts.c']
+         + ncc_test_flags + ['-DNDEBUG', '--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
 
 test('ncc_static_object_descriptors', test_runner,
   args : [ncc_exe, 'compile_run',
@@ -1618,6 +1780,14 @@ ncc_error_contains_tests = {
   'err_function_contract_declaration': [
     test_dir / 'err_function_contract_declaration.c',
     'parse FAILED',
+  ],
+  'err_function_contract_once': [
+    test_dir / 'err_function_contract_once.c',
+    'functions with contracts are not supported yet',
+  ],
+  'err_function_contract_once_extension': [
+    test_dir / 'err_function_contract_once_extension.c',
+    'functions with contracts are not supported yet',
   ],
   'err_array_literal_union_pointer': [
     test_dir / 'err_array_literal_union_pointer.c',

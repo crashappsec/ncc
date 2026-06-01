@@ -1621,7 +1621,7 @@ static ncc_parse_tree_t *find_first_positional_arg(ncc_parse_tree_t *arg_list) {
 }
 
 // Handle kw_func(target_func, .name=val, ...) calls.
-// Produces: &(struct _target__kargs){defaults..., ._has_name=1, .name=val}
+// Produces: &(struct _target__kargs){._has_name=1, .name=val}
 static ncc_parse_tree_t *xform_kw_func(ncc_xform_ctx_t *ctx,
                                        ncc_parse_tree_t *arg_list) {
   // arg0 is the target function name.
@@ -1660,7 +1660,9 @@ static ncc_parse_tree_t *xform_kw_func(ncc_xform_ctx_t *ctx,
     return nullptr;
   }
 
-  // Build: &(struct _target__kargs){defaults..., ._has_name=1, .name=val}
+  // Build: &(struct _target__kargs){._has_name=1, .name=val}
+  // Omitted defaults are evaluated by the callee-side extraction, not at
+  // the call site. This keeps side-effecting defaults single-evaluation.
   // Resolve any typeid/typehash in target_name before interpolation.
   ncc_string_t resolved_target = resolve_ncc_type_calls(target_name);
   char literal_src[16384];
@@ -1670,26 +1672,9 @@ static ncc_parse_tree_t *xform_kw_func(ncc_xform_ctx_t *ctx,
                           "& ( struct _%s__kargs ) { ", resolved_target.data);
   ncc_free(resolved_target.data);
 
-  // Phase 1: emit defaults from metadata.
   bool first = true;
-  if (meta && meta->kw) {
-    for (int i = 0; i < meta->kw->num_params; i++) {
-      ncc_kw_param_t *p = &meta->kw->params[i];
-      if (!p->default_text.data) {
-        continue;
-      }
-      if (!first) {
-        pos += (size_t)snprintf(literal_src + pos, sizeof(literal_src) - pos,
-                                " , ");
-      }
-      pos +=
-          (size_t)snprintf(literal_src + pos, sizeof(literal_src) - pos,
-                           ". %s = ( %s )", p->name.data, p->default_text.data);
-      first = false;
-    }
-  }
 
-  // Phase 2: emit user-provided keyword arguments (override defaults).
+  // Emit user-provided keyword arguments.
   for (int i = 0; i < arg_count; i++) {
     if (!args[i].name) {
       continue; // Skip positional (arg0 = target function name).
@@ -2067,7 +2052,9 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
                            "& ( struct _%s__kargs ) { ", resolved_callee.data);
       ncc_free(resolved_callee.data);
 
-      // For each kw param: emit user override if present, else default.
+      // For each kw param: emit user overrides only. Omitted defaults are
+      // evaluated by the callee-side extraction so the default expression has
+      // exactly one evaluation point.
       bool first = true;
       for (int i = 0; i < meta->kw->num_params; i++) {
         ncc_kw_param_t *p = &meta->kw->params[i];
@@ -2094,16 +2081,6 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
                                   p->name.data, val_text.data);
           first = false;
           ncc_free(val_text.data);
-        } else if (p->default_text.data) {
-          // Use default value.
-          if (!first) {
-            pos +=
-                (size_t)snprintf(new_args + pos, sizeof(new_args) - pos, " , ");
-          }
-          pos += (size_t)snprintf(new_args + pos, sizeof(new_args) - pos,
-                                  ". %s = ( %s )", p->name.data,
-                                  p->default_text.data);
-          first = false;
         }
       }
 
