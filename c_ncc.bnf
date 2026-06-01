@@ -439,8 +439,11 @@
     | <attribute_specifier_sequence>? <declaration_specifiers> <declarator> <keyword_clause> <function_contract_clauses> <function_body>
     | <attribute_specifier_sequence>? <declaration_specifiers> <declarator> <function_contract_clauses> <function_body>
     | <attribute_specifier_sequence>? <declaration_specifiers> <declarator> <rpc_clause> <function_body>
+    | <attribute_specifier_sequence>? <declaration_specifiers> <declarator> <rpc_clause> <function_contract_clauses> <function_body>
     | <attribute_specifier_sequence>? <declaration_specifiers> <declarator> <keyword_clause> <rpc_clause> <function_body>
+    | <attribute_specifier_sequence>? <declaration_specifiers> <declarator> <keyword_clause> <rpc_clause> <function_contract_clauses> <function_body>
     | <attribute_specifier_sequence>? <declaration_specifiers> <declarator> <rpc_clause> <keyword_clause> <function_body>
+    | <attribute_specifier_sequence>? <declaration_specifiers> <declarator> <rpc_clause> <keyword_clause> <function_contract_clauses> <function_body>
     | <attribute_specifier_sequence>? <declaration_specifiers> <declarator> <function_body>
     | %"__extension__" <function_definition>
 

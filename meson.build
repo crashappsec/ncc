@@ -1789,6 +1789,14 @@ ncc_error_contains_tests = {
     test_dir / 'err_function_contract_once_extension.c',
     'functions with contracts are not supported yet',
   ],
+  'err_function_contract_rpc': [
+    test_dir / 'err_function_contract_rpc.c',
+    '@rpc cannot be combined with function contracts',
+  ],
+  'err_function_contract_rpc_extension': [
+    test_dir / 'err_function_contract_rpc_extension.c',
+    '@rpc cannot be combined with function contracts',
+  ],
   'err_function_contract_result_requires': [
     test_dir / 'err_function_contract_result_requires.c',
     'result is only available in non-void ensures',
