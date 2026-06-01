@@ -1789,6 +1789,58 @@ ncc_error_contains_tests = {
     test_dir / 'err_function_contract_once_extension.c',
     'functions with contracts are not supported yet',
   ],
+  'err_function_contract_result_requires': [
+    test_dir / 'err_function_contract_result_requires.c',
+    'result is only available in non-void ensures',
+  ],
+  'err_function_contract_result_void': [
+    test_dir / 'err_function_contract_result_void.c',
+    'result is only available in non-void ensures',
+  ],
+  'err_function_contract_call': [
+    test_dir / 'err_function_contract_call.c',
+    'function calls are not allowed in function contracts',
+  ],
+  'err_function_contract_return': [
+    test_dir / 'err_function_contract_return.c',
+    'return is not allowed in function contracts',
+  ],
+  'err_function_contract_goto': [
+    test_dir / 'err_function_contract_goto.c',
+    'goto is not allowed in function contracts',
+  ],
+  'err_function_contract_mutates_param': [
+    test_dir / 'err_function_contract_mutates_param.c',
+    'contract may mutate only contract-local variables',
+  ],
+  'err_function_contract_mutates_param_before_local': [
+    test_dir / 'err_function_contract_mutates_param_before_local.c',
+    'contract may mutate only contract-local variables',
+  ],
+  'err_function_contract_mutates_param_after_for_local': [
+    test_dir / 'err_function_contract_mutates_param_after_for_local.c',
+    'contract may mutate only contract-local variables',
+  ],
+  'err_function_contract_mutates_global': [
+    test_dir / 'err_function_contract_mutates_global.c',
+    'contract may mutate only contract-local variables',
+  ],
+  'err_function_contract_mutates_pointee': [
+    test_dir / 'err_function_contract_mutates_pointee.c',
+    'contract may mutate only contract-local variables',
+  ],
+  'err_function_contract_mutates_member': [
+    test_dir / 'err_function_contract_mutates_member.c',
+    'contract may mutate only contract-local variables',
+  ],
+  'err_function_contract_mutates_array': [
+    test_dir / 'err_function_contract_mutates_array.c',
+    'contract may mutate only contract-local variables',
+  ],
+  'err_function_contract_result_shadow': [
+    test_dir / 'err_function_contract_result_shadow.c',
+    'result may not be declared in function contracts',
+  ],
   'err_array_literal_union_pointer': [
     test_dir / 'err_array_literal_union_pointer.c',
     'precise active-member static layout is not supported yet',

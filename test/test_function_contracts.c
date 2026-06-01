@@ -93,6 +93,56 @@ support_loop_contract(int x)
     return x + 3;
 }
 
+static int
+contract_local_mutation(int x)
+    requires {
+        int acc = 0;
+        if (x > 0) {
+            acc = x;
+            acc += 3;
+            ++acc;
+            acc--;
+        }
+        acc == x + 3;
+    }
+    ensures {
+        int delta = 0;
+        for (int i = x; i < result; i++) {
+            delta++;
+        }
+        delta == 4;
+    }
+{
+    return x + 4;
+}
+
+static int
+plain_result_identifier(int result)
+{
+    int local_result = result + 1;
+    return local_result;
+}
+
+struct result_field_contract {
+    int result;
+};
+
+static int
+field_result_identifier(struct result_field_contract item)
+    requires { item.result > 0; }
+    ensures { result > item.result; }
+{
+    return item.result + 1;
+}
+
+static int
+parenthesized_and_cast_contract(int x)
+    requires { (((x))) > 0; ((long)x) > 0; }
+    ensures { ((int)result) == x + 1; }
+{
+    return x + 1;
+}
+
 static int keyword_default_counter = 0;
 
 static int
@@ -168,36 +218,53 @@ main(void)
         return 10;
     }
 
-    keyword_default_counter = 0;
-    if (single_keyword_default(5) != 46) {
+    if (contract_local_mutation(9) != 13) {
         return 11;
     }
-    if (keyword_default_counter != 1) {
+
+    if (plain_result_identifier(20) != 21) {
         return 12;
+    }
+
+    struct result_field_contract item = {.result = 30};
+    if (field_result_identifier(item) != 31) {
+        return 13;
+    }
+
+    if (parenthesized_and_cast_contract(41) != 42) {
+        return 14;
+    }
+
+    keyword_default_counter = 0;
+    if (single_keyword_default(5) != 46) {
+        return 15;
+    }
+    if (keyword_default_counter != 1) {
+        return 16;
     }
 
     keyword_default_counter = 0;
     if (single_keyword_default(5, .bias = 9) != 14) {
-        return 13;
+        return 17;
     }
     if (keyword_default_counter != 0) {
-        return 14;
+        return 18;
     }
 
     statement_keyword_default_counter = 0;
     if (statement_keyword_default(5) != 12) {
-        return 15;
+        return 19;
     }
     if (statement_keyword_default_counter != 1) {
-        return 16;
+        return 20;
     }
 
     statement_keyword_default_counter = 0;
     if (statement_keyword_default(5, .bias = 11) != 16) {
-        return 17;
+        return 21;
     }
     if (statement_keyword_default_counter != 0) {
-        return 18;
+        return 22;
     }
 
     return 0;

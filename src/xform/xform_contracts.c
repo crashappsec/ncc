@@ -569,6 +569,15 @@ static void strvec_push(strvec_t *v, char *s) {
   v->items[v->len++] = s;
 }
 
+static bool strvec_contains(strvec_t *v, const char *s) {
+  for (size_t i = 0; i < v->len; i++) {
+    if (strcmp(v->items[i], s) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void strvec_free(strvec_t *v) {
   for (size_t i = 0; i < v->len; i++) {
     ncc_free(v->items[i]);
@@ -586,6 +595,480 @@ static bool is_group_like_node(ncc_parse_tree_t *node) {
 
   ncc_nt_node_t pn = ncc_tree_node_value(node);
   return pn.group_top || pn.group_item;
+}
+
+// ============================================================================
+// Contract semantic analysis
+// ============================================================================
+
+typedef struct {
+  strvec_t *scopes;
+  size_t scope_len;
+  size_t scope_cap;
+  bool result_allowed;
+} contract_semantic_ctx_t;
+
+static void analyze_contract_semantics_node(contract_semantic_ctx_t *cctx,
+                                            ncc_parse_tree_t *node);
+
+static void contract_semantic_error(ncc_parse_tree_t *node,
+                                    const char *message) {
+  uint32_t line, col;
+  ncc_xform_first_leaf_pos(node, &line, &col);
+  fprintf(stderr, "ncc: error: %s (line %u, col %u)\n",
+          message, line, col);
+  exit(1);
+}
+
+static ncc_parse_tree_t *direct_child_nt(ncc_parse_tree_t *node,
+                                         const char *name) {
+  if (!node || ncc_tree_is_leaf(node)) {
+    return nullptr;
+  }
+
+  size_t nc = ncc_tree_num_children(node);
+  for (size_t i = 0; i < nc; i++) {
+    ncc_parse_tree_t *child = ncc_tree_child(node, i);
+    if (child && !ncc_tree_is_leaf(child) &&
+        ncc_xform_nt_name_is(child, name)) {
+      return child;
+    }
+  }
+
+  return nullptr;
+}
+
+static bool node_has_direct_leaf(ncc_parse_tree_t *node, const char *text) {
+  if (!node || ncc_tree_is_leaf(node)) {
+    return false;
+  }
+
+  size_t nc = ncc_tree_num_children(node);
+  for (size_t i = 0; i < nc; i++) {
+    ncc_parse_tree_t *child = ncc_tree_child(node, i);
+    if (child && ncc_tree_is_leaf(child) &&
+        ncc_xform_leaf_text_eq(child, text)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static bool node_first_direct_leaf_is(ncc_parse_tree_t *node,
+                                      const char *text) {
+  if (!node || ncc_tree_is_leaf(node) ||
+      ncc_tree_num_children(node) == 0) {
+    return false;
+  }
+
+  ncc_parse_tree_t *child = ncc_tree_child(node, 0);
+  return child && ncc_tree_is_leaf(child) &&
+         ncc_xform_leaf_text_eq(child, text);
+}
+
+static const char *identifier_name(ncc_parse_tree_t *node) {
+  if (!node || !ncc_xform_nt_name_is(node, "identifier")) {
+    return nullptr;
+  }
+
+  return ncc_xform_get_first_leaf_text(node);
+}
+
+static bool subtree_has_identifier_named(ncc_parse_tree_t *node,
+                                         const char *name) {
+  if (!node || ncc_tree_is_leaf(node)) {
+    return false;
+  }
+  if (ncc_xform_nt_name_is(node, "_member_name")) {
+    return false;
+  }
+  if (ncc_xform_nt_name_is(node, "identifier")) {
+    const char *id = identifier_name(node);
+    return id && strcmp(id, name) == 0;
+  }
+
+  size_t nc = ncc_tree_num_children(node);
+  for (size_t i = 0; i < nc; i++) {
+    if (subtree_has_identifier_named(ncc_tree_child(node, i), name)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static const char *plain_identifier_target_name(ncc_parse_tree_t *node) {
+  while (node && !ncc_tree_is_leaf(node) &&
+         !ncc_xform_nt_name_is(node, "identifier")) {
+    if (ncc_xform_nt_name_is(node, "primary_expression") &&
+        node_first_direct_leaf_is(node, "(")) {
+      ncc_parse_tree_t *expr = direct_child_nt(node, "expression");
+      if (!expr) {
+        return nullptr;
+      }
+      node = expr;
+      continue;
+    }
+    if (ncc_tree_num_children(node) != 1) {
+      return nullptr;
+    }
+    ncc_parse_tree_t *child = ncc_tree_child(node, 0);
+    if (!child || ncc_tree_is_leaf(child)) {
+      return nullptr;
+    }
+    node = child;
+  }
+
+  return identifier_name(node);
+}
+
+static bool postfix_expression_is_call(ncc_parse_tree_t *node) {
+  if (!ncc_xform_nt_name_is(node, "postfix_expression") ||
+      !node_has_direct_leaf(node, "(")) {
+    return false;
+  }
+
+  size_t nc = ncc_tree_num_children(node);
+  for (size_t i = 0; i < nc; i++) {
+    ncc_parse_tree_t *child = ncc_tree_child(node, i);
+    if (!child || ncc_tree_is_leaf(child)) {
+      continue;
+    }
+    return ncc_xform_nt_name_is(child, "postfix_expression");
+  }
+
+  return false;
+}
+
+static bool postfix_expression_is_inc_dec(ncc_parse_tree_t *node) {
+  return ncc_xform_nt_name_is(node, "postfix_expression") &&
+         (node_has_direct_leaf(node, "++") ||
+          node_has_direct_leaf(node, "--"));
+}
+
+static bool unary_expression_is_prefix_inc_dec(ncc_parse_tree_t *node) {
+  if (!ncc_xform_nt_name_is(node, "unary_expression")) {
+    return false;
+  }
+
+  if (ncc_tree_num_children(node) < 2) {
+    return false;
+  }
+
+  ncc_parse_tree_t *first = ncc_tree_child(node, 0);
+  return first && ncc_tree_is_leaf(first) &&
+         (ncc_xform_leaf_text_eq(first, "++") ||
+          ncc_xform_leaf_text_eq(first, "--"));
+}
+
+static ncc_parse_tree_t *assignment_lhs(ncc_parse_tree_t *node) {
+  if (!ncc_xform_nt_name_is(node, "assignment_expression")) {
+    return nullptr;
+  }
+
+  ncc_parse_tree_t *op = direct_child_nt(node, "assignment_operator");
+  if (!op) {
+    return nullptr;
+  }
+
+  size_t nc = ncc_tree_num_children(node);
+  for (size_t i = 0; i < nc; i++) {
+    ncc_parse_tree_t *child = ncc_tree_child(node, i);
+    if (child == op) {
+      break;
+    }
+    if (child && !ncc_tree_is_leaf(child)) {
+      return child;
+    }
+  }
+
+  return nullptr;
+}
+
+static ncc_parse_tree_t *assignment_rhs(ncc_parse_tree_t *node) {
+  ncc_parse_tree_t *op = direct_child_nt(node, "assignment_operator");
+  if (!op) {
+    return nullptr;
+  }
+
+  bool seen_op = false;
+  size_t nc = ncc_tree_num_children(node);
+  for (size_t i = 0; i < nc; i++) {
+    ncc_parse_tree_t *child = ncc_tree_child(node, i);
+    if (child == op) {
+      seen_op = true;
+      continue;
+    }
+    if (seen_op && child && !ncc_tree_is_leaf(child)) {
+      return child;
+    }
+  }
+
+  return nullptr;
+}
+
+static void contract_scope_push(contract_semantic_ctx_t *cctx) {
+  if (cctx->scope_len >= cctx->scope_cap) {
+    cctx->scope_cap = cctx->scope_cap ? cctx->scope_cap * 2 : 4;
+    cctx->scopes =
+        ncc_realloc(cctx->scopes, cctx->scope_cap * sizeof(strvec_t));
+  }
+
+  strvec_init(&cctx->scopes[cctx->scope_len++]);
+}
+
+static void contract_scope_pop(contract_semantic_ctx_t *cctx) {
+  if (cctx->scope_len == 0) {
+    return;
+  }
+
+  cctx->scope_len--;
+  strvec_free(&cctx->scopes[cctx->scope_len]);
+}
+
+static void contract_scope_free(contract_semantic_ctx_t *cctx) {
+  while (cctx->scope_len > 0) {
+    contract_scope_pop(cctx);
+  }
+  ncc_free(cctx->scopes);
+  cctx->scopes = nullptr;
+  cctx->scope_cap = 0;
+}
+
+static bool contract_name_is_local(contract_semantic_ctx_t *cctx,
+                                   const char *name) {
+  for (size_t i = cctx->scope_len; i > 0; i--) {
+    if (strvec_contains(&cctx->scopes[i - 1], name)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+static void check_mutation_target(contract_semantic_ctx_t *cctx,
+                                  ncc_parse_tree_t *target) {
+  if (!cctx->result_allowed &&
+      subtree_has_identifier_named(target, "result")) {
+    contract_semantic_error(target,
+                            "result is only available in non-void ensures");
+  }
+
+  const char *name = plain_identifier_target_name(target);
+  if (!name || !contract_name_is_local(cctx, name)) {
+    contract_semantic_error(target,
+                            "contract may mutate only contract-local "
+                            "variables");
+  }
+}
+
+static void add_declarator_local(contract_semantic_ctx_t *cctx,
+                                 ncc_parse_tree_t *declarator) {
+  ncc_string_t text = ncc_xform_node_to_text(declarator);
+  if (!text.data) {
+    return;
+  }
+
+  char *clean = strip_declarator_attributes(text.data);
+  char *name = copy_param_name_from_text(clean);
+  ncc_free(text.data);
+  ncc_free(clean);
+
+  if (!name) {
+    return;
+  }
+
+  if (strcmp(name, "result") == 0) {
+    ncc_free(name);
+    contract_semantic_error(declarator,
+                            "result may not be declared in function "
+                            "contracts");
+  }
+
+  if (cctx->scope_len == 0) {
+    ncc_free(name);
+    return;
+  }
+
+  strvec_t *scope = &cctx->scopes[cctx->scope_len - 1];
+  if (!strvec_contains(scope, name)) {
+    strvec_push(scope, name);
+  } else {
+    ncc_free(name);
+  }
+}
+
+static void analyze_init_declarator_semantics(contract_semantic_ctx_t *cctx,
+                                              ncc_parse_tree_t *node) {
+  if (!node || ncc_tree_is_leaf(node)) {
+    return;
+  }
+
+  ncc_parse_tree_t *declarator = ncc_xform_find_child_nt(node,
+                                                         "declarator");
+  if (declarator) {
+    add_declarator_local(cctx, declarator);
+  }
+
+  size_t nc = ncc_tree_num_children(node);
+  for (size_t i = 0; i < nc; i++) {
+    ncc_parse_tree_t *child = ncc_tree_child(node, i);
+    if (child && !ncc_tree_is_leaf(child)) {
+      analyze_contract_semantics_node(cctx, child);
+    }
+  }
+}
+
+static void analyze_init_declarator_list_semantics(
+    contract_semantic_ctx_t *cctx, ncc_parse_tree_t *node) {
+  if (!node || ncc_tree_is_leaf(node)) {
+    return;
+  }
+
+  size_t nc = ncc_tree_num_children(node);
+  for (size_t i = 0; i < nc; i++) {
+    ncc_parse_tree_t *child = ncc_tree_child(node, i);
+    if (!child || ncc_tree_is_leaf(child)) {
+      continue;
+    }
+    if (ncc_xform_nt_name_is(child, "init_declarator")) {
+      analyze_init_declarator_semantics(cctx, child);
+    } else {
+      analyze_contract_semantics_node(cctx, child);
+    }
+  }
+}
+
+static void analyze_declaration_semantics(contract_semantic_ctx_t *cctx,
+                                          ncc_parse_tree_t *node) {
+  if (!node || ncc_tree_is_leaf(node)) {
+    return;
+  }
+
+  size_t nc = ncc_tree_num_children(node);
+  for (size_t i = 0; i < nc; i++) {
+    ncc_parse_tree_t *child = ncc_tree_child(node, i);
+    if (!child || ncc_tree_is_leaf(child)) {
+      continue;
+    }
+    if (ncc_xform_nt_name_is(child, "init_declarator_list")) {
+      analyze_init_declarator_list_semantics(cctx, child);
+      continue;
+    }
+    if (ncc_xform_nt_name_is(child, "declarator")) {
+      add_declarator_local(cctx, child);
+    }
+    analyze_contract_semantics_node(cctx, child);
+  }
+}
+
+static void analyze_contract_semantics_node(contract_semantic_ctx_t *cctx,
+                                            ncc_parse_tree_t *node) {
+  if (!node || ncc_tree_is_leaf(node)) {
+    return;
+  }
+
+  if (ncc_xform_nt_name_is(node, "struct_or_union_specifier") ||
+      ncc_xform_nt_name_is(node, "enum_specifier") ||
+      ncc_xform_nt_name_is(node, "_member_name")) {
+    return;
+  }
+
+  if (ncc_xform_nt_name_is(node, "compound_statement") ||
+      ncc_xform_nt_name_is(node, "selection_statement") ||
+      ncc_xform_nt_name_is(node, "iteration_statement")) {
+    contract_scope_push(cctx);
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+      analyze_contract_semantics_node(cctx, ncc_tree_child(node, i));
+    }
+    contract_scope_pop(cctx);
+    return;
+  }
+
+  if (ncc_xform_nt_name_is(node, "identifier")) {
+    const char *name = identifier_name(node);
+    if (name && strcmp(name, "result") == 0 && !cctx->result_allowed) {
+      contract_semantic_error(node,
+                              "result is only available in non-void "
+                              "ensures");
+    }
+    return;
+  }
+
+  if (ncc_xform_nt_name_is(node, "init_declarator_list")) {
+    analyze_init_declarator_list_semantics(cctx, node);
+    return;
+  }
+
+  if (ncc_xform_nt_name_is(node, "init_declarator")) {
+    analyze_init_declarator_semantics(cctx, node);
+    return;
+  }
+
+  if (ncc_xform_nt_name_is(node, "declaration") ||
+      ncc_xform_nt_name_is(node, "simple_declaration")) {
+    analyze_declaration_semantics(cctx, node);
+    return;
+  }
+
+  if (ncc_xform_nt_name_is(node, "jump_statement")) {
+    const char *first = ncc_xform_get_first_leaf_text(node);
+    if (first && strcmp(first, "return") == 0) {
+      contract_semantic_error(node,
+                              "return is not allowed in function contracts");
+    }
+    if (first && strcmp(first, "goto") == 0) {
+      contract_semantic_error(node,
+                              "goto is not allowed in function contracts");
+    }
+  }
+
+  if (postfix_expression_is_call(node)) {
+    contract_semantic_error(node,
+                            "function calls are not allowed in function "
+                            "contracts");
+  }
+
+  ncc_parse_tree_t *lhs = assignment_lhs(node);
+  if (lhs) {
+    check_mutation_target(cctx, lhs);
+    analyze_contract_semantics_node(cctx, assignment_rhs(node));
+    return;
+  }
+
+  if (postfix_expression_is_inc_dec(node)) {
+    ncc_parse_tree_t *target = ncc_tree_num_children(node) > 0
+                                   ? ncc_tree_child(node, 0)
+                                   : nullptr;
+    check_mutation_target(cctx, target);
+    return;
+  }
+
+  if (unary_expression_is_prefix_inc_dec(node)) {
+    ncc_parse_tree_t *target = ncc_tree_num_children(node) > 1
+                                   ? ncc_tree_child(node, 1)
+                                   : nullptr;
+    check_mutation_target(cctx, target);
+    return;
+  }
+
+  size_t nc = ncc_tree_num_children(node);
+  for (size_t i = 0; i < nc; i++) {
+    analyze_contract_semantics_node(cctx, ncc_tree_child(node, i));
+  }
+}
+
+static void analyze_contract_clause_semantics(ncc_parse_tree_t *clause,
+                                              bool result_allowed) {
+  if (!clause) {
+    return;
+  }
+
+  contract_semantic_ctx_t cctx = {};
+  cctx.result_allowed = result_allowed;
+  analyze_contract_semantics_node(&cctx, clause);
+  contract_scope_free(&cctx);
 }
 
 static ncc_parse_tree_t *find_top_level_expr_stmt(ncc_parse_tree_t *node) {
@@ -1126,6 +1609,16 @@ xform_contracts_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu) {
         ncc_xform_find_child_nt(contracts, "requires_clause");
     ncc_parse_tree_t *ensures_clause =
         ncc_xform_find_child_nt(contracts, "ensures_clause");
+
+    char *base_type = ncc_xform_collect_base_type(decl_specs);
+    char *return_modifier = collect_return_modifier_text(declarator);
+    char *return_type = join_return_type(base_type, return_modifier);
+    bool void_ret =
+        ncc_xform_has_void_type(decl_specs) && return_modifier[0] == '\0';
+
+    analyze_contract_clause_semantics(requires_clause, false);
+    analyze_contract_clause_semantics(ensures_clause, !void_ret);
+
     if (requires_clause) {
       collect_clause_items(requires_clause, &requires_items);
     }
@@ -1133,11 +1626,6 @@ xform_contracts_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu) {
       collect_clause_items(ensures_clause, &ensures_items);
     }
 
-    char *base_type = ncc_xform_collect_base_type(decl_specs);
-    char *return_modifier = collect_return_modifier_text(declarator);
-    char *return_type = join_return_type(base_type, return_modifier);
-    bool void_ret =
-        ncc_xform_has_void_type(decl_specs) && return_modifier[0] == '\0';
     char *quals = ncc_xform_collect_qualifiers(decl_specs, nullptr);
     char *params = collect_param_list_text(declarator);
     collect_kargs_extracts(func_body, &kargs_extracts, &karg_helper_params,
