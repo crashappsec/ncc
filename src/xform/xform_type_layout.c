@@ -12,7 +12,6 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 char *
@@ -278,6 +277,21 @@ int
 ncc_layout_pointer_depth_in_declarator(ncc_parse_tree_t *node)
 {
     return pointer_depth_in_type_node(node);
+}
+
+bool
+ncc_layout_declarator_is_function_pointer(ncc_parse_tree_t *declarator)
+{
+    if (!declarator) {
+        return false;
+    }
+
+    return ncc_layout_first_descendant_nt(declarator, "parameter_type_list")
+        != nullptr
+        || ncc_layout_first_descendant_nt(declarator, "parameter_list")
+               != nullptr
+        || ncc_layout_first_descendant_nt(declarator, "identifier_list")
+               != nullptr;
 }
 
 static int
@@ -642,12 +656,59 @@ layout_pointer_typedefs(ncc_xform_ctx_t *ctx)
     return data ? &data->gc_pointer_typedefs : nullptr;
 }
 
+static ncc_dict_t *
+layout_function_pointer_typedefs(ncc_xform_ctx_t *ctx)
+{
+    ncc_xform_data_t *data = ncc_xform_get_data(ctx);
+    return data ? &data->gc_function_pointer_typedefs : nullptr;
+}
+
+static void
+record_function_pointer_typedef(ncc_xform_ctx_t *ctx, const char *name)
+{
+    ncc_dict_t *fns = layout_function_pointer_typedefs(ctx);
+    if (!fns || !name || !*name) {
+        return;
+    }
+    bool found = false;
+    ncc_dict_get(fns, (void *)name, &found);
+    if (!found) {
+        ncc_dict_put(fns, ncc_layout_copy_cstr(name), (void *)(uintptr_t)1);
+    }
+}
+
+bool
+ncc_layout_typedef_name_is_function_pointer(ncc_xform_ctx_t *ctx,
+                                            const char *name)
+{
+    ncc_dict_t *fns = layout_function_pointer_typedefs(ctx);
+    if (!fns || !name) {
+        return false;
+    }
+    bool found = false;
+    (void)ncc_dict_get(fns, (void *)name, &found);
+    return found;
+}
+
 static char *
 struct_or_union_kind_text(ncc_parse_tree_t *su)
 {
-    ncc_parse_tree_t *kind = ncc_layout_first_descendant_nt(
-        su, "_kw_kw_struct_or_union");
-    return kind ? ncc_layout_node_text(kind) : nullptr;
+    // A specifier's text begins with its own keyword ("struct"/"union"). A
+    // descendant keyword search would, for a struct whose first member is an
+    // anonymous union, wrongly return that nested "union" and misclassify the
+    // outer struct as a union. Use the leading keyword of the specifier text.
+    // The specifier's first leaf token is its own keyword ("struct"/"union").
+    ncc_token_info_t *tok = ncc_layout_first_leaf_token(su);
+    if (tok && ncc_option_is_set(tok->value)) {
+        ncc_string_t v = ncc_option_get(tok->value);
+        if (v.data && strcmp(v.data, "union") == 0) {
+            return ncc_layout_copy_cstr("union");
+        }
+        if (v.data && strcmp(v.data, "struct") == 0) {
+            return ncc_layout_copy_cstr("struct");
+        }
+    }
+    return ncc_layout_copy_cstr("struct");
 }
 
 bool
@@ -829,10 +890,49 @@ first_known_type_alias_text(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *node,
     return nullptr;
 }
 
+static bool
+atomic_type_specifier_is_pointer(ncc_parse_tree_t *node)
+{
+    if (!node || ncc_tree_is_leaf(node)) {
+        return false;
+    }
+
+    if (ncc_xform_nt_name_is(node, "member_declaration_list")) {
+        return false;
+    }
+
+    if (ncc_xform_nt_name_is(node, "atomic_type_specifier")) {
+        if (ncc_layout_first_descendant_nt(node, "pointer") != nullptr) {
+            return true;
+        }
+
+        char *text = ncc_layout_node_text(node);
+        bool  result = text && strstr(text, "_Atomic") != nullptr
+                    && strchr(text, '*') != nullptr;
+        if (text) {
+            ncc_free(text);
+        }
+        return result;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        if (atomic_type_specifier_is_pointer(ncc_tree_child(node, i))) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 ncc_parse_tree_t *
 ncc_layout_aggregate_spec_from_specs(ncc_xform_ctx_t *ctx,
                                      ncc_parse_tree_t *specs)
 {
+    if (ncc_layout_pointer_depth_for_specs(ctx, specs) > 0) {
+        return nullptr;
+    }
+
     ncc_parse_tree_t *su = ncc_layout_first_descendant_nt(
         specs, "struct_or_union_specifier");
     if (su) {
@@ -854,6 +954,10 @@ ncc_layout_aggregate_type_info_t *
 ncc_layout_aggregate_info_from_specs(ncc_xform_ctx_t *ctx,
                                      ncc_parse_tree_t *specs)
 {
+    if (ncc_layout_pointer_depth_for_specs(ctx, specs) > 0) {
+        return nullptr;
+    }
+
     ncc_parse_tree_t *su = ncc_layout_first_descendant_nt(
         specs, "struct_or_union_specifier");
     if (su) {
@@ -1033,6 +1137,13 @@ ncc_layout_pointer_depth_for_specs(ncc_xform_ctx_t *ctx,
     if (decl_specs_use_pointer_typedef(ctx, specs)) {
         ptr_depth++;
     }
+    // A pointer can hide inside an _Atomic(T *) wrapper, where the '*' is an
+    // abstract declarator (a `pointer` NT) within the atomic_type_specifier
+    // that the scans above don't reach. Count it so every consumer classifies
+    // _Atomic(T *) members/typedefs as pointers (not by-value aggregates).
+    if (ptr_depth == 0 && atomic_type_specifier_is_pointer(specs)) {
+        ptr_depth++;
+    }
     return ptr_depth;
 }
 
@@ -1127,9 +1238,26 @@ collect_typedef_aliases_from_decl(ncc_xform_ctx_t *ctx,
             continue;
         }
 
+        // An _Atomic(T *) typedef ( typedef _Atomic(struct X *) name; ) hides
+        // its '*' in an abstract declarator inside the atomic_type_specifier,
+        // so the declarator/specs pointer checks miss it. Detect it here so
+        // the typedef is classified as a POINTER (not an aggregate alias) —
+        // otherwise downstream code treats fields of this type as by-value
+        // structs.
+        bool atomic_ptr = atomic_type_specifier_is_pointer(decl_specs);
+
         if (ncc_layout_pointer_depth_in_declarator(declarator) > 0
-            || decl_specs_use_pointer_typedef(ctx, decl_specs)) {
+            || decl_specs_use_pointer_typedef(ctx, decl_specs)
+            || atomic_ptr) {
             record_pointer_typedef(ctx, name);
+            // A function-pointer typedef ( typedef RET (*name)(params) ) has a
+            // parameter list inside its declarator. Record it separately so
+            // the GC-map walker can exclude it (code pointers are not heap
+            // pointers and must not be scanned/marshaled as data).
+            if (ncc_layout_first_descendant_nt(declarator, "parameter_type_list")
+                || ncc_layout_first_descendant_nt(declarator, "parameter_list")) {
+                record_function_pointer_typedef(ctx, name);
+            }
             ncc_free(name);
             continue;
         }

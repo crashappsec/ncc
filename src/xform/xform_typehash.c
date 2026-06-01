@@ -4,6 +4,7 @@
 // typehash(int *) becomes 12345678901234ULL.
 
 #include "xform/xform_helpers.h"
+#include "xform/xform_gc_typemap.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -41,6 +42,10 @@ xform_typehash(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *node)
 
     ncc_string_t type_str = ncc_xform_extract_type_string(ctx, atom, cont);
     uint64_t     hash     = ncc_type_hash_u64(type_str.data);
+
+    // WP-020 / D-049: record pointer-to-aggregate typehashes so we can emit a
+    // matching link-time GC pointer-map entry (same hash -> guaranteed match).
+    ncc_gc_typemap_note(ctx, type_str.data, hash);
 
     char buf[32];
     snprintf(buf, sizeof(buf), "%" PRIu64 "ULL", hash);

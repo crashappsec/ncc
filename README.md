@@ -694,6 +694,24 @@ macro shape and selected GC/STW runtime primitives as reserved runtime
 mechanics; ordinary parser/error unwinds through raw libc calls are not
 accepted.
 
+### n00b GC Typemaps
+
+ncc also emits link-time GC layout metadata for n00b typed heap allocations.
+When ncc sees `typehash(T *)` and can prove the layout of `T`, it appends a
+`n00b_gcmap` entry keyed by that type hash plus a `n00b_gcidx` placeholder.
+n00b's post-link `n00b-gcmap-index` command fills the index in the final
+executable. At runtime, n00b uses the indexed map to upgrade default-scanned
+`n00b_alloc(T)` and `n00b_alloc_array(T, N)` objects to precise callback scans.
+
+There is no separate ncc flag for normal n00b builds; the allocation macros
+already contain the necessary `typehash(T *)` sites. The type must be visible
+enough for ncc to enumerate every data-pointer word. Ambiguous shapes, such as
+mixed pointer/scalar unions or pointer arrays, are skipped so the runtime keeps
+the conservative fallback.
+
+For the detailed ncc contract, see `docs/gc_typemaps.md`. For the n00b
+post-link command, see `docs/gc_type_maps.md` in the n00b repository.
+
 
 ## Customization
 

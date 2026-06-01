@@ -38,6 +38,7 @@
 #include "parse/typedef_walk.h"
 #include "parse/c_tokenizer.h"
 #include "parse/emit.h"
+#include "xform/xform_gc_typemap.h"
 #include "parse/tree_dump.h"
 #include "xform/transform.h"
 #include "xform/xform_template.h"
@@ -2229,6 +2230,8 @@ compile_file(ncc_opts_t *opts)
                             ncc_hash_cstring, ncc_dict_cstr_eq);
     ncc_dict_init(&xdata.gc_pointer_typedefs,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
+    ncc_dict_init(&xdata.gc_function_pointer_typedefs,
+                            ncc_hash_cstring, ncc_dict_cstr_eq);
     xctx.user_data = &xdata;
     ncc_verbose("applying transforms");
     tree = ncc_xform_apply(&xreg, &xctx);
@@ -2236,6 +2239,12 @@ compile_file(ncc_opts_t *opts)
     if (xctx.nodes_replaced > 0) {
         ncc_verbose("transforms: %d nodes replaced", xctx.nodes_replaced);
     }
+
+    // WP-020 / D-049: emit link-time GC pointer-map descriptors for the
+    // pointer-to-aggregate types this TU typehash'd. Must run before the
+    // transform dicts (gc_aggregate_types) are freed below; appended to the
+    // pretty-printed output further down.
+    char *gc_typemap_text = ncc_gc_typemap_emit(&xctx);
 
 #ifdef NCC_MEM_DEBUG
     ncc_mem_report("after transform");
@@ -2249,6 +2258,7 @@ compile_file(ncc_opts_t *opts)
     ncc_dict_free(&xdata.dict_types);
     ncc_dict_free(&xdata.gc_aggregate_types);
     ncc_dict_free(&xdata.gc_pointer_typedefs);
+    ncc_dict_free(&xdata.gc_function_pointer_typedefs);
     free_gc_stack_roots(xdata.gc_stack_roots);
     ncc_template_registry_free(&tmpl_reg);
     ncc_xform_registry_free(&xreg);
@@ -2273,6 +2283,20 @@ compile_file(ncc_opts_t *opts)
         ncc_scanner_free(scanner);
         ncc_grammar_free(g);
         return 1;
+    }
+
+    // Append the GC pointer-map descriptors (valid C at TU end: the element
+    // types were typehash'd here and their definitions appear above).
+    if (gc_typemap_text && gc_typemap_text[0]) {
+        size_t base = emitted.u8_bytes;
+        size_t add  = strlen(gc_typemap_text);
+        char  *combined = (char *)malloc(base + add + 2);
+        memcpy(combined, emitted.data, base);
+        combined[base] = '\n';
+        memcpy(combined + base + 1, gc_typemap_text, add);
+        combined[base + 1 + add] = '\0';
+        emitted.data     = combined;
+        emitted.u8_bytes = base + 1 + add;
     }
 
     size_t emit_len = emitted.u8_bytes;

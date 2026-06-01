@@ -203,6 +203,7 @@ src_xform = files(
   'src/xform/xform_typestr.c',
   'src/xform/xform_typehash.c',
   'src/xform/xform_template.c',
+  'src/xform/xform_gc_typemap.c',
 )
 
 src_scanner = files(
@@ -528,6 +529,174 @@ test('ncc_static_image_dependency_contract', test_runner,
          + ncc_test_flags + static_image_helper_flags,
   suite : 'ncc',
   depends : [ncc_exe, static_image_helper],
+)
+
+test('ncc_gc_typemap_direct_pointer_offset', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__builtin_offsetof(gcmap_direct_fn_t,payload)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_direct_function_pointer_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__builtin_offsetof(gcmap_direct_fn_t,callback)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_typedef_pointer_offset', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__builtin_offsetof(gcmap_typedef_fn_t,payload)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_typedef_function_pointer_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__builtin_offsetof(gcmap_typedef_fn_t,callback)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_user_scan_user_scanned', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__builtin_offsetof(gcmap_user_scan_field_t,scan_user)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_runtime_scan_user_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__builtin_offsetof(gcmap_runtime_shape_t,scan_user)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_runtime_lock_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__builtin_offsetof(gcmap_runtime_shape_t,lock)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_runtime_allocator_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__builtin_offsetof(gcmap_runtime_shape_t,allocator)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_runtime_payload_scanned', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__builtin_offsetof(gcmap_runtime_shape_t,payload)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_runtime_near_miss_scan_user_scanned', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__builtin_offsetof(gcmap_runtime_near_miss_t,scan_user)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_static_assert_c23', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap.c',
+          'static_assert((__builtin_offsetof(gcmap_direct_fn_t,payload)%sizeof(void*))==0']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_no_legacy_static_assert', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_typemap.c',
+          '_Static_assert']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_section_attr_c23', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap.c',
+          '[[gnu::section("n00b_gcmap"), gnu::used]]']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_legacy_section_attr_rewritten_c23', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap.c',
+          '[[gnu::section("__DATA,n00b_gcmap"), gnu::used]]']
+         + ncc_test_flags
+         + ['--ncc-no-gc-stack-maps',
+            '--ncc-no-auto-gc-roots',
+            '--ncc-static-object-entry-attr=__attribute__((section("__DATA,n00b_stobj"),used))'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_legacy_section_attr_no_legacy_attribute', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__attribute__((section("__DATA,n00b_gcmap")']
+         + ncc_test_flags
+         + ['--ncc-no-gc-stack-maps',
+            '--ncc-no-auto-gc-roots',
+            '--ncc-static-object-entry-attr=__attribute__((section("__DATA,n00b_stobj"),used))'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_gcidx_entry', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__ncc_gcidx_ent_']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_pointer_array_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_typemap.c',
+          'sizeof(gcmap_pointer_array_t)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_union_mixed_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_typemap.c',
+          'sizeof(gcmap_union_mixed_t)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
 )
 
 if host_machine.system() != 'windows' and cc.has_header('pthread.h')

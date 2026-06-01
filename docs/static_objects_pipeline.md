@@ -210,6 +210,45 @@ error: dict literal initializer for 'n00b_dict_t(int, int)' requires
        --ncc-static-init-helper=PATH
 ```
 
+## GC typemaps for typed allocations
+
+In n00b-integrated builds, ncc automatically turns eligible
+`typehash(T *)` sites into link-time GC layout metadata. This is what lets
+ordinary runtime allocations such as `n00b_alloc(T)` and
+`n00b_alloc_array(T, N)` be scanned with the same field precision as
+descriptor-backed static objects.
+
+No extra source annotation is needed. The n00b allocation macros already
+contain the necessary `typehash(T *)` expression. If `T` is visible at file
+scope and ncc can prove every pointer word in the type, ncc emits:
+
+- a `n00b_gc_struct_layout_t` for one element of `T`;
+- a pointer-bearing `n00b_gcmap` section entry keyed by `typehash(T *)`;
+- a no-pointer `n00b_gcidx` placeholder that the final binary indexes after
+  link.
+
+The final executable must be processed by n00b's `n00b-gcmap-index` command.
+The n00b build does this for the affected helper binaries and test wrappers.
+Manual builds should run:
+
+```sh
+path/to/n00b-gcmap-index path/to/executable
+```
+
+or execute through:
+
+```sh
+path/to/n00b-gcmap-index --exec path/to/executable [args...]
+```
+
+If no map entry is available, or if the executable was not indexed, n00b falls
+back to conservative default scanning. That fallback is GC-safe but less
+precise and may not be enough for marshal workflows that need exact pointer
+layout.
+
+For the full ncc-side eligibility rules, see `docs/gc_typemaps.md`. For the
+n00b post-link tool, see `docs/gc_type_maps.md` in the n00b repository.
+
 ---
 
 # Part 2 — Contributor Notes
