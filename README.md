@@ -130,8 +130,10 @@ override it and writes its transcript to
 Our zero-cost keyword arguments provide named optional parameters,
 with defaults, that are fully resolved statically. Currently, defaults
 are mandatory. You are expected to specify parameter names and
-defaults in a place that's visible to callers. The initializers for
-variables must compile in the caller's context.
+defaults in a place that's visible to callers. Omitted defaults are
+evaluated once in the callee-side keyword-local extraction path, so
+contract checks and the function body see the same value. Explicit
+overrides do not evaluate the default expression.
 
 For instance, you can declare a `_kargs` function in a header like so:
 
@@ -179,13 +181,11 @@ is derived from the function name.
 Currently, we insert code to unload the struct into local variables of
 the same name. We could do better there, sure.
 
-At the call site, we look up in the symbol table the parameter names
-and stashed defaults. We then combine the defaults and provided
-arguments (if any) into a compound literal of that struct type. We
-don't bother deduplicating the defaults, because C23's struct
-initialization semantics are well defined; we can always copy in all
-the defaults, then the provided values. However, we do check to make
-sure the caller doesn't specify the same argument multiple times. 
+At the call site, we look up the keyword parameter names and build a
+compound literal of that struct type with explicit override values and
+presence bits. Omitted defaults are not emitted at the call site.
+However, we do check to make sure the caller doesn't specify the same
+argument multiple times.
 
 Note that, because we do add a shadow argument, we don't consider a
 function with no fixed parameters to be lacking arguments. Therefore,
@@ -194,6 +194,71 @@ we don't do the work to accept `foo(void) _kargs {}`.
 It's important to note that the struct is currently a stack temporary
 passed by REFERENCE; that reference will not live beyond the life of
 the called function.
+
+### Function Contracts (`requires` / `ensures`)
+
+Function contracts attach debug-only checks to function definitions.
+They are written after an optional `_kargs` block and before the
+function body:
+
+```c
+int clamp_step(int x)
+    _kargs { int limit = 100; }
+    requires {
+        x >= 0;
+        limit > 0;
+        x <= limit;
+    }
+    ensures {
+        result >= x;
+        result <= limit;
+    }
+{
+    return x < limit ? x + 1 : limit;
+}
+```
+
+Top-level non-declaration expression statements in a contract block are
+assertions. In debug builds, ncc lowers those assertions to
+`#ifndef NDEBUG` guarded checks that call `__builtin_trap()` when the
+expression is false. Defining `NDEBUG` removes the generated contract
+checks. The raw `requires` and `ensures` syntax is removed from emitted
+C.
+
+Declarations and ordinary control flow are support code, so loops can
+compute a predicate that a later top-level expression checks:
+
+```c
+int all_nonnegative(int values[4])
+    requires {
+        int ok = 1;
+        for (int i = 0; i < 4; i++) {
+            ok = ok && values[i] >= 0;
+        }
+        ok;
+    }
+{
+    return values[0];
+}
+```
+
+For non-void functions, `ensures` blocks can read the return value
+through the generated bare identifier `result`. `result` is not
+available in `requires`, is not available for void functions, and may
+not be declared as a contract-local variable. Ordinary identifiers
+named `result` outside contract blocks and member names such as
+`item.result` remain normal C.
+
+Contract blocks may mutate only variables declared inside the same
+contract block, using ordinary C lexical scope and declaration order.
+Mutating parameters, globals, outer locals, pointed-to state, array
+elements, or struct members is rejected. `return`, `goto`, and function
+calls inside contract blocks are also rejected in this version.
+
+Contracts are definition-only. Prototypes cannot carry
+`requires` / `ensures`, and v1 does not support `old(...)` values,
+function calls from contracts, `_Once` plus contracts, or `@rpc` plus
+contracts.
 
 #### Opaque keyword arguments
 

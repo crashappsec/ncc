@@ -395,6 +395,46 @@ static bool block_item_is_kargs_extract(ncc_parse_tree_t *item,
          text_contains(text->data, "kargs ->");
 }
 
+// A kargs write-back statement has the shape "kargs -> name = name ;".  The
+// kargs body injection emits one immediately after each defaulted-keyword
+// extraction declaration so that bodies reading the field directly through
+// the kargs pointer observe the resolved default.  In a contracted function
+// these statements must be hoisted into the wrapper (which still has the
+// kargs pointer) alongside the extraction declarations, not left in the
+// body helper (which takes the resolved locals by value and has no kargs).
+//
+// Unlike an extraction declaration, a write-back is NOT a local declaration,
+// so it must not be collected as a helper parameter — only emitted verbatim
+// in the wrapper prelude.  Recognize it as a leading statement that mentions
+// "kargs ->" but is not itself an extraction declaration (no maybe_unused).
+//
+// Single source of truth for the recognition logic: it works on already-
+// materialized statement text so callers that have rendered the node (e.g.
+// via block_item_is_kargs_extract) can reuse that text instead of rendering
+// the node twice.
+static bool text_is_kargs_writeback(const char *text) {
+  if (text == nullptr) {
+    return false;
+  }
+
+  if (text_contains(text, "maybe_unused")) {
+    return false;
+  }
+
+  const char *p = skip_spaces(text);
+  return strncmp(p, "kargs ", 6) == 0 && text_contains(text, "kargs ->");
+}
+
+static bool block_item_is_kargs_writeback(ncc_parse_tree_t *item,
+                                          ncc_string_t *text) {
+  *text = ncc_xform_node_to_text(item);
+  if (!text->data) {
+    return false;
+  }
+
+  return text_is_kargs_writeback(text->data);
+}
+
 static const char *skip_leading_maybe_unused(const char *text) {
   const char *p = skip_spaces(text);
 
@@ -493,7 +533,14 @@ static void collect_kargs_extracts(ncc_parse_tree_t *func_body,
     }
 
     ncc_string_t text = {};
-    if (!block_item_is_kargs_extract(item, &text)) {
+    bool is_extract = block_item_is_kargs_extract(item, &text);
+    bool is_writeback = false;
+    if (!is_extract) {
+      ncc_free(text.data);
+      text = (ncc_string_t){};
+      is_writeback = block_item_is_kargs_writeback(item, &text);
+    }
+    if (!is_extract && !is_writeback) {
       ncc_free(text.data);
       break;
     }
@@ -501,7 +548,11 @@ static void collect_kargs_extracts(ncc_parse_tree_t *func_body,
     char *copy = ncc_alloc_size(1, text.u8_bytes + 1);
     memcpy(copy, text.data, text.u8_bytes);
     copy[text.u8_bytes] = '\0';
-    collect_kargs_extract_decl_info(copy, helper_params, helper_names);
+    // Only extraction declarations introduce a local that becomes a helper
+    // parameter; write-backs are emitted verbatim in the wrapper only.
+    if (is_extract) {
+      collect_kargs_extract_decl_info(copy, helper_params, helper_names);
+    }
     ncc_free(text.data);
     strvec_push(items, copy);
   }
@@ -529,9 +580,13 @@ static char *collect_body_text_without_kargs_extracts(
       continue;
     }
 
+    // block_item_is_kargs_extract always materializes the item text into
+    // `text` (even when it returns false), so reuse it for the write-back
+    // check rather than rendering the node twice.
     ncc_string_t text = {};
     bool is_extract = block_item_is_kargs_extract(item, &text);
-    if (skipping_extracts && is_extract) {
+    bool is_writeback = !is_extract && text_is_kargs_writeback(text.data);
+    if (skipping_extracts && (is_extract || is_writeback)) {
       ncc_free(text.data);
       continue;
     }
