@@ -399,6 +399,10 @@ ncc_compile_tests = {
   'constexpr':    ['compile_run',  test_dir / 'test_constexpr.c'],
   'kargs':        ['compile_run',  test_dir / 'test_kargs.c'],
   'kargs_vargs':  ['compile_run',  test_dir / 'test_kargs_vargs.c'],
+  'function_contracts_parse': ['preprocess',
+                               test_dir / 'test_function_contracts_parse.c'],
+  'function_contract_keyword_collision': ['compile_run',
+                                          test_dir / 'test_function_contract_keyword_collision.c'],
   'rstr':         ['compile_run',  test_dir / 'test_rstr.c'],
   'vargs':        ['compile_run',  test_dir / 'test_vargs.c'],
   'once':         ['compile_run',  test_dir / 'test_once.c'],
@@ -1610,6 +1614,10 @@ ncc_error_contains_tests = {
   'err_array_literal_unsupported_elem': [
     test_dir / 'err_array_literal_unsupported_elem.c',
     'is not supported for static initialization yet',
+  ],
+  'err_function_contract_declaration': [
+    test_dir / 'err_function_contract_declaration.c',
+    'parse FAILED',
   ],
   'err_array_literal_union_pointer': [
     test_dir / 'err_array_literal_union_pointer.c',
