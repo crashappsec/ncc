@@ -24,6 +24,18 @@ typedef struct {
     ncc_doc_kind_t kind;
     const char     *text;
     int32_t         text_len;
+    // Provenance, used by layout_resolve to keep clang's line accounting
+    // correct across ncc-inserted code. `inserted` marks text that came from
+    // a synthesized (transform-generated) token, which has no real source
+    // position and is reflowed freely; such regions are bracketed with
+    // linemarkers so they do not corrupt the line count of surrounding
+    // original source. `has_pos`/`file`/`line` carry an original token's
+    // source position (used only to seed the source cursor when no cpp
+    // linemarker has been seen yet).
+    bool            inserted;
+    bool            has_pos;
+    const char     *file;
+    uint32_t        line;
 } doc_cmd_t;
 
 typedef struct {
@@ -64,10 +76,19 @@ doc_emit(doc_stream_t *ds, ncc_doc_kind_t kind, const char *text, int32_t len)
     };
 }
 
+// Text from a token, tagged with whether it is ncc-inserted (synthesized)
+// and, for original tokens, its source position.
 static inline void
-doc_text(doc_stream_t *ds, const char *text, int32_t len)
+doc_text_tagged(doc_stream_t *ds, const char *text, int32_t len,
+                bool inserted, const char *file, uint32_t line)
 {
     doc_emit(ds, NCC_DOC_TEXT, text, len);
+
+    doc_cmd_t *cmd = &ds->cmds[ds->count - 1];
+    cmd->inserted  = inserted;
+    cmd->file      = file;
+    cmd->line      = line;
+    cmd->has_pos   = (file != nullptr);
 }
 
 static inline void
@@ -242,11 +263,15 @@ in_index_array(const int32_t *arr, int32_t ix)
 // ============================================================================
 
 static void
-emit_trivia(emit_ctx_t *ctx, ncc_trivia_t *trivia)
+emit_trivia(emit_ctx_t *ctx, ncc_trivia_t *trivia, bool inserted)
 {
     for (ncc_trivia_t *t = trivia; t; t = t->next) {
         if (t->text.data && t->text.u8_bytes > 0) {
-            doc_text(ctx->ds, t->text.data, (int32_t)t->text.u8_bytes);
+            // cpp linemarkers (carried as trivia on original tokens) are kept
+            // verbatim: layout_resolve parses them to track the source cursor
+            // and they continue to drive clang's accounting for original code.
+            doc_text_tagged(ctx->ds, t->text.data, (int32_t)t->text.u8_bytes,
+                            inserted, nullptr, 0);
         }
     }
 }
@@ -270,8 +295,21 @@ emit_token(emit_ctx_t *ctx, ncc_token_info_t *tok)
         return;
     }
 
+    // A token with no source file is synthesized by a transform (parsed from
+    // a generated template via ncc_scanner_new(..., file=none)); original
+    // tokens carry the cpp source path. This is the discriminator for
+    // "ncc-inserted code" vs original source.
+    const char *tok_file = nullptr;
+    if (ncc_option_is_set(tok->file)) {
+        ncc_string_t fs = ncc_option_get(tok->file);
+        if (fs.data && fs.u8_bytes > 0) {
+            tok_file = fs.data;
+        }
+    }
+    bool inserted = (tok_file == nullptr);
+
     if (tok->leading_trivia) {
-        emit_trivia(ctx, tok->leading_trivia);
+        emit_trivia(ctx, tok->leading_trivia, inserted);
         ctx->need_space = false;
     }
     else {
@@ -285,14 +323,15 @@ emit_token(emit_ctx_t *ctx, ncc_token_info_t *tok)
         ctx->last_tok_cat = cat;
     }
 
-    doc_text(ctx->ds, val.data, (int32_t)val.u8_bytes);
+    doc_text_tagged(ctx->ds, val.data, (int32_t)val.u8_bytes,
+                    inserted, tok_file, tok->line);
     ctx->first_token = false;
     ctx->need_space  = true;
 
     ctx->last_tok_cat = categorize_token(val.data);
 
     if (tok->trailing_trivia) {
-        emit_trivia(ctx, tok->trailing_trivia);
+        emit_trivia(ctx, tok->trailing_trivia, inserted);
     }
 }
 
@@ -663,6 +702,129 @@ emit_newline_indent(ncc_buffer_t *ob, const char *nl,
     return ind * indent_size;
 }
 
+// ============================================================================
+// Linemarker synchronization
+//
+// ncc preserves original source line structure verbatim, so cpp's own
+// linemarkers (passed through as trivia) keep clang's diagnostics correct for
+// original and macro-expanded code. The exception is ncc-INSERTED code
+// (transform output, parsed from generated templates and reflowed freely):
+// it carries no source position and its extra physical lines silently shift
+// clang's line counter for everything after it. layout_resolve tracks the
+// current source position (from cpp linemarkers + counting original newlines,
+// valid because original code is not reflowed) and brackets each inserted
+// region: a `# <line> "<file>"` marker entering it (so diagnostics in the
+// generated code point at the source site that triggered it) and another
+// restoring that same position on the way out (so following original source
+// re-syncs exactly).
+// ============================================================================
+
+static int32_t
+count_newlines(const char *s, int32_t len)
+{
+    int32_t n = 0;
+    for (int32_t i = 0; i < len; i++) {
+        if (s[i] == '\n') {
+            n++;
+        }
+    }
+    return n;
+}
+
+static bool
+same_file(const char *a, const char *b)
+{
+    if (a == b) {
+        return true;
+    }
+    if (!a || !b) {
+        return false;
+    }
+    return strcmp(a, b) == 0;
+}
+
+// Column after the last newline in text (for col tracking across multi-line
+// trivia); -1 if there is no newline.
+static int32_t
+col_after_last_newline(const char *s, int32_t len)
+{
+    int32_t last = -1;
+    for (int32_t i = 0; i < len; i++) {
+        if (s[i] == '\n') {
+            last = i;
+        }
+    }
+    if (last < 0) {
+        return -1;
+    }
+    return len - last - 1;
+}
+
+// Parse a cpp linemarker `# <line> "<file>" [flags]`, tolerating leading
+// whitespace. On success writes the line and copies the file into file_buf.
+static bool
+parse_linemarker(const char *text, int32_t len, uint32_t *line_out,
+                 char *file_buf, size_t file_buf_sz)
+{
+    const char *p = text;
+    const char *e = text + len;
+
+    while (p < e && (*p == ' ' || *p == '\t')) {
+        p++;
+    }
+    if (p >= e || *p != '#') {
+        return false;
+    }
+    p++;
+    while (p < e && (*p == ' ' || *p == '\t')) {
+        p++;
+    }
+    if (p >= e || *p < '0' || *p > '9') {
+        return false;
+    }
+
+    uint32_t ln = 0;
+    while (p < e && *p >= '0' && *p <= '9') {
+        ln = ln * 10 + (uint32_t)(*p - '0');
+        p++;
+    }
+    while (p < e && (*p == ' ' || *p == '\t')) {
+        p++;
+    }
+    if (p >= e || *p != '"') {
+        return false;
+    }
+    p++;
+
+    size_t i = 0;
+    while (p < e && *p != '"' && i + 1 < file_buf_sz) {
+        file_buf[i++] = *p++;
+    }
+    file_buf[i]  = '\0';
+    *line_out    = ln;
+    return true;
+}
+
+// Emit a `# <line> "<file>"` marker at column 0 and restore indentation.
+static void
+emit_sync_marker(ncc_buffer_t *ob, const char *nl, const char *file,
+                 uint32_t line, int32_t *col, int32_t indent_col)
+{
+    if (*col != 0) {
+        ncc_buffer_puts(ob, nl);
+    }
+
+    char head[32];
+    int  n = snprintf(head, sizeof(head), "# %u \"", (unsigned)line);
+    ncc_buffer_append(ob, head, (size_t)n);
+    ncc_buffer_puts(ob, file);
+    ncc_buffer_putc(ob, '"');
+    ncc_buffer_puts(ob, nl);
+
+    emit_spaces(ob, indent_col);
+    *col = indent_col;
+}
+
 static ncc_string_t
 layout_resolve(doc_stream_t *ds, ncc_pprint_opts_t *opts)
 {
@@ -682,14 +844,83 @@ layout_resolve(doc_stream_t *ds, ncc_pprint_opts_t *opts)
 
     int32_t col = 0;
 
+    // Source-position cursor used to synthesize linemarkers around inserted
+    // code (see the block comment above).
+    char    src_file[1024];
+    int32_t src_line    = 0;
+    bool    src_known   = false;
+    bool    in_inserted = false;
+    src_file[0]         = '\0';
+
     for (int32_t i = 0; i < ds->count; i++) {
         doc_cmd_t *cmd = &ds->cmds[i];
 
         switch (cmd->kind) {
-        case NCC_DOC_TEXT:
+        case NCC_DOC_TEXT: {
+            int32_t indent_col = (align_st.top > 0)
+                                   ? istack_peek(&align_st)
+                                   : istack_peek(&indent_st) * indent_size;
+
+            // Re-anchor the cursor from a real source token BEFORE handling
+            // transitions. A token whose file matches the current source file
+            // carries an accurate cpp line; re-anchoring on each one stops
+            // drift from accumulating across reflow/insertions (counting
+            // newlines alone slowly desyncs). Macro-expansion tokens carry
+            // their definition file (!= the source file) and are skipped, as
+            // are synthesized/inserted tokens (no file). On an inserted->
+            // original transition this also moves the cursor to the line where
+            // original code resumes, so the restore marker is exact.
+            if (!cmd->inserted && cmd->has_pos) {
+                if (!src_known) {
+                    size_t fl = strlen(cmd->file);
+                    if (fl < sizeof(src_file)) {
+                        memcpy(src_file, cmd->file, fl + 1);
+                        src_line  = (int32_t)cmd->line;
+                        src_known = true;
+                    }
+                }
+                else if (same_file(cmd->file, src_file)) {
+                    src_line = (int32_t)cmd->line;
+                }
+            }
+
+            // Bracket transitions between original and ncc-inserted code with
+            // a marker pinned to the current source position.
+            if (cmd->inserted != in_inserted) {
+                if (src_known) {
+                    emit_sync_marker(ob, nl, src_file, (uint32_t)src_line,
+                                     &col, indent_col);
+                }
+                in_inserted = cmd->inserted;
+            }
+
+            // A cpp linemarker in original trivia: update the cursor and pass
+            // it through unchanged (it keeps driving clang for original code).
+            uint32_t mline;
+            if (!cmd->inserted
+                && parse_linemarker(cmd->text, cmd->text_len, &mline,
+                                    src_file, sizeof(src_file))) {
+                src_line  = (int32_t)mline;
+                src_known = true;
+                ncc_buffer_append(ob, cmd->text, (size_t)cmd->text_len);
+                col = 0;
+                break;
+            }
+
             ncc_buffer_append(ob, cmd->text, (size_t)cmd->text_len);
-            col += cmd->text_len;
+
+            int32_t nls = count_newlines(cmd->text, cmd->text_len);
+            if (nls > 0) {
+                if (!in_inserted) {
+                    src_line += nls;
+                }
+                col = col_after_last_newline(cmd->text, cmd->text_len);
+            }
+            else {
+                col += cmd->text_len;
+            }
             break;
+        }
 
         case NCC_DOC_SPACE:
             ncc_buffer_putc(ob, ' ');
@@ -704,18 +935,27 @@ layout_resolve(doc_stream_t *ds, ncc_pprint_opts_t *opts)
             else {
                 col = emit_newline_indent(ob, nl, &indent_st, indent_size,
                                           opts->indent_style, &align_st);
+                if (!in_inserted) {
+                    src_line++;
+                }
             }
             break;
 
         case NCC_DOC_HARDLINE:
             col = emit_newline_indent(ob, nl, &indent_st, indent_size,
                                       opts->indent_style, &align_st);
+            if (!in_inserted) {
+                src_line++;
+            }
             break;
 
         case NCC_DOC_BLANKLINE:
             ncc_buffer_puts(ob, nl);
             col = emit_newline_indent(ob, nl, &indent_st, indent_size,
                                       opts->indent_style, &align_st);
+            if (!in_inserted) {
+                src_line += 2;
+            }
             break;
 
         case NCC_DOC_INDENT:
