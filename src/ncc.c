@@ -69,6 +69,7 @@ extern void ncc_register_gc_globals_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_constexpr_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_constexpr_paste_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_kargs_vargs_xform(ncc_xform_registry_t *reg);
+extern void ncc_register_contracts_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_option_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_array_literal_xform(ncc_xform_registry_t *reg);
 #include "scanner/scan_builtins.h"
@@ -1996,6 +1997,7 @@ compile_file(ncc_opts_t *opts)
     ncc_register_typehash_xform(&xreg);
     ncc_register_kargs_vargs_xform(&xreg);
     ncc_register_once_xform(&xreg);
+    ncc_register_contracts_xform(&xreg);
     ncc_register_bang_xform(&xreg);
     ncc_register_rstr_xform(&xreg);
     ncc_register_static_image_xform(&xreg);

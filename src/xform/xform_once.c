@@ -616,6 +616,24 @@ static void flatten_tu(ncc_parse_tree_t *tu, ptrvec_t *out) {
   }
 }
 
+static ncc_parse_tree_t *
+unwrap_extension_function_definition(ncc_parse_tree_t *func_def) {
+  while (func_def && ncc_xform_nt_name_is(func_def, "function_definition") &&
+         ncc_tree_num_children(func_def) == 2) {
+    ncc_parse_tree_t *first = ncc_tree_child(func_def, 0);
+    ncc_parse_tree_t *second = ncc_tree_child(func_def, 1);
+    if (!first || !ncc_tree_is_leaf(first) ||
+        !ncc_xform_leaf_text_eq(first, "__extension__") ||
+        !second || ncc_tree_is_leaf(second) ||
+        !ncc_xform_nt_name_is(second, "function_definition")) {
+      break;
+    }
+    func_def = second;
+  }
+
+  return func_def;
+}
+
 // ============================================================================
 // Main pre-order transform on translation_unit
 // ============================================================================
@@ -653,6 +671,8 @@ xform_once_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
     }
 
     if (ncc_xform_nt_name_is(inner, "function_definition")) {
+      inner = unwrap_extension_function_definition(inner);
+
       ncc_parse_tree_t *decl_specs =
           ncc_xform_find_child_nt(inner, "declaration_specifiers");
       if (!decl_specs) {
@@ -662,6 +682,16 @@ xform_once_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
       ncc_parse_tree_t *once_ds = find_once_decl_spec(decl_specs);
       if (!once_ds) {
         continue;
+      }
+
+      if (ncc_xform_find_child_nt(inner, "function_contract_clauses")) {
+        uint32_t line, col;
+        ncc_xform_first_leaf_pos(inner, &line, &col);
+        fprintf(stderr,
+                "ncc: error: '_Once' functions with contracts are not "
+                "supported yet (line %u, col %u)\n",
+                line, col);
+        exit(1);
       }
 
       // --- Found a _Once function definition ---

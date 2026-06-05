@@ -195,6 +195,27 @@ extract_method_string(ncc_parse_tree_t *rpc_clause)
 // ============================================================================
 
 static ncc_parse_tree_t *
+unwrap_extension_function_definition(ncc_parse_tree_t *func_def)
+{
+    while (func_def && ncc_xform_nt_name_is(func_def, "function_definition")
+           && ncc_tree_num_children(func_def) == 2) {
+        ncc_parse_tree_t *first  = ncc_tree_child(func_def, 0);
+        ncc_parse_tree_t *second = ncc_tree_child(func_def, 1);
+
+        if (!first || !ncc_tree_is_leaf(first)
+            || !ncc_xform_leaf_text_eq(first, "__extension__")
+            || !second || ncc_tree_is_leaf(second)
+            || !ncc_xform_nt_name_is(second, "function_definition")) {
+            break;
+        }
+
+        func_def = second;
+    }
+
+    return func_def;
+}
+
+static ncc_parse_tree_t *
 find_child_nt_index(ncc_parse_tree_t *parent, const char *name, size_t *idx)
 {
     size_t nc = ncc_tree_num_children(parent);
@@ -1375,6 +1396,7 @@ xform_rpc_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
                 && !ncc_xform_nt_name_is(inner, "declaration"))) {
             continue;
         }
+        inner = unwrap_extension_function_definition(inner);
 
         // Locate the @rpc clause without removing it yet — we need
         // the clause node alive for shape-detection diagnostics.
@@ -1384,6 +1406,13 @@ xform_rpc_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
 
         if (!rpc_clause) {
             continue;
+        }
+
+        if (find_child_nt_index(inner, "function_contract_clauses",
+                                nullptr)) {
+            rpc_diagnostic(rpc_clause,
+                           "@rpc cannot be combined with function "
+                           "contracts on the same function");
         }
 
         // _kargs combination diagnostic (spec §4).

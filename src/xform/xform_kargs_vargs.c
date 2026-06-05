@@ -464,6 +464,35 @@ static bool param_list_has_plus(ncc_parse_tree_t *declarator) {
 // Helpers: count positional params in parameter_list
 // ============================================================================
 
+// A parameter list spelled exactly `(void)` is C's way of saying "takes no
+// arguments".  It renders as text whose only token is `void`.  Real parameters
+// typed `void *p` etc. have additional tokens and will not match.  We compare
+// the trimmed rendered text against "void".
+static bool param_text_is_void(const char *text) {
+  if (text == nullptr) {
+    return false;
+  }
+  while (*text == ' ' || *text == '\t' || *text == '\n' || *text == '\r') {
+    text++;
+  }
+  if (strncmp(text, "void", 4) != 0) {
+    return false;
+  }
+  const char *p = text + 4;
+  while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
+    p++;
+  }
+  return *p == '\0';
+}
+
+// True when `node`'s rendered text is exactly the `void` no-arguments marker.
+static bool node_is_void_param(ncc_parse_tree_t *node) {
+  ncc_string_t text = ncc_xform_node_to_text(node);
+  bool result = param_text_is_void(text.data);
+  ncc_free(text.data);
+  return result;
+}
+
 static int count_positional_params(ncc_parse_tree_t *param_list) {
   if (!param_list) {
     return 0;
@@ -483,7 +512,13 @@ static int count_positional_params(ncc_parse_tree_t *param_list) {
       continue;
     }
     if (ncc_xform_nt_name_is(c, "parameter_declaration")) {
-      count++;
+      // A lone `void` parameter declaration means "no arguments", not one
+      // positional parameter of type void.  Counting it would corrupt the
+      // call-site already-transformed check and (for kw_func calls) emit a
+      // duplicate kargs argument.
+      if (!node_is_void_param(c)) {
+        count++;
+      }
     } else if (!ncc_tree_is_leaf(c)) {
       // Group wrapper — recurse.
       count += count_positional_params(c);
@@ -753,7 +788,11 @@ static void add_kargs_param(ncc_grammar_t *g, ncc_parse_tree_t *declarator,
   ncc_free(existing_text.data);
 
   char new_ptl_src[4096];
-  if (resolved_existing.data && resolved_existing.u8_bytes > 0) {
+  // A `(void)` parameter list means "no arguments": the kargs parameter
+  // replaces the `void`, it is not appended after it (which would emit the
+  // invalid `f ( void , struct _f__kargs * kargs )`).
+  if (resolved_existing.data && resolved_existing.u8_bytes > 0 &&
+      !param_text_is_void(resolved_existing.data)) {
     snprintf(new_ptl_src, sizeof(new_ptl_src), "%s , struct _%s__kargs * kargs",
              resolved_existing.data, resolved_name.data);
   } else {
@@ -811,7 +850,10 @@ static void add_opaque_kargs_param(ncc_grammar_t *g,
   ncc_free(existing_text.data);
 
   char new_ptl_src[4096];
-  if (resolved_existing.data && resolved_existing.u8_bytes > 0) {
+  // As in add_kargs_param: `(void)` means "no arguments", so the opaque
+  // kargs parameter replaces the `void` rather than being appended after it.
+  if (resolved_existing.data && resolved_existing.u8_bytes > 0 &&
+      !param_text_is_void(resolved_existing.data)) {
     snprintf(new_ptl_src, sizeof(new_ptl_src), "%s , void * kargs",
              resolved_existing.data);
   } else {
@@ -869,25 +911,103 @@ static void inject_kargs_body(ncc_grammar_t *g, ncc_parse_tree_t *func_body,
   // If no block_item_list, we need to create one.
   // compound_statement ::= "{" block_item_list? "}"
 
+  // Each defaulted keyword needs TWO body statements, inserted at the
+  // very start of the body in this order:
+  //
+  //   [[maybe_unused]] TYPE name = kargs -> _has_name ? kargs -> name
+  //                                                    : ( default ) ;
+  //   kargs -> name = name ;
+  //
+  // The first statement evaluates the default exactly once and exposes the
+  // resolved value as a body-scoped local (so contract blocks and bodies
+  // that reference the keyword by name see it).  The second statement writes
+  // the resolved value back into the kargs struct, so bodies that read the
+  // field directly through `kargs -> name` also observe the default when the
+  // caller omitted the keyword.  This is required because the call site no
+  // longer materializes omitted defaults into the struct (a deliberate
+  // single-evaluation choice); without the write-back, an omitted keyword
+  // would read as a zero-initialized field through the kargs pointer.
+  //
+  // The kargs struct a non-opaque callee receives is always a per-call,
+  // writable compound literal emitted at the call site (or by kw_func), so
+  // the write-back never mutates shared or read-only storage, and it runs
+  // before any user code, so a later direct read sees the resolved value.
+  //
+  // To keep both statements adjacent and in source order while the outer
+  // loop walks params high->low inserting at index 0, insert the write-back
+  // first, then the declaration, so the declaration ends up before it.
   for (int i = kw->num_params - 1; i >= 0; i--) {
     ncc_kw_param_t *p = &kw->params[i];
 
     char decl_src[2048];
     if (p->default_text.data) {
+      // Write-back statement (inserted first so it lands after the decl).
+      char writeback_src[1024];
+      snprintf(writeback_src, sizeof(writeback_src),
+               "kargs -> %s = %s ;", p->name.data, p->name.data);
+      ncc_parse_tree_t *writeback_item =
+          parse_template(g, "block_item", writeback_src);
+
       snprintf(
           decl_src, sizeof(decl_src),
           "[[maybe_unused]] %s %s = kargs -> _has_%s ? kargs -> %s : ( %s ) ;",
           p->type_text.data, p->name.data, p->name.data, p->name.data,
           p->default_text.data);
-    } else {
-      snprintf(decl_src, sizeof(decl_src),
-               "[[maybe_unused]] %s %s = kargs -> %s ;", p->type_text.data,
-               p->name.data, p->name.data);
+
+      ncc_parse_tree_t *decl_item = parse_template(g, "block_item", decl_src);
+
+      // The declaration and its write-back partner are a unit: the write-back
+      // is what makes an omitted default observable through `kargs -> name`
+      // (per D-009's single-evaluation rule).  Inserting the declaration
+      // without its write-back would silently re-open the default-omission
+      // regression with no diagnostic, so treat a parse failure of EITHER as a
+      // compiler-internal error and stop, exactly as the no-params and
+      // metadata-table-full paths in this transform already fail loudly.  Both
+      // templates are compiler-generated from the same identifier and a parse
+      // failure here indicates an internal inconsistency, not user input.
+      if (!decl_item || !writeback_item) {
+        fprintf(stderr,
+                "ncc: error: internal: failed to build kargs default "
+                "extraction for keyword '%s'\n",
+                p->name.data);
+        exit(1);
+      }
+
+      if (bil) {
+        ncc_xform_insert_child(bil, 0, writeback_item);
+        ncc_xform_insert_child(bil, 0, decl_item);
+      } else {
+        ncc_parse_tree_t *children[] = {decl_item};
+        bil = ncc_xform_make_node_with_children(g, "block_item_list", 0,
+                                                children, 1);
+        ncc_xform_insert_child(bil, 1, writeback_item);
+
+        size_t nc = ncc_tree_num_children(compound);
+        ncc_xform_insert_child(compound, nc - 1, bil);
+      }
+      continue;
     }
 
+    // No default: the field is always present (the caller must supply it),
+    // so a single declaration binding the local to the struct field is
+    // enough and no write-back is needed.
+    snprintf(decl_src, sizeof(decl_src),
+             "[[maybe_unused]] %s %s = kargs -> %s ;", p->type_text.data,
+             p->name.data, p->name.data);
+
     ncc_parse_tree_t *block_item = parse_template(g, "block_item", decl_src);
+    // This template is compiler-generated from the keyword's own type and
+    // identifier; a null parse result is an internal compiler invariant
+    // violation, not user error.  Silently continuing would drop the local
+    // binding for a required keyword with no diagnostic, so fail loudly,
+    // exactly as the defaulted-keyword path above and the metadata-table-full
+    // path in this transform already do.
     if (!block_item) {
-      continue;
+      fprintf(stderr,
+              "ncc: error: internal: failed to build kargs extraction "
+              "for keyword '%s'\n",
+              p->name.data);
+      exit(1);
     }
 
     if (bil) {
@@ -1621,7 +1741,7 @@ static ncc_parse_tree_t *find_first_positional_arg(ncc_parse_tree_t *arg_list) {
 }
 
 // Handle kw_func(target_func, .name=val, ...) calls.
-// Produces: &(struct _target__kargs){defaults..., ._has_name=1, .name=val}
+// Produces: &(struct _target__kargs){._has_name=1, .name=val}
 static ncc_parse_tree_t *xform_kw_func(ncc_xform_ctx_t *ctx,
                                        ncc_parse_tree_t *arg_list) {
   // arg0 is the target function name.
@@ -1660,7 +1780,9 @@ static ncc_parse_tree_t *xform_kw_func(ncc_xform_ctx_t *ctx,
     return nullptr;
   }
 
-  // Build: &(struct _target__kargs){defaults..., ._has_name=1, .name=val}
+  // Build: &(struct _target__kargs){._has_name=1, .name=val}
+  // Omitted defaults are evaluated by the callee-side extraction, not at
+  // the call site. This keeps side-effecting defaults single-evaluation.
   // Resolve any typeid/typehash in target_name before interpolation.
   ncc_string_t resolved_target = resolve_ncc_type_calls(target_name);
   char literal_src[16384];
@@ -1670,26 +1792,9 @@ static ncc_parse_tree_t *xform_kw_func(ncc_xform_ctx_t *ctx,
                           "& ( struct _%s__kargs ) { ", resolved_target.data);
   ncc_free(resolved_target.data);
 
-  // Phase 1: emit defaults from metadata.
   bool first = true;
-  if (meta && meta->kw) {
-    for (int i = 0; i < meta->kw->num_params; i++) {
-      ncc_kw_param_t *p = &meta->kw->params[i];
-      if (!p->default_text.data) {
-        continue;
-      }
-      if (!first) {
-        pos += (size_t)snprintf(literal_src + pos, sizeof(literal_src) - pos,
-                                " , ");
-      }
-      pos +=
-          (size_t)snprintf(literal_src + pos, sizeof(literal_src) - pos,
-                           ". %s = ( %s )", p->name.data, p->default_text.data);
-      first = false;
-    }
-  }
 
-  // Phase 2: emit user-provided keyword arguments (override defaults).
+  // Emit user-provided keyword arguments.
   for (int i = 0; i < arg_count; i++) {
     if (!args[i].name) {
       continue; // Skip positional (arg0 = target function name).
@@ -2067,7 +2172,9 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
                            "& ( struct _%s__kargs ) { ", resolved_callee.data);
       ncc_free(resolved_callee.data);
 
-      // For each kw param: emit user override if present, else default.
+      // For each kw param: emit user overrides only. Omitted defaults are
+      // evaluated by the callee-side extraction so the default expression has
+      // exactly one evaluation point.
       bool first = true;
       for (int i = 0; i < meta->kw->num_params; i++) {
         ncc_kw_param_t *p = &meta->kw->params[i];
@@ -2094,16 +2201,6 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
                                   p->name.data, val_text.data);
           first = false;
           ncc_free(val_text.data);
-        } else if (p->default_text.data) {
-          // Use default value.
-          if (!first) {
-            pos +=
-                (size_t)snprintf(new_args + pos, sizeof(new_args) - pos, " , ");
-          }
-          pos += (size_t)snprintf(new_args + pos, sizeof(new_args) - pos,
-                                  ". %s = ( %s )", p->name.data,
-                                  p->default_text.data);
-          first = false;
         }
       }
 
