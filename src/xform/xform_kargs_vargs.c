@@ -311,6 +311,16 @@ static const char *extract_func_name(ncc_parse_tree_t *node) {
     }
     return nullptr;
   }
+  // A struct/union/enum tag is a TYPE name, not a callee. Don't descend
+  // into these specifiers: otherwise a struct/union/enum *definition* whose
+  // tag matches a known function (e.g. a constructor named after the result
+  // struct, as in net/quic/metrics) gets misread as a misparsed function
+  // call by the heuristic that calls this on a declaration's
+  // declaration_specifiers.
+  if (ncc_xform_nt_name_is(node, "struct_or_union_specifier") ||
+      ncc_xform_nt_name_is(node, "enum_specifier")) {
+    return nullptr;
+  }
   size_t nc = ncc_tree_num_children(node);
   for (size_t i = 0; i < nc; i++) {
     const char *name = extract_func_name(ncc_tree_child(node, i));
