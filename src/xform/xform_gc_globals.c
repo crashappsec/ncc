@@ -6,12 +6,15 @@
 // Walk-order placement: registered LAST in the xform sequence (after
 // rpc / generic_struct / typeid / option / typestr / typehash /
 // kargs_vargs / once / bang / rstr / static_image / gc_stack_maps /
-// constexpr / constexpr_paste — see src/ncc.c). The auto-roots pass
-// must see the final flattened translation_unit, including any
-// TU-scope synthetic decls earlier passes have produced
-// (spec § 8.3). The placement is enforced at the registration site
-// (ncc.c) rather than here; this comment documents the contract for
-// future readers.
+// constexpr / constexpr_paste — see src/ncc.c) and registered as a
+// post-order translation_unit transform. The auto-roots pass must see
+// the final flattened translation_unit, including any TU-scope
+// synthetic decls earlier passes have produced (spec § 8.3). Last
+// registration alone is not enough: a pre-order translation_unit
+// transform runs before child transforms such as `_generic_struct`
+// lowering. The placement is enforced at the registration site (ncc.c)
+// rather than here; this comment documents the contract for future
+// readers.
 //
 // Phase 2 scope was pointer scalars only. Phases 3+4+5 combined (per
 // D-017) extend to:
@@ -1474,12 +1477,11 @@ build_emit_source(const char *tu_uniq, candvec_t *cands)
 }
 
 // ============================================================================
-// Pass entry point (pre-order on translation_unit)
+// Pass entry point (post-order on translation_unit)
 // ============================================================================
 
 static ncc_parse_tree_t *
-xform_gc_globals_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
-                    [[maybe_unused]] ncc_xform_control_t *control)
+xform_gc_globals_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu)
 {
     ncc_xform_data_t *data = ncc_xform_get_data(ctx);
 
@@ -1614,6 +1616,6 @@ xform_gc_globals_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu,
 void
 ncc_register_gc_globals_xform(ncc_xform_registry_t *reg)
 {
-    ncc_xform_register_pre(reg, "translation_unit", xform_gc_globals_tu,
-                           "gc_globals");
+    ncc_xform_register(reg, "translation_unit", xform_gc_globals_tu,
+                       "gc_globals");
 }
