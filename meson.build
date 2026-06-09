@@ -442,8 +442,8 @@ foreach name, params : ncc_compile_tests
   # provides n00b_gc_stack_push / _pop, so the transform would emit
   # references that fail to compile. Opt out per-test.
   # WP-003 Phase 1 (D-031): auto-roots default flipped to on. Same
-  # reason — these fixtures don't link libn00b and therefore have
-  # no n00b_gc_register_roots / n00b_gc_root_t. Opt out per-test.
+  # reason — these fixtures don't link libn00b and therefore do not
+  # provide the n00b GC root section types. Opt out per-test.
   test('ncc_' + name, test_runner,
     args : [ncc_exe, params[0], params[1]] + ncc_test_flags + extra_args
            + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -957,11 +957,11 @@ test('ncc_auto_gc_roots_default_on', test_runner,
 )
 
 # WP-001 Phase 2: pointer-scalar TU-scope decls register. The
-# emit shape per spec § 4.1 / D-005 is one table-and-ctor trio per
-# TU. Three assertions pin the per-symbol entries (`& x` and
-# `& y` in declaration order) and the forward declaration of the
-# batch runtime API (`n00b_gc_register_roots`, per D-012). All
-# four use the same source so a missing emit fails every check.
+# emit shape per spec § 4.1 / D-005 is one root table and one
+# linker-section entry per TU. Three assertions pin the per-symbol
+# entries (`& x` and `& y` in declaration order) and the section
+# descriptor. All use the same source so a missing emit fails every
+# check.
 test('ncc_auto_gc_roots_pointer_scalar_x', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_pointer_scalar.c',
@@ -980,10 +980,10 @@ test('ncc_auto_gc_roots_pointer_scalar_y', test_runner,
   depends : ncc_exe,
 )
 
-test('ncc_auto_gc_roots_pointer_scalar_fwd_decl', test_runner,
+test('ncc_auto_gc_roots_pointer_scalar_section_entry', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_pointer_scalar.c',
-          'extern void n00b_gc_register_roots']
+          '__ncc_gc_root_section_entry_']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
   suite : 'ncc',
   depends : ncc_exe,
