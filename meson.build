@@ -908,6 +908,22 @@ test('ncc_gc_stack_maps_default_on', test_runner,
   depends : ncc_exe,
 )
 
+test('ncc_gc_stack_maps_nogc_attribute_skips_function', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_nogc_attribute.c', 'n00b_gc_stack_']
+         + ncc_test_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_stack_maps_nogc_attribute_stripped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_stack_maps_nogc_attribute.c', 'n00b::nogc']
+         + ncc_test_flags,
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 # WP-001 Phase 1: pins the no-op-when-off contract for the
 # xform_gc_globals transform (spec § 6.1, D-006). Even when the
 # source contains a TU-scope pointer-bearing static that would
@@ -1136,6 +1152,19 @@ test('ncc_auto_gc_roots_nested_struct_offset', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_nested_struct.c',
           '(void *) & (outer).in.p']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# Regression: static aggregate fields whose type comes from
+# `_generic_struct` lowering must be walked after the concrete struct
+# definition has been emitted. This is the shape used by embedded
+# `n00b_list_t(...)` fields in Wax globals.
+test('ncc_auto_gc_roots_nested_generic_struct', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_nested_generic_struct.c',
+          '(void *) & (g_endpoint).events.data']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
   suite : 'ncc',
   depends : ncc_exe,
