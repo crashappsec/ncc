@@ -134,6 +134,31 @@ declarator_ptr_depth(ncc_parse_tree_t *node)
     return total;
 }
 
+// Pointer depth of a function declarator's RETURN type: the `*` stars outside
+// the parameter list (and array dimensions). Unlike declarator_ptr_depth this
+// does not bail on the parameter list — it skips it. `int *f(args)` -> 1.
+static int
+return_ptr_depth(ncc_parse_tree_t *node)
+{
+    if (!node) {
+        return 0;
+    }
+    if (ncc_tree_is_leaf(node)) {
+        ncc_string_t t = leaf_text(node);
+        return (t.data && strcmp(t.data, "*") == 0) ? 1 : 0;
+    }
+    if (nt_is(node, "parameter_type_list") || nt_is(node, "parameter_list")
+        || nt_is(node, "array_declarator")) {
+        return 0;
+    }
+    int    total = 0;
+    size_t nc    = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        total += return_ptr_depth(ncc_tree_child(node, i));
+    }
+    return total;
+}
+
 // Storage-class and function specifiers are not part of a value's type; drop
 // them from a normalized specifier spelling (keep const/volatile, which are).
 static bool
@@ -566,10 +591,10 @@ ncc_type_of_expr(ncc_symtab_t *st, ncc_parse_tree_t *expr)
         }
     }
 
-    // postfix member access: base ('.' | '->') member.
+    // Postfix forms: member access (e.f / e->f), call (f(args)), subscript
+    // (a[i]). One scan classifies the operator and captures the operand(s).
     if (nt_is(expr, "postfix_expression")) {
-        bool              arrow = false;
-        bool              dot   = false;
+        bool              arrow = false, dot = false, call = false, sub = false;
         ncc_parse_tree_t *base  = nullptr;
         ncc_parse_tree_t *mem   = nullptr;
         size_t            nc    = ncc_tree_num_children(expr);
@@ -578,34 +603,76 @@ ncc_type_of_expr(ncc_symtab_t *st, ncc_parse_tree_t *expr)
             if (!c) {
                 continue;
             }
-            ncc_string_t t = leaf_text(c);
-            if (t.data && strcmp(t.data, "->") == 0) {
-                arrow = true;
+            if (ncc_tree_is_leaf(c)) {
+                const char *s = leaf_text(c).data;
+                s             = s ? s : "";
+                if (strcmp(s, "->") == 0) {
+                    arrow = true;
+                }
+                else if (strcmp(s, ".") == 0) {
+                    dot = true;
+                }
+                else if (strcmp(s, "(") == 0) {
+                    call = true;
+                }
+                else if (strcmp(s, "[") == 0) {
+                    sub = true;
+                }
+                // ) ] , ++ -- ! and other punctuation are ignored; a non-punct
+                // leaf (e.g. a member-name identifier) falls through below.
+                else if (strcmp(s, ")") == 0 || strcmp(s, "]") == 0
+                         || strcmp(s, ",") == 0 || strcmp(s, "++") == 0
+                         || strcmp(s, "--") == 0 || strcmp(s, "!") == 0) {
+                    continue;
+                }
+                else {
+                    if (!base) {
+                        base = c;
+                    }
+                    else if (!mem) {
+                        mem = c;
+                    }
+                }
+                continue;
             }
-            else if (t.data && strcmp(t.data, ".") == 0) {
-                dot = true;
+            if (!base) {
+                base = c; // first nonterminal: aggregate / callee / array
             }
-            else if (!base) {
-                base = c; // first non-operator child is the aggregate operand
-            }
-            else {
-                mem = c; // last is the member name
+            else if (!mem) {
+                mem = c; // member name / argument list / index
             }
         }
+
         if ((arrow || dot) && base && mem) {
-            char *btype = ncc_type_of_expr(st, base);
+            char *bt = ncc_type_of_expr(st, base);
             if (arrow) {
-                btype = strip_one_star(btype); // p->m : deref then member
+                bt = strip_one_star(bt); // p->m : deref then member
             }
             char *result = nullptr;
-            if (btype) {
-                ncc_parse_tree_t *spec = ncc_symtab_aggregate_spec(st, btype);
+            if (bt) {
+                ncc_parse_tree_t *spec = ncc_symtab_aggregate_spec(st, bt);
                 if (spec) {
                     result = type_of_member(spec, identifier_text(mem));
                 }
-                ncc_free(btype);
+                ncc_free(bt);
             }
             return result;
+        }
+        if (sub && base) {
+            // a[i] : element type of a pointer (array decay handled as pointer).
+            return strip_one_star(ncc_type_of_expr(st, base));
+        }
+        if (call && base) {
+            ncc_string_t     fn  = identifier_text(base);
+            ncc_sym_entry_t *sym = fn.data ? ncc_symtab_lookup(
+                                       st, ncc_string_empty(), fn)
+                                           : nullptr;
+            if (sym && sym->kind == NCC_SYM_FUNCTION && sym->type_node) {
+                char *b = canonical_base(sym->type_node, fn);
+                if (b) {
+                    return append_stars(b, return_ptr_depth(sym->decl_node));
+                }
+            }
         }
     }
 

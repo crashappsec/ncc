@@ -20,6 +20,11 @@ static int         *gp;
 static tpe_point_t  gs;
 static tpe_point_t *gpp;
 
+// Prototypes for call typing (never actually called — typehash is a
+// compile-time type query — so no definition is needed).
+int         tpe_id_fn(int);
+tpe_point_t tpe_mk_fn(void);
+
 int
 main(void)
 {
@@ -46,6 +51,12 @@ main(void)
     ok &= (typehash(gs.y) == typehash(long));
     ok &= (typehash(gpp->x) == typehash(int));
     ok &= (typehash(gpp->y) == typehash(long));
+
+    // Function call: type of `f(args)` is f's return type.
+    ok &= (typehash(tpe_id_fn(0)) == typehash(int));
+
+    // Member access on a call result: type of `mk().y` is the field type.
+    ok &= (typehash(tpe_mk_fn().y) == typehash(long));
 
     return ok ? 0 : 1;
 }
