@@ -5,6 +5,7 @@
 #include "lib/alloc.h"
 #include "lib/buffer.h"
 #include "lib/dict.h"
+#include "parse/type_infer.h"
 #include "xform/xform_data.h"
 #include "xform/xform_helpers.h"
 
@@ -749,6 +750,11 @@ ncc_layout_aggregate_specifier_has_members(ncc_parse_tree_t *su)
         && ncc_xform_find_child_nt(su, "member_declaration_list") != nullptr;
 }
 
+static void
+record_aggregate_type(ncc_xform_ctx_t *ctx, const char *key,
+                      ncc_parse_tree_t *specifier, bool is_atomic,
+                      const char *offset_type);
+
 ncc_layout_aggregate_type_info_t *
 ncc_layout_lookup_aggregate_type(ncc_xform_ctx_t *ctx, const char *key)
 {
@@ -760,7 +766,26 @@ ncc_layout_lookup_aggregate_type(ncc_xform_ctx_t *ctx, const char *key)
     bool found = false;
     ncc_layout_aggregate_type_info_t *info =
         ncc_dict_get(types, (void *)key, &found);
-    return found ? info : nullptr;
+    if (found) {
+        return info;
+    }
+
+    // Fall back to the symbol table — the single source of truth for types.
+    // The eager collector populates `types` from declarations as it sees them,
+    // but misses forms it cannot resolve at collection time (notably
+    // _generic_struct typedefs: the real n00b_variant_t / generic-container
+    // shape). The symbol table resolves those; cache the result so later
+    // lookups hit the dict. The resolver returns a spec only for a genuine
+    // aggregate (it yields null for pointer typedefs), so this never turns a
+    // pointer into a by-value aggregate.
+    ncc_symtab_t *st = ncc_xform_get_data(ctx)->symtab;
+    ncc_parse_tree_t *spec = st ? ncc_symtab_aggregate_spec(st, key) : nullptr;
+    if (spec) {
+        record_aggregate_type(ctx, key, spec, false, key);
+        info = ncc_dict_get(types, (void *)key, &found);
+        return found ? info : nullptr;
+    }
+    return nullptr;
 }
 
 static void

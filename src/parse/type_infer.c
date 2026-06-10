@@ -379,8 +379,13 @@ ncc_symtab_aggregate_spec(ncc_symtab_t *st, const char *type_name)
     }
 
     // A tag-reference spelling ("struct foo") resolves directly in the tag ns
-    // by its bare tag name.
-    const char *bare = type_name;
+    // by its bare tag name. A BARE identifier (no struct/union/enum keyword) is
+    // a type only via a typedef — never directly via the tag namespace — so the
+    // tag fallback below is gated on an explicit keyword. (Otherwise a bare name
+    // that happens to match a struct tag — e.g. md4c's `MD_SPAN_WIKILINK`, both
+    // an enum constant and a struct tag — would wrongly resolve as that struct.)
+    bool        had_prefix = false;
+    const char *bare       = type_name;
     for (const char *kw = nullptr;;) {
         kw = nullptr;
         if (strncmp(bare, "struct ", 7) == 0) {
@@ -398,7 +403,8 @@ ncc_symtab_aggregate_spec(ncc_symtab_t *st, const char *type_name)
         while (*kw == ' ') {
             kw++;
         }
-        bare = kw;
+        bare       = kw;
+        had_prefix = true;
     }
 
     ncc_string_t      nm     = ncc_string_from_cstr(type_name);
@@ -406,7 +412,14 @@ ncc_symtab_aggregate_spec(ncc_symtab_t *st, const char *type_name)
     ncc_parse_tree_t *result = nullptr;
 
     ncc_sym_entry_t *sym = ncc_symtab_lookup(st, ncc_string_empty(), nm);
-    if (sym && sym->kind == NCC_SYM_TYPEDEF && sym->type_node) {
+    // A pointer/array typedef (e.g. `typedef struct MIR_item *MIR_item_t;`)
+    // aliases a VALUE, not a by-value aggregate. Its specifiers still contain
+    // the pointee's struct, so resolving it here would wrongly report the
+    // pointee as a by-value aggregate (and a caller would emit offsetof through
+    // a pointer). Only a typedef whose declarator adds no `*`/`[]` is a genuine
+    // aggregate alias.
+    if (sym && sym->kind == NCC_SYM_TYPEDEF && sym->type_node
+        && declarator_ptr_depth(sym->decl_node) == 0) {
         ncc_parse_tree_t *su = find_descendant_nt(sym->type_node,
                                                   "struct_or_union_specifier");
         if (su && child_nt(su, "member_declaration_list")) {
@@ -425,7 +438,8 @@ ncc_symtab_aggregate_spec(ncc_symtab_t *st, const char *type_name)
             }
         }
     }
-    if (!result) {
+    if (!result && had_prefix) {
+        // Only an explicit `struct X` / `union X` reaches the tag namespace.
         ncc_sym_entry_t *te = ncc_symtab_lookup(st, NCC_STRING_STATIC("tag"),
                                                 barenm);
         if (te && te->type_node

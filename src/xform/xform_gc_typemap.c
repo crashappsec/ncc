@@ -21,7 +21,6 @@
 
 #include "lib/alloc.h"
 #include "lib/buffer.h"
-#include "parse/type_infer.h"
 #include "util/type_normalize.h"
 #include "xform/xform_data.h"
 #include "xform/xform_gc_typemap.h"
@@ -1236,21 +1235,6 @@ derive_gcidx_attr(const char *stobj_attr)
     return derive_gc_section_attr(stobj_attr, "n00b_gcidx");
 }
 
-// Resolve a type name to its aggregate specifier via the type model, then keep
-// it only if it is file-scope: the descriptors are emitted at file scope, so a
-// block-local tag would dangle.
-static ncc_parse_tree_t *
-symtab_resolve_aggregate(ncc_symtab_t *st, const char *name)
-{
-    ncc_parse_tree_t *spec = ncc_symtab_aggregate_spec(st, name);
-    if (spec
-        && (ncc_xform_find_ancestor(spec, "compound_statement")
-            || ncc_xform_find_ancestor(spec, "function_definition"))) {
-        return nullptr;
-    }
-    return spec;
-}
-
 char *
 ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
 {
@@ -1275,22 +1259,17 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
         bool scalar_no_ptr = elem_type_is_scalar_no_ptr(records[i].elem_type);
         ncc_parse_tree_t *spec = nullptr;
         if (!scalar_no_ptr) {
+            // Aggregate resolution now flows through the type model: the shared
+            // lookup falls back to the symbol table, so _generic_struct typedefs
+            // (the n00b_variant_t / generic-container shape) resolve here too.
             ncc_layout_aggregate_type_info_t *info =
                 ncc_layout_aggregate_info_from_type_name(ctx,
                                                          records[i].elem_type);
-            if (info && info->specifier && aggregate_type_is_file_visible(info)
-                && !info->is_atomic) {
-                spec = info->specifier;
-            }
-            else {
-                // The legacy aggregate table missed it (e.g. a _generic_struct
-                // typedef). Resolve through the type model instead.
-                spec = symtab_resolve_aggregate(
-                    ncc_xform_get_data(ctx)->symtab, records[i].elem_type);
-            }
-            if (!spec) {
+            if (!info || !info->specifier
+                || !aggregate_type_is_file_visible(info) || info->is_atomic) {
                 continue;
             }
+            spec = info->specifier;
         }
 
         ncc_buffer_t *offs    = ncc_buffer_empty();
