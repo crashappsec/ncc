@@ -54,6 +54,11 @@ load_c_grammar(void)
         char path[1024];
         snprintf(path, sizeof(path), "%s/c_ncc.bnf", srcroot);
         f = fopen(path, "r");
+        if (!f) {
+            snprintf(path, sizeof(path),
+                     "%s/subprojects/ncc/c_ncc.bnf", srcroot);
+            f = fopen(path, "r");
+        }
     }
 
     if (!f) {
