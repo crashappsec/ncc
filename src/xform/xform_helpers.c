@@ -2,6 +2,8 @@
 
 #include "xform/xform_helpers.h"
 #include "xform/xform_template.h"
+#include "xform/xform_data.h"
+#include "parse/type_infer.h"
 #include "lib/alloc.h"
 #include "lib/buffer.h"
 #include "lib/string.h"
@@ -553,4 +555,49 @@ ncc_string_t ncc_xform_extract_type_string(ncc_xform_ctx_t *ctx,
   ncc_free(cb->data);
   ncc_free(cb);
   return result;
+}
+
+// ============================================================================
+// Typed argument resolution (typehash / typeid / typestr of expressions)
+// ============================================================================
+
+char *
+ncc_xform_expr_arg_type(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *atom,
+                        ncc_parse_tree_t *cont) {
+  if (!ctx || !atom || cont) {
+    return nullptr; // a continuation is a multi-arg generic form, not an expr
+  }
+  ncc_symtab_t *st = ncc_xform_get_data(ctx)->symtab;
+  if (!st) {
+    return nullptr;
+  }
+  ncc_parse_tree_t *tsa =
+      ncc_xform_find_child_nt(atom, "typeof_specifier_argument");
+  if (!tsa) {
+    return nullptr;
+  }
+
+  // A direct expression argument.
+  ncc_parse_tree_t *expr = ncc_xform_find_child_nt(tsa, "expression");
+  if (expr) {
+    return ncc_type_of_expr(st, expr);
+  }
+
+  // A type_name argument that is really a value expression (e.g. `lp[2]`): the
+  // grammar's permissive typedef-name rule let an expression parse as a type.
+  // Re-parse its text as an expression and type that.
+  ncc_parse_tree_t *tn = ncc_xform_find_child_nt(tsa, "type_name");
+  if (tn && ncc_type_name_is_value_expr(st, tn)) {
+    ncc_string_t      text = ncc_xform_node_to_text(tn);
+    ncc_parse_tree_t *re =
+        text.data ? ncc_xform_parse_source(ctx->grammar, "expression",
+                                           text.data, "expr_arg_reinterpret")
+                  : nullptr;
+    char *result = re ? ncc_type_of_expr(st, re) : nullptr;
+    if (text.data) {
+      ncc_free(text.data);
+    }
+    return result;
+  }
+  return nullptr;
 }

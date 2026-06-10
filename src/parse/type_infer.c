@@ -443,6 +443,35 @@ ncc_symtab_aggregate_spec(ncc_symtab_t *st, const char *type_name)
     return result;
 }
 
+// True if a parsed `type_name` is really a mis-parsed expression: its base is a
+// plain identifier that names a VALUE (variable / parameter / function) rather
+// than a type. The grammar lets any identifier stand in as a typedef-name, so
+// expressions like `lp[2]` or `gp` can parse as type_names; the symbol table
+// disambiguates. struct/union/enum specifiers and builtin keywords are real
+// types; an unknown identifier is treated conservatively as a type.
+bool
+ncc_type_name_is_value_expr(ncc_symtab_t *st, ncc_parse_tree_t *type_name)
+{
+    if (!st || !type_name) {
+        return false;
+    }
+    if (find_descendant_nt(type_name, "struct_or_union_specifier")
+        || find_descendant_nt(type_name, "enum_specifier")) {
+        return false;
+    }
+    ncc_parse_tree_t *tdn = find_descendant_nt(type_name, "typedef_name");
+    if (!tdn) {
+        return false; // a builtin/keyword type, not an identifier
+    }
+    ncc_string_t     id  = identifier_text(tdn);
+    ncc_sym_entry_t *sym = id.data ? ncc_symtab_lookup(st, ncc_string_empty(),
+                                                       id)
+                                   : nullptr;
+    return sym
+        && (sym->kind == NCC_SYM_VARIABLE || sym->kind == NCC_SYM_PARAM
+            || sym->kind == NCC_SYM_FUNCTION);
+}
+
 // Type spelling of a single member_declaration whose field name is `fname`.
 static char *
 member_decl_type(ncc_parse_tree_t *m, ncc_string_t fname)

@@ -58,5 +58,9 @@ main(void)
     // Member access on a call result: type of `mk().y` is the field type.
     ok &= (typehash(tpe_mk_fn().y) == typehash(long));
 
+    // Subscript `gp[1]` is `int`. The grammar mis-parses this as a type_name;
+    // the symbol table reinterprets it as an expression.
+    ok &= (typehash(gp[1]) == typehash(int));
+
     return ok ? 0 : 1;
 }

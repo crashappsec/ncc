@@ -4,8 +4,6 @@
 // typeid(int *) becomes __aB3cD5eF... (SHA256-based identifier).
 
 #include "xform/xform_helpers.h"
-#include "xform/xform_data.h"
-#include "parse/type_infer.h"
 #include "util/type_normalize.h"
 
 #include <stdlib.h>
@@ -61,23 +59,16 @@ xform_typeid(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *node)
     // typeid(<expression>): mangle the expression's inferred type, matching the
     // mangle of the same type written explicitly. (See xform_typehash for the
     // companion typehash(<expression>) path.)
-    ncc_parse_tree_t *tsa = ncc_xform_find_child_nt(
-        atom, "typeof_specifier_argument");
-    if (!cont && tsa && !ncc_xform_find_child_nt(tsa, "type_name")) {
-        ncc_parse_tree_t *expr = ncc_xform_find_child_nt(tsa, "expression");
-        ncc_symtab_t     *st   = ncc_xform_get_data(ctx)->symtab;
-        char             *inferred = (expr && st) ? ncc_type_of_expr(st, expr)
-                                                  : nullptr;
-        if (inferred) {
-            ncc_string_t mangled = ncc_type_mangle(inferred);
-            uint32_t     line, col;
-            ncc_xform_first_leaf_pos(node, &line, &col);
-            ncc_parse_tree_t *replacement = ncc_xform_make_token_node(
-                NCC_TOK_IDENTIFIER, mangled.data, line, col);
-            ncc_free(inferred);
-            ncc_free(mangled.data);
-            return replacement;
-        }
+    char *inferred = ncc_xform_expr_arg_type(ctx, atom, cont);
+    if (inferred) {
+        ncc_string_t mangled = ncc_type_mangle(inferred);
+        uint32_t     line, col;
+        ncc_xform_first_leaf_pos(node, &line, &col);
+        ncc_parse_tree_t *replacement = ncc_xform_make_token_node(
+            NCC_TOK_IDENTIFIER, mangled.data, line, col);
+        ncc_free(inferred);
+        ncc_free(mangled.data);
+        return replacement;
     }
 
     ncc_string_t type_str = ncc_xform_extract_type_string(ctx, atom, cont);

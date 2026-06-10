@@ -5,8 +5,6 @@
 
 #include "lib/alloc.h"
 #include "xform/xform_helpers.h"
-#include "xform/xform_data.h"
-#include "parse/type_infer.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -54,16 +52,7 @@ static ncc_parse_tree_t *xform_typestr(ncc_xform_ctx_t *ctx,
 
   // typestr(<expression>): spell the expression's inferred type. Falls back to
   // the written-type path when the expression is not yet typeable.
-  ncc_parse_tree_t *tsa = ncc_xform_find_child_nt(atom,
-                                                  "typeof_specifier_argument");
-  char *inferred = nullptr;
-  if (!cont && tsa && !ncc_xform_find_child_nt(tsa, "type_name")) {
-    ncc_parse_tree_t *expr = ncc_xform_find_child_nt(tsa, "expression");
-    ncc_symtab_t     *st   = ncc_xform_get_data(ctx)->symtab;
-    if (expr && st) {
-      inferred = ncc_type_of_expr(st, expr);
-    }
-  }
+  char *inferred = ncc_xform_expr_arg_type(ctx, atom, cont);
 
   ncc_string_t type_str = {0};
   if (inferred) {

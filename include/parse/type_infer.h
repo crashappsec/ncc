@@ -34,3 +34,11 @@ char *ncc_type_of_expr(ncc_symtab_t *st, ncc_parse_tree_t *expr);
  */
 ncc_parse_tree_t *ncc_symtab_aggregate_spec(ncc_symtab_t *st,
                                             const char *type_name);
+
+/**
+ * @brief True if a parsed `type_name` is really a mis-parsed expression — its
+ *        base is an identifier naming a value (variable/parameter/function),
+ *        not a type. Used to disambiguate `type_name` vs `expression` where the
+ *        grammar's permissive typedef-name rule made them ambiguous.
+ */
+bool ncc_type_name_is_value_expr(ncc_symtab_t *st, ncc_parse_tree_t *type_name);
