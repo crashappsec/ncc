@@ -1714,6 +1714,53 @@ static bool is_kw_func_kargs_literal(ncc_parse_tree_t *expr) {
   return match;
 }
 
+// Check whether a positional arg's text is a synthesized ncc vargs compound
+// literal: & ( <vargs_type> ) { . nargs = ..., . cur_ix = ..., . args = ... }.
+//
+// This is intentionally shape-based rather than count-based. A user call to a
+// vargs+kargs function may have the same number of positional arguments as a
+// transformed call; only the synthesized trailing slots should suppress another
+// call-site rewrite.
+static bool is_ncc_vargs_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *expr) {
+  if (!expr) {
+    return false;
+  }
+
+  ncc_string_t text = ncc_xform_node_to_text(expr);
+  if (!text.data) {
+    return false;
+  }
+
+  const char *p = text.data;
+  while (*p == ' ' || *p == '\t') {
+    p++;
+  }
+
+  const char *vargs_type = get_vargs_type(ctx);
+  bool match = strncmp(p, "&", 1) == 0 && strstr(p, vargs_type) != nullptr &&
+               strstr(p, ". nargs") != nullptr &&
+               strstr(p, ". cur_ix") != nullptr &&
+               strstr(p, ". args") != nullptr;
+
+  ncc_free(text.data);
+  return match;
+}
+
+static ncc_parse_tree_t *nth_positional_arg(collected_arg_t *args,
+                                            int arg_count,
+                                            int ordinal) {
+  int pos_count = 0;
+  for (int i = 0; i < arg_count; i++) {
+    if (!args[i].name) {
+      pos_count++;
+      if (pos_count == ordinal) {
+        return args[i].expr;
+      }
+    }
+  }
+  return nullptr;
+}
+
 // Extract the first positional argument from an argument_expression_list.
 // Returns the assignment_expression or conditional_expression node.
 static ncc_parse_tree_t *find_first_positional_arg(ncc_parse_tree_t *arg_list) {
@@ -1928,31 +1975,27 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
       // Function has no special params — nothing to do.
       already_done = true;
     } else if (meta->kw && !meta->va) {
-      // kargs-only: expected = positional + 1 kargs struct.
+      // kargs-only: expected = positional + 1 synthesized kargs struct.
       int expected = meta->kw->num_positional + 1;
-      if (n_positional == expected) {
+      ncc_parse_tree_t *kargs_arg =
+          nth_positional_arg(args, arg_count, expected);
+      if (n_positional == expected && meta->kw && !meta->kw->is_opaque &&
+          is_kw_func_kargs_literal(kargs_arg)) {
         already_done = true;
       }
     } else if (meta->va && meta->kw) {
-      // vargs+kargs: expected = positional + 1 vargs + 1 kargs.
-      // But if the last positional arg is a kw_func-generated kargs
-      // compound literal, it looks like a positional arg but is really
-      // the kargs — the call still needs transformation.
+      // vargs+kargs: expected = positional + 1 synthesized vargs literal
+      // + 1 synthesized kargs struct.  Count alone is not enough: a normal
+      // call such as log(fmt, a, b) has the same count when fmt is the only
+      // fixed positional parameter.
       int expected = meta->va->num_positional + 2;
       if (n_positional == expected) {
-        // Find the last positional arg and check if it's a kw_func
-        // kargs literal.  If so, the call is NOT already done.
-        ncc_parse_tree_t *last_pos = nullptr;
-        int pos_count = 0;
-        for (int i = 0; i < arg_count; i++) {
-          if (!args[i].name) {
-            pos_count++;
-            if (pos_count == n_positional) {
-              last_pos = args[i].expr;
-            }
-          }
-        }
-        if (!last_pos || !is_kw_func_kargs_literal(last_pos)) {
+        ncc_parse_tree_t *vargs_arg =
+            nth_positional_arg(args, arg_count, meta->va->num_positional + 1);
+        ncc_parse_tree_t *kargs_arg =
+            nth_positional_arg(args, arg_count, expected);
+        if (is_ncc_vargs_literal(ctx, vargs_arg) && meta->kw &&
+            !meta->kw->is_opaque && is_kw_func_kargs_literal(kargs_arg)) {
           already_done = true;
         }
       }
