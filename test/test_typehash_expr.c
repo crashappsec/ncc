@@ -30,5 +30,9 @@ main(void)
     // Cast: type of `(char)gi` is `char`.
     ok &= (typehash((char)gi) == typehash(char));
 
+    // typestr(expr) spells the inferred type, matching typestr(<that type>).
+    ok &= (__builtin_strcmp(typestr(gi), typestr(int)) == 0);
+    ok &= (__builtin_strcmp(typestr(*gp), typestr(int)) == 0);
+
     return ok ? 0 : 1;
 }
