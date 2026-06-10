@@ -170,6 +170,8 @@ src_parse = files(
   'src/parse/tree_dump.c',
   'src/parse/typedef_walk.c',
   'src/parse/symtab.c',
+  'src/parse/symbol_populate.c',
+  'src/parse/type_infer.c',
   'src/parse/c_tokenizer.c',
   'src/parse/emit.c',
   'src/parse/commander.c',
@@ -393,6 +395,7 @@ ncc_static_descriptor_flags = [
 # Compiler-level tests (run through ncc executable)
 ncc_compile_tests = {
   'bang':          ['compile_run',  test_dir / 'test_bang.c'],
+  'typehash_expr': ['compile_run',  test_dir / 'test_typehash_expr.c'],
   'array_literal': ['compile_run',  test_dir / 'test_array_literal.c'],
   'list_literal':  ['compile_run',  test_dir / 'test_list_literal.c'],
   'dict_literal':  ['compile_run',  test_dir / 'test_dict_literal.c'],
@@ -866,6 +869,72 @@ test('ncc_gc_typemap_union_mixed_skipped', test_runner,
   args : [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_typemap.c',
           'sizeof(gcmap_union_mixed_t)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# Discriminated-union (n00b_variant_t) GC maps: a variant's value word is
+# described precisely via its selector discriminant instead of warning + a
+# conservative scan.
+
+# A pointer-bearing variant emits a variant descriptor (not a flat offset).
+test('ncc_gc_typemap_variant_descriptor_emitted', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap_variant.c',
+          'n00b_gc_variant_field_t']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# The descriptor records the selector and value word offsets.
+test('ncc_gc_typemap_variant_selector_offset', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap_variant.c',
+          '__builtin_offsetof(vmap_variant_t,selector)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_variant_value_offset', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap_variant.c',
+          '__builtin_offsetof(vmap_variant_t,value)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# An EMBEDDED variant field is described in-place: the selector/value offsets
+# are taken through the containing struct's field path.
+test('ncc_gc_typemap_variant_embedded', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap_variant.c',
+          '__builtin_offsetof(vmap_holder_t,choice.selector)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# The containing struct still gets its ordinary (unconditional) pointer offsets
+# alongside the variant descriptor.
+test('ncc_gc_typemap_variant_embedded_flat_offset', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap_variant.c',
+          '__builtin_offsetof(vmap_holder_t,head)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# An all-scalar variant stays precise without a variant descriptor (its value
+# word is never a heap pointer) and must not be skipped.
+test('ncc_gc_typemap_variant_all_scalar_no_descriptor', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap_variant.c',
+          'sizeof(vmap_scalar_variant_t)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
   suite : 'ncc',
   depends : ncc_exe,

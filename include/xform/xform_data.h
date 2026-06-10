@@ -8,6 +8,7 @@
 
 #include "xform/xform_template.h"
 #include "lib/dict.h"  // ncc_dict_t used in ncc_xform_data_t
+#include "parse/symtab.h"  // ncc_symtab_t used in ncc_xform_data_t
 
 typedef enum {
     NCC_GC_STACK_ROOT_PARAM,
@@ -78,6 +79,9 @@ typedef struct {
     bool                       auto_gc_roots;
     ncc_gc_stack_root_t       *gc_stack_roots;
     size_t                     gc_stack_root_count;
+    // Scoped symbol table for the TU (built post-parse by symbol_populate).
+    // The type model queries this; nullptr if population was skipped.
+    ncc_symtab_t              *symtab;
 } ncc_xform_data_t;
 
 static inline ncc_xform_data_t *ncc_xform_get_data(ncc_xform_ctx_t *ctx) {

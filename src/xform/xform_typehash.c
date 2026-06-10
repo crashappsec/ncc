@@ -5,6 +5,9 @@
 
 #include "xform/xform_helpers.h"
 #include "xform/xform_gc_typemap.h"
+#include "xform/xform_data.h"
+#include "parse/type_infer.h"
+#include "util/type_normalize.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -38,6 +41,33 @@ xform_typehash(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *node)
                                                         "typeid_continuation");
     if (!atom) {
         return nullptr;
+    }
+
+    // typehash(<expression>): when the single argument is an expression (not a
+    // written type, string literal, or generic continuation), hash the
+    // expression's inferred type. This is typehash(typeof(expr)) without the
+    // user spelling out typeof. The type model recomputes the canonical type
+    // spelling identically to a written type, so the hash matches.
+    ncc_parse_tree_t *tsa = ncc_xform_find_child_nt(
+        atom, "typeof_specifier_argument");
+    if (!cont && tsa && !ncc_xform_find_child_nt(tsa, "type_name")) {
+        ncc_parse_tree_t *expr = ncc_xform_find_child_nt(tsa, "expression");
+        ncc_symtab_t     *st   = ncc_xform_get_data(ctx)->symtab;
+        char             *inferred = (expr && st) ? ncc_type_of_expr(st, expr)
+                                                  : nullptr;
+        if (inferred) {
+            uint64_t hash = ncc_type_hash_u64(inferred);
+            ncc_gc_typemap_note(ctx, inferred, hash);
+
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%" PRIu64 "ULL", hash);
+            uint32_t line, col;
+            ncc_xform_first_leaf_pos(node, &line, &col);
+            ncc_parse_tree_t *replacement = ncc_xform_make_token_node(
+                NCC_TOK_INTEGER, buf, line, col);
+            ncc_free(inferred);
+            return replacement;
+        }
     }
 
     ncc_string_t type_str = ncc_xform_extract_type_string(ctx, atom, cont);
