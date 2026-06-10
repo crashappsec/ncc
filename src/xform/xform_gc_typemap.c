@@ -1235,6 +1235,70 @@ derive_gcidx_attr(const char *stobj_attr)
     return derive_gc_section_attr(stobj_attr, "n00b_gcidx");
 }
 
+// Resolve a type name to its aggregate specifier (one carrying a member body)
+// via the scoped symbol table, following a typedef to its underlying tag. This
+// catches types the legacy aggregate table misses — notably _generic_struct
+// typedefs (n00b_variant_t, generic containers), whose alias the lazy collector
+// registers before generic-struct lowering and therefore cannot resolve.
+// Returns a struct/union specifier with a member_declaration_list, or nullptr.
+static ncc_parse_tree_t *
+symtab_resolve_aggregate(ncc_symtab_t *st, const char *name)
+{
+    if (!st || !name) {
+        return nullptr;
+    }
+    ncc_string_t      nm   = ncc_string_from_cstr(name);
+    ncc_sym_entry_t  *sym  = ncc_symtab_lookup(st, ncc_string_empty(), nm);
+    ncc_parse_tree_t *spec = nullptr;
+
+    if (sym && sym->kind == NCC_SYM_TYPEDEF && sym->type_node) {
+        ncc_parse_tree_t *su = ncc_layout_first_descendant_nt(
+            sym->type_node, "struct_or_union_specifier");
+        if (su && ncc_xform_find_child_nt(su, "member_declaration_list")) {
+            spec = su; // typedef with an inline aggregate body
+        }
+        else if (su) {
+            // Tag reference: resolve the tag's definition via the tag namespace.
+            ncc_parse_tree_t *tagn = ncc_xform_find_child_nt(su, "tag_name");
+            if (tagn) {
+                // tag_name is a single identifier, so its text needs no trim.
+                ncc_string_t     tag = ncc_xform_node_to_text(tagn);
+                ncc_sym_entry_t *te  = ncc_symtab_lookup(
+                    st, NCC_STRING_STATIC("tag"), tag);
+                if (te && te->type_node
+                    && ncc_xform_find_child_nt(te->type_node,
+                                               "member_declaration_list")) {
+                    spec = te->type_node;
+                }
+                if (tag.data) {
+                    ncc_free(tag.data);
+                }
+            }
+        }
+    }
+
+    if (!spec) {
+        // The name may itself be a struct/union tag.
+        ncc_sym_entry_t *te = ncc_symtab_lookup(st, NCC_STRING_STATIC("tag"), nm);
+        if (te && te->type_node
+            && ncc_xform_find_child_nt(te->type_node, "member_declaration_list")) {
+            spec = te->type_node;
+        }
+    }
+    if (nm.data) {
+        ncc_free(nm.data);
+    }
+
+    // Only file-scope aggregates are usable: the descriptors are emitted at file
+    // scope, so a block-local tag would dangle.
+    if (spec
+        && (ncc_xform_find_ancestor(spec, "compound_statement")
+            || ncc_xform_find_ancestor(spec, "function_definition"))) {
+        spec = nullptr;
+    }
+    return spec;
+}
+
 char *
 ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
 {
@@ -1257,17 +1321,22 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
         }
 
         bool scalar_no_ptr = elem_type_is_scalar_no_ptr(records[i].elem_type);
-        ncc_layout_aggregate_type_info_t *info = nullptr;
+        ncc_parse_tree_t *spec = nullptr;
         if (!scalar_no_ptr) {
-            info = ncc_layout_aggregate_info_from_type_name(ctx,
-                                                            records[i].elem_type);
-            if (!info || !info->specifier) {
-                continue;
+            ncc_layout_aggregate_type_info_t *info =
+                ncc_layout_aggregate_info_from_type_name(ctx,
+                                                         records[i].elem_type);
+            if (info && info->specifier && aggregate_type_is_file_visible(info)
+                && !info->is_atomic) {
+                spec = info->specifier;
             }
-            if (!aggregate_type_is_file_visible(info)) {
-                continue;
+            else {
+                // The legacy aggregate table missed it (e.g. a _generic_struct
+                // typedef). Resolve through the type model instead.
+                spec = symtab_resolve_aggregate(
+                    ncc_xform_get_data(ctx)->symtab, records[i].elem_type);
             }
-            if (info->is_atomic) {
+            if (!spec) {
                 continue;
             }
         }
@@ -1284,7 +1353,7 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
         };
 
         if (!scalar_no_ptr) {
-            gc_walk(ctx, records[i].elem_type, info->specifier, "", offs, asserts,
+            gc_walk(ctx, records[i].elem_type, spec, "", offs, asserts,
                     &count, &vacc, &ok, 0);
         }
 

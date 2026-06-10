@@ -2247,6 +2247,15 @@ compile_file(ncc_opts_t *opts)
         ncc_verbose("transforms: %d nodes replaced", xctx.nodes_replaced);
     }
 
+    // Rebuild the symbol table against the fully-transformed tree so emit-time
+    // type resolution sees resolved forms (e.g. _generic_struct lowered to
+    // `struct __mangled`). The pre-transform table served expression typing
+    // during the passes; gc-typemap emission needs the post-transform view.
+    if (xdata.symtab) {
+        ncc_symtab_free(xdata.symtab);
+    }
+    xdata.symtab = ncc_populate_symbols(g, tree);
+
     // WP-020 / D-049: emit link-time GC pointer-map descriptors for the
     // pointer-to-aggregate types this TU typehash'd. Must run before the
     // transform dicts (gc_aggregate_types) are freed below; appended to the
