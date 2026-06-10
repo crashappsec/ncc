@@ -2195,7 +2195,6 @@ compile_file(ncc_opts_t *opts)
         .compiler          = opts->compiler,
         .input_file        = opts->input_file,
         .constexpr_headers = opts->constexpr_headers,
-        .func_meta         = {0},
         .template_reg      = &tmpl_reg,
         .vargs_type        = vargs_type,
         .once_prefix       = once_prefix,
@@ -2216,6 +2215,8 @@ compile_file(ncc_opts_t *opts)
         .gc_stack_maps_relaxed       = opts->gc_stack_maps_relaxed,
         .auto_gc_roots               = opts->auto_gc_roots,
     };
+    ncc_dict_init(&xdata.func_meta,
+                            ncc_hash_cstring, ncc_dict_cstr_eq);
     ncc_dict_init(&xdata.option_meta,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
     ncc_dict_init(&xdata.option_decls,
@@ -2252,6 +2253,7 @@ compile_file(ncc_opts_t *opts)
     ncc_mem_report("after transform");
 #endif
 
+    ncc_dict_free(&xdata.func_meta);
     ncc_dict_free(&xdata.option_meta);
     ncc_dict_free(&xdata.option_decls);
     ncc_dict_free(&xdata.generic_struct_decls);

@@ -66,66 +66,33 @@ typedef struct {
   ncc_vargs_info_t *va;
 } ncc_func_meta_t;
 
-// Simple hash table for function metadata.
-#define META_TABLE_SIZE 256
-
-typedef struct {
-  char *key;
-  ncc_func_meta_t *value;
-} meta_entry_t;
-
-typedef struct {
-  meta_entry_t entries[META_TABLE_SIZE];
-} meta_table_t;
+typedef ncc_dict_t meta_table_t;
 
 // Access the meta_table from ctx->user_data.
 static meta_table_t *get_meta_table(ncc_xform_ctx_t *ctx) {
   ncc_xform_data_t *d = ncc_xform_get_data(ctx);
-  // meta_table_t and ncc_meta_table_t have identical layout.
-  return (meta_table_t *)&d->func_meta;
+  return &d->func_meta;
 }
 
 // ============================================================================
 // Hash table operations
 // ============================================================================
 
-static uint32_t hash_str(const char *s) {
-  uint32_t h = 5381;
-  for (; *s; s++) {
-    h = ((h << 5) + h) + (unsigned char)*s;
-  }
-  return h;
-}
-
 static ncc_func_meta_t *meta_lookup(meta_table_t *table, const char *name) {
-  uint32_t idx = hash_str(name) % META_TABLE_SIZE;
-  for (uint32_t i = 0; i < META_TABLE_SIZE; i++) {
-    uint32_t slot = (idx + i) % META_TABLE_SIZE;
-    if (!table->entries[slot].key) {
-      return nullptr;
-    }
-    if (strcmp(table->entries[slot].key, name) == 0) {
-      return table->entries[slot].value;
-    }
-  }
-  return nullptr;
+  bool found = false;
+  ncc_func_meta_t *meta = ncc_dict_get(table, (void *)name, &found);
+  return found ? meta : nullptr;
 }
 
 static ncc_func_meta_t *meta_insert(meta_table_t *table, const char *name) {
-  uint32_t idx = hash_str(name) % META_TABLE_SIZE;
-  for (uint32_t i = 0; i < META_TABLE_SIZE; i++) {
-    uint32_t slot = (idx + i) % META_TABLE_SIZE;
-    if (!table->entries[slot].key) {
-      table->entries[slot].key = strdup(name);
-      table->entries[slot].value = ncc_alloc(ncc_func_meta_t);
-      return table->entries[slot].value;
-    }
-    if (strcmp(table->entries[slot].key, name) == 0) {
-      return table->entries[slot].value;
-    }
+  ncc_func_meta_t *meta = meta_lookup(table, name);
+  if (meta != nullptr) {
+    return meta;
   }
-  fprintf(stderr, "ncc: error: function metadata table full\n");
-  exit(1);
+
+  meta = ncc_alloc(ncc_func_meta_t);
+  ncc_dict_put(table, strdup(name), meta);
+  return meta;
 }
 
 // ============================================================================

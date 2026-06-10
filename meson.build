@@ -404,6 +404,8 @@ ncc_compile_tests = {
                                   test_dir / 'test_kargs_vargs_default_omitted.c'],
   'kargs_void_params': ['compile_run',
                         test_dir / 'test_kargs_void_params.c'],
+  'kargs_many_metadata': ['compile_run',
+                          test_dir / 'test_kargs_many_metadata.c'],
   'function_contracts': ['compile_run',
                          test_dir / 'test_function_contracts.c'],
   'function_contracts_parse': ['preprocess',
