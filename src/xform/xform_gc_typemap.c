@@ -29,6 +29,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 // ---------------------------------------------------------------------------
@@ -318,6 +319,374 @@ offset_assert(const char *elem_type, const char *path)
 }
 
 // ---------------------------------------------------------------------------
+// Discriminated unions (n00b_variant_t).
+//
+// `n00b_variant_t(T1, T2, ...)` expands to a struct shaped exactly:
+//     struct { uint64_t selector; union { T1 field_<h1>; ... } value; }
+// where `selector` holds typehash(T) of the active alternative (0 = unset).
+// The conservative union walker cannot describe this, but the discriminant
+// makes it precisely scannable: the `value` word is a heap pointer iff the
+// selector equals the typehash of one of the POINTER alternatives. ncc records
+// those typehashes (recomputed exactly as `typehash(T)` does, so they match the
+// runtime selector byte-for-byte) and emits a variant descriptor the collector
+// resolves per element at scan time.
+// ---------------------------------------------------------------------------
+
+// Accumulates the emitted variant descriptors for one element type.
+typedef struct {
+    ncc_buffer_t *arrays; // file-scope ptr-hash arrays + offset asserts
+    ncc_buffer_t *inits;  // CSV of n00b_gc_variant_field_t initializers
+    int           count;  // number of variant fields recorded
+    size_t        rec;    // owning record index (for unique array names)
+} variant_acc_t;
+
+typedef enum {
+    ALT_PTR,        // a heap pointer; its typehash joins the discriminant set
+    ALT_NONPTR,     // carries no heap pointer (primitive scalar or code pointer)
+    ALT_UNSUPPORTED // cannot be described safely -> fall back to conservative
+} alt_class_t;
+
+// Normalized type spelling of a struct member, with the trailing field name
+// removed. A member without a pointer/array declarator (e.g. `uint64_t x;`) is
+// parsed ambiguously: the field name folds into the specifier-qualifier-list,
+// so `normalize(specs)` yields "uint64_t x". Because the canonicalizer
+// space-joins adjacent alnum tokens, the field name is exactly a trailing
+// " <name>" we can strip — leaving normalize(T), which equals what
+// `typehash(T)` hashes at the n00b_variant_set site. Caller frees.
+static char *
+member_type_spelling(ncc_parse_tree_t *specs, const char *field_name)
+{
+    ncc_string_t norm = ncc_normalize_type_tree(specs);
+    if (!norm.data) {
+        return nullptr;
+    }
+    if (field_name) {
+        size_t blen = strlen(norm.data);
+        size_t flen = strlen(field_name);
+        if (blen > flen + 1 && norm.data[blen - flen - 1] == ' '
+            && strcmp(norm.data + blen - flen, field_name) == 0) {
+            norm.data[blen - flen - 1] = '\0';
+        }
+    }
+    return norm.data;
+}
+
+// True if any leaf under `node` is a const/volatile qualifier. A variant
+// alternative carrying such a qualifier on its pointer (e.g. `T * const`) would
+// change typehash normalization, so we cannot reconstruct a matching selector
+// value and must fall back to a conservative scan.
+static bool
+subtree_has_cv_qualifier(ncc_parse_tree_t *node)
+{
+    if (!node) {
+        return false;
+    }
+    if (ncc_tree_is_leaf(node)) {
+        const char *t = ncc_xform_leaf_text(node);
+        return t && (strcmp(t, "const") == 0 || strcmp(t, "volatile") == 0);
+    }
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        if (subtree_has_cv_qualifier(ncc_tree_child(node, i))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Classify one alternative (a member_declaration of the value union) and, for a
+// pointer alternative, compute its typehash into *out_hash. The hash MUST equal
+// `typehash(T)` at the n00b_variant_set site: the runtime selector is that
+// value, and a mismatch would leave a live pointer unmarked (heap corruption).
+// We reproduce it exactly — normalize(specifier_qualifier_list) yields the
+// canonical base, and the canonicalizer appends pointer stars with no spacing,
+// so base + "*"*depth == normalize(T).
+static alt_class_t
+classify_variant_alt(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *member,
+                     uint64_t *out_hash)
+{
+    ncc_parse_tree_t *specs = ncc_xform_find_child_nt(
+        member, "specifier_qualifier_list");
+    if (!specs) {
+        return ALT_UNSUPPORTED;
+    }
+    // _Atomic is dropped by normalization, but treat atomic alternatives as
+    // unsupported rather than reason about the wrapper here.
+    if (ncc_layout_specs_have_atomic_type_wrapper(specs)) {
+        return ALT_UNSUPPORTED;
+    }
+
+    // A non-pointer scalar member (e.g. `uint64_t field_1;`) carries no
+    // declarator node, so the declarator is optional here.
+    ncc_parse_tree_t *decl = ncc_layout_first_descendant_nt(member,
+                                                            "declarator");
+    if (decl && ncc_layout_first_descendant_nt(decl, "array_declarator")) {
+        return ALT_UNSUPPORTED;
+    }
+
+    int total = decl ? ncc_layout_pointer_depth_for_declarator(ctx, specs, decl)
+                     : ncc_layout_pointer_depth_for_specs(ctx, specs);
+
+    char *field = ncc_layout_implicit_member_field_name(member, specs);
+    char *base  = member_type_spelling(specs, field);
+    if (field) {
+        ncc_free(field);
+    }
+    if (!base) {
+        return ALT_UNSUPPORTED;
+    }
+
+    if (total == 0) {
+        // Non-pointer by value: a recognized primitive scalar carries no heap
+        // word; a by-value aggregate may hide pointers across several words and
+        // anything else is an unknown typedef — bail to a conservative scan for
+        // both (never an under-scan).
+        bool scalar = elem_type_is_scalar_no_ptr(base);
+        ncc_free(base);
+        return scalar ? ALT_NONPTR : ALT_UNSUPPORTED;
+    }
+
+    if (decl && ncc_layout_declarator_is_function_pointer(decl)) {
+        ncc_free(base);
+        return ALT_NONPTR; // code pointer, never a heap pointer
+    }
+    if (decl && subtree_has_cv_qualifier(decl)) {
+        ncc_free(base);
+        return ALT_UNSUPPORTED; // qualifier would break typehash reconstruction
+    }
+
+    // Reproduce typehash(T) exactly: the cleaned spelling is normalize(T) for
+    // the spec-level type, and we append only the EXPLICIT declarator stars (a
+    // pointer typedef is already captured by the spelling). The canonicalizer
+    // never spaces before '*', so this equals normalize(T).
+    int           stars = decl ? ncc_layout_pointer_depth_in_declarator(decl) : 0;
+    ncc_buffer_t *tb    = ncc_buffer_empty();
+    ncc_buffer_puts(tb, base);
+    for (int i = 0; i < stars; i++) {
+        ncc_buffer_puts(tb, "*");
+    }
+    *out_hash = ncc_type_hash_u64(tb->data);
+    ncc_free(base);
+    ncc_free(ncc_buffer_take(tb));
+    return ALT_PTR;
+}
+
+static int
+cmp_u64(const void *a, const void *b)
+{
+    uint64_t x = *(const uint64_t *)a;
+    uint64_t y = *(const uint64_t *)b;
+    return (x > y) - (x < y);
+}
+
+// If `spec` is an n00b_variant_t struct, return its resolved value-union
+// specifier; otherwise nullptr. The shape is exact: a struct with precisely two
+// members — `uint64_t selector;` and `union { ... } value;` whose alternatives
+// are all named with the `field_` prefix (N00B_VARIANT_FIELD). That triple
+// signature is unique to n00b_variant_t, so the selector is guaranteed to hold
+// a typehash discriminant.
+static ncc_parse_tree_t *
+variant_value_union(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *spec)
+{
+    if (ncc_layout_struct_or_union_is_union(spec)) {
+        return nullptr; // a variant is a struct, not a union
+    }
+    ncc_parse_tree_t *members = ncc_xform_find_child_nt(
+        spec, "member_declaration_list");
+    if (!members) {
+        return nullptr;
+    }
+
+    ncc_layout_parse_tree_list_t mlist = {0};
+    ncc_layout_collect_nt_children(members, "member_declaration", &mlist);
+    if (mlist.len != 2) {
+        if (mlist.data) {
+            ncc_free(mlist.data);
+        }
+        return nullptr;
+    }
+
+    bool              have_selector = false;
+    ncc_parse_tree_t *value_union   = nullptr;
+
+    for (size_t i = 0; i < mlist.len; i++) {
+        ncc_parse_tree_t *member = mlist.data[i];
+        ncc_parse_tree_t *specs  = ncc_xform_find_child_nt(
+            member, "specifier_qualifier_list");
+        if (!specs) {
+            continue;
+        }
+        char *name = ncc_layout_implicit_member_field_name(member, specs);
+        if (!name) {
+            continue;
+        }
+
+        if (strcmp(name, "selector") == 0) {
+            char *base    = member_type_spelling(specs, name);
+            have_selector = base && strcmp(base, "uint64_t") == 0;
+            if (base) {
+                ncc_free(base);
+            }
+        }
+        else if (strcmp(name, "value") == 0) {
+            ncc_parse_tree_t *agg = ncc_layout_aggregate_spec_from_specs(ctx,
+                                                                         specs);
+            if (agg) {
+                ncc_parse_tree_t *u = ncc_layout_resolve_aggregate_specifier(
+                    ctx, agg);
+                if (u && ncc_layout_struct_or_union_is_union(u)) {
+                    value_union = u;
+                }
+            }
+        }
+        ncc_free(name);
+    }
+
+    if (mlist.data) {
+        ncc_free(mlist.data);
+    }
+
+    if (!have_selector || !value_union) {
+        return nullptr;
+    }
+
+    // Confirm the n00b_variant alternative-naming convention: every union
+    // member is named `field_...`. This rules out an ordinary 2-member struct
+    // that merely happens to pair a uint64 with a union.
+    ncc_parse_tree_t *umembers = ncc_xform_find_child_nt(
+        value_union, "member_declaration_list");
+    if (!umembers) {
+        return nullptr;
+    }
+    ncc_layout_parse_tree_list_t alts = {0};
+    ncc_layout_collect_nt_children(umembers, "member_declaration", &alts);
+    bool all_field = alts.len > 0;
+    for (size_t i = 0; i < alts.len; i++) {
+        ncc_parse_tree_t *aspecs = ncc_xform_find_child_nt(
+            alts.data[i], "specifier_qualifier_list");
+        char *name = ncc_layout_implicit_member_field_name(alts.data[i], aspecs);
+        if (!name || strncmp(name, "field_", 6) != 0) {
+            all_field = false;
+        }
+        if (name) {
+            ncc_free(name);
+        }
+    }
+    if (alts.data) {
+        ncc_free(alts.data);
+    }
+
+    return all_field ? value_union : nullptr;
+}
+
+// Emit a variant descriptor for an n00b_variant_t field at `base`. `vunion` is
+// the resolved value-union specifier. On any alternative we cannot describe,
+// sets *ok = false and warns (the whole type then falls back to conservative
+// scanning, exactly as the legacy union path does — never an under-scan).
+static void
+walk_variant(ncc_xform_ctx_t *ctx, const char *elem_type,
+             ncc_parse_tree_t *vunion, const char *base, variant_acc_t *vacc,
+             bool *ok)
+{
+    ncc_parse_tree_t *members = ncc_xform_find_child_nt(
+        vunion, "member_declaration_list");
+    if (!members) {
+        *ok = false;
+        return;
+    }
+
+    ncc_layout_parse_tree_list_t alts = {0};
+    ncc_layout_collect_nt_children(members, "member_declaration", &alts);
+
+    ncc_layout_uint64_list_t hashes = {0};
+    bool                     unsupported = false;
+
+    for (size_t i = 0; i < alts.len; i++) {
+        uint64_t    h   = 0;
+        alt_class_t cls = classify_variant_alt(ctx, alts.data[i], &h);
+        if (cls == ALT_UNSUPPORTED) {
+            unsupported = true;
+            break;
+        }
+        if (cls == ALT_PTR) {
+            ncc_layout_uint64_list_push(&hashes, h);
+        }
+    }
+    if (alts.data) {
+        ncc_free(alts.data);
+    }
+
+    if (unsupported) {
+        fprintf(stderr,
+                "ncc: warning: gc-typemap: type '%s' has an n00b_variant_t with "
+                "an alternative that cannot be statically described for GC "
+                "scanning; the type loses its precise pointer map and falls "
+                "back to conservative scan (not precisely marshalable).\n",
+                elem_type ? elem_type : "(anonymous)");
+        if (hashes.data) {
+            ncc_free(hashes.data);
+        }
+        *ok = false;
+        return;
+    }
+
+    if (hashes.len == 0) {
+        // No pointer alternatives: the value word is never a heap pointer, so
+        // there is nothing to mark and the type stays precise.
+        if (hashes.data) {
+            ncc_free(hashes.data);
+        }
+        return;
+    }
+
+    // Sort ascending and dedup so the runtime can binary-search.
+    qsort(hashes.data, hashes.len, sizeof(uint64_t), cmp_u64);
+    size_t n = 0;
+    for (size_t i = 0; i < hashes.len; i++) {
+        if (n == 0 || hashes.data[i] != hashes.data[n - 1]) {
+            hashes.data[n++] = hashes.data[i];
+        }
+    }
+
+    char *sel_path = path_join(base, "selector");
+    char *val_path = path_join(base, "value");
+    char *sel_as   = offset_assert(elem_type, sel_path);
+    char *val_as   = offset_assert(elem_type, val_path);
+    char *sel_off  = offset_expr(elem_type, sel_path);
+    char *val_off  = offset_expr(elem_type, val_path);
+
+    int k = vacc->count;
+    ncc_buffer_printf(vacc->arrays, "%s%s", sel_as, val_as);
+    ncc_buffer_printf(vacc->arrays,
+                      "static const uint64_t __ncc_gcvar_h_%zu_%d[]={",
+                      vacc->rec, k);
+    for (size_t i = 0; i < n; i++) {
+        ncc_buffer_printf(vacc->arrays, "%s%lluULL", i ? "," : "",
+                          (unsigned long long)hashes.data[i]);
+    }
+    ncc_buffer_puts(vacc->arrays, "};");
+
+    if (k > 0) {
+        ncc_buffer_puts(vacc->inits, ",");
+    }
+    ncc_buffer_printf(vacc->inits,
+                      "{.selector_offset=%s,.value_offset=%s,"
+                      ".ptr_hash_count=%zuULL,.ptr_hashes=__ncc_gcvar_h_%zu_%d}",
+                      sel_off, val_off, n, vacc->rec, k);
+    vacc->count++;
+
+    ncc_free(sel_path);
+    ncc_free(val_path);
+    ncc_free(sel_as);
+    ncc_free(val_as);
+    ncc_free(sel_off);
+    ncc_free(val_off);
+    if (hashes.data) {
+        ncc_free(hashes.data);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tolerant, conservative pointer-offset walker.
 // ---------------------------------------------------------------------------
 
@@ -329,6 +698,7 @@ gc_walk(ncc_xform_ctx_t *ctx,
         ncc_buffer_t    *offs,
         ncc_buffer_t    *asserts,
         int             *count,
+        variant_acc_t   *vacc,
         bool            *ok,
         int              depth);
 
@@ -353,7 +723,8 @@ static void
 walk_struct_member(ncc_xform_ctx_t *ctx, const char *elem_type,
                    ncc_parse_tree_t *member, const char *base,
                    bool runtime_scan_shape, ncc_buffer_t *offs,
-                   ncc_buffer_t *asserts, int *count, bool *ok, int depth)
+                   ncc_buffer_t *asserts, int *count, variant_acc_t *vacc,
+                   bool *ok, int depth)
 {
     ncc_parse_tree_t *member_specs = ncc_xform_find_child_nt(
         member, "specifier_qualifier_list");
@@ -377,8 +748,8 @@ walk_struct_member(ncc_xform_ctx_t *ctx, const char *elem_type,
                                                                 member_specs);
             char *nbase = field ? path_join(base, field)
                                 : ncc_layout_copy_cstr(base);
-            gc_walk(ctx, elem_type, nspec, nbase, offs, asserts, count, ok,
-                    depth + 1);
+            gc_walk(ctx, elem_type, nspec, nbase, offs, asserts, count, vacc,
+                    ok, depth + 1);
             ncc_free(nbase);
             if (field) {
                 ncc_free(field);
@@ -487,7 +858,7 @@ walk_struct_member(ncc_xform_ctx_t *ctx, const char *elem_type,
                     ctx, member_specs);
                 if (nspec) {
                     gc_walk(ctx, elem_type, nspec, path, offs, asserts, count,
-                            ok, depth + 1);
+                            vacc, ok, depth + 1);
                 }
                 // else: scalar by-value member -> no pointer words.
             }
@@ -697,7 +1068,7 @@ walk_union(ncc_xform_ctx_t *ctx, const char *elem_type,
 static void
 gc_walk(ncc_xform_ctx_t *ctx, const char *elem_type, ncc_parse_tree_t *spec,
         const char *base, ncc_buffer_t *offs, ncc_buffer_t *asserts,
-        int *count, bool *ok, int depth)
+        int *count, variant_acc_t *vacc, bool *ok, int depth)
 {
     if (depth > 64 || *count > NCC_GCMAP_MAX_OFFSETS) {
         *ok = false;
@@ -707,6 +1078,16 @@ gc_walk(ncc_xform_ctx_t *ctx, const char *elem_type, ncc_parse_tree_t *spec,
     spec = ncc_layout_resolve_aggregate_specifier(ctx, spec);
     if (!spec) {
         *ok = false;
+        return;
+    }
+
+    // An n00b_variant_t is precisely scannable via its selector discriminant
+    // even though its value union mixes pointer and scalar alternatives. Handle
+    // it before the generic union/struct logic so the conservative union path
+    // never sees (and warns about) the variant's value union.
+    ncc_parse_tree_t *vunion = variant_value_union(ctx, spec);
+    if (vunion) {
+        walk_variant(ctx, elem_type, vunion, base, vacc, ok);
         return;
     }
 
@@ -729,7 +1110,7 @@ gc_walk(ncc_xform_ctx_t *ctx, const char *elem_type, ncc_parse_tree_t *spec,
     ncc_layout_collect_nt_children(members, "member_declaration", &mlist);
     for (size_t i = 0; i < mlist.len && *ok; i++) {
         walk_struct_member(ctx, elem_type, mlist.data[i], base,
-                           runtime_scan_shape, offs, asserts, count, ok,
+                           runtime_scan_shape, offs, asserts, count, vacc, ok,
                            depth);
     }
     if (mlist.data) {
@@ -895,17 +1276,27 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
         ncc_buffer_t *asserts = ncc_buffer_empty();
         int           count   = 0;
         bool          ok      = true;
+        variant_acc_t vacc    = {
+                  .arrays = ncc_buffer_empty(),
+                  .inits  = ncc_buffer_empty(),
+                  .count  = 0,
+                  .rec    = i,
+        };
 
         if (!scalar_no_ptr) {
             gc_walk(ctx, records[i].elem_type, info->specifier, "", offs, asserts,
-                    &count, &ok, 0);
+                    &count, &vacc, &ok, 0);
         }
 
         if (ok) {
             char *asserts_str = ncc_buffer_take(asserts);
+            char *var_arrays  = ncc_buffer_take(vacc.arrays);
+            char *var_inits   = ncc_buffer_take(vacc.inits);
 
-            // Asserts first (file scope), then the descriptor + section entry.
+            // Asserts + per-variant ptr-hash arrays first (file scope), then the
+            // descriptor + section entry.
             ncc_buffer_printf(out, "%s", asserts_str);
+            ncc_buffer_printf(out, "%s", var_arrays);
             if (count > 0) {
                 char *offs_csv = ncc_buffer_take(offs);
                 ncc_buffer_printf(
@@ -917,15 +1308,29 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
             else {
                 ncc_free(ncc_buffer_take(offs));
             }
+            if (vacc.count > 0) {
+                ncc_buffer_printf(
+                    out,
+                    "static const n00b_gc_variant_field_t "
+                    "__ncc_gcmap_var_%zu[]={%s};",
+                    i, var_inits);
+            }
             char *offsets_expr = count > 0
                                ? ncc_layout_format_cstr("__ncc_gcmap_off_%zu", i)
                                : ncc_layout_copy_cstr("nullptr");
+            char *variants_expr = vacc.count > 0
+                                ? ncc_layout_format_cstr("__ncc_gcmap_var_%zu", i)
+                                : ncc_layout_copy_cstr("nullptr");
             ncc_buffer_printf(
                 out,
                 "static const n00b_gc_struct_layout_t __ncc_gcmap_lay_%zu="
                 "{.stride=(sizeof(%s)/sizeof(void*)),.count=1,.offset_count=%d,"
-                ".offsets=%s};",
-                i, records[i].elem_type, count, offsets_expr);
+                ".offsets=%s,.variant_count=%dULL,.variants=%s};",
+                i, records[i].elem_type, count, offsets_expr, vacc.count,
+                variants_expr);
+            ncc_free(variants_expr);
+            ncc_free(var_arrays);
+            ncc_free(var_inits);
             ncc_buffer_printf(
                 out,
                 "%s static const n00b_gc_type_map_entry_t "
@@ -945,6 +1350,8 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
         else {
             ncc_free(ncc_buffer_take(offs));
             ncc_free(ncc_buffer_take(asserts));
+            ncc_free(ncc_buffer_take(vacc.arrays));
+            ncc_free(ncc_buffer_take(vacc.inits));
         }
     }
 

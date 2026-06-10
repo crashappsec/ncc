@@ -36,6 +36,7 @@
 #include "parse/bnf.h"
 #include "parse/pwz.h"
 #include "parse/typedef_walk.h"
+#include "parse/symbol_populate.h"
 #include "parse/c_tokenizer.h"
 #include "parse/emit.h"
 #include "xform/xform_gc_typemap.h"
@@ -2235,6 +2236,9 @@ compile_file(ncc_opts_t *opts)
                             ncc_hash_cstring, ncc_dict_cstr_eq);
     ncc_dict_init(&xdata.gc_function_pointer_typedefs,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
+    // Build the scoped symbol table for the type model. Runs after the typedef
+    // reclassification walk so declarator names are settled.
+    xdata.symtab = ncc_populate_symbols(g, tree);
     xctx.user_data = &xdata;
     ncc_verbose("applying transforms");
     tree = ncc_xform_apply(&xreg, &xctx);
@@ -2263,6 +2267,10 @@ compile_file(ncc_opts_t *opts)
     ncc_dict_free(&xdata.gc_aggregate_types);
     ncc_dict_free(&xdata.gc_pointer_typedefs);
     ncc_dict_free(&xdata.gc_function_pointer_typedefs);
+    if (xdata.symtab) {
+        ncc_symtab_free(xdata.symtab);
+        xdata.symtab = nullptr;
+    }
     free_gc_stack_roots(xdata.gc_stack_roots);
     ncc_template_registry_free(&tmpl_reg);
     ncc_xform_registry_free(&xreg);
