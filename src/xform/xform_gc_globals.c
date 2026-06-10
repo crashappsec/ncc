@@ -42,8 +42,8 @@
 // — the cheapest possible no-op (no allocation, no walk, no emit, no
 // diagnostic). When the flag is on, the pass walks the TU's
 // external_declarations, classifies definitions per the rules above,
-// and emits the per-TU table + `[[gnu::constructor]]` registrar
-// trio from spec § 4.1.
+// and emits the per-TU table + linker-section descriptor from spec
+// § 4.1.
 //
 // The `gc_globals_warnf` helper is the warn-and-skip diagnostic-
 // emission idiom (DF-001 / D-013). The shape mirrors
@@ -56,10 +56,9 @@
 //     primitives, ncc_alloc_*, etc.
 //   * The C source we *emit* via `ncc_buffer_printf` into the
 //     post-transform TU is libn00b-flavored: uses `((void *)0)` not
-//     `NULL` per D-016 (clangd test-file noise), `[[gnu::constructor]]`
-//     not `__attribute__((constructor))`, and references
-//     `n00b_gc_root_t` + `n00b_gc_register_roots` as defined in
-//     libn00b's `core/gc.h` (D-005, D-012).
+//     `NULL` per D-016 (clangd test-file noise), and references
+//     `n00b_gc_root_t` + `n00b_gc_root_section_entry_t` as defined in
+//     libn00b's `n00b.h`.
 
 #include "lib/alloc.h"
 #include "lib/buffer.h"
@@ -1412,22 +1411,53 @@ classify_declaration(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
 }
 
 // ============================================================================
-// Emit: build the forward-decl + table + ctor source string
+// Emit: build the table + linker-section descriptor source string
 // ============================================================================
 
 static char *
-build_emit_source(const char *tu_uniq, candvec_t *cands)
+derive_gc_root_section_attr(const char *stobj_attr)
+{
+    if (stobj_attr) {
+        const char *p = strstr(stobj_attr, "n00b_stobj");
+        if (p) {
+            const char *end = p + strlen("n00b_stobj");
+            while (*end && *end != '"') {
+                end++;
+            }
+            return ncc_layout_format_cstr(
+                "%.*sn00b_gcroots%s",
+                (int)(p - stobj_attr), stobj_attr,
+                end);
+        }
+
+        p = strstr(stobj_attr, ".n00bs");
+        if (p) {
+            return ncc_layout_format_cstr(
+                "%.*s.n00br%s",
+                (int)(p - stobj_attr), stobj_attr,
+                p + strlen(".n00bs"));
+        }
+    }
+
+#if defined(__APPLE__)
+    return ncc_layout_copy_cstr("[[gnu::section(\"__DATA,n00b_gcroots\"), gnu::used]]");
+#elif defined(_WIN32)
+    return ncc_layout_copy_cstr("[[gnu::section(\".n00br$m\"), gnu::used]]");
+#else
+    return ncc_layout_copy_cstr("[[gnu::section(\"n00b_gcroots\"), gnu::used]]");
+#endif
+}
+
+static char *
+build_emit_source(ncc_xform_ctx_t *ctx, const char *tu_uniq, candvec_t *cands)
 {
     ncc_buffer_t *buf = ncc_buffer_empty();
-
-    // Forward declaration of the libn00b runtime symbol (D-012).
-    ncc_buffer_puts(buf,
-        "extern void n00b_gc_register_roots(const n00b_gc_root_t *roots,"
-        " size_t count);\n");
+    const char   *stobj_attr = ncc_xform_get_data(ctx)->static_object_entry_attr;
+    char         *root_attr  = derive_gc_root_section_attr(stobj_attr);
 
     // Table.
     ncc_buffer_printf(buf,
-        "static n00b_gc_root_t __ncc_gc_root_table_%s[] = {\n",
+        "static const n00b_gc_root_t __ncc_gc_root_table_%s[] = {\n",
         tu_uniq);
     for (size_t i = 0; i < cands->len; i++) {
         cand_t *c = &cands->items[i];
@@ -1461,18 +1491,15 @@ build_emit_source(const char *tu_uniq, candvec_t *cands)
     }
     ncc_buffer_puts(buf, "};\n");
 
-    // Constructor. Uses libn00b-flavored C — `[[gnu::constructor]]`
-    // (C23 attribute spelling) and the single batch register call
-    // (D-005).
     ncc_buffer_printf(buf,
-        "[[gnu::constructor]]\n"
-        "static void __ncc_gc_root_register_%s(void) {\n"
-        "    n00b_gc_register_roots(__ncc_gc_root_table_%s,\n"
-        "                           sizeof __ncc_gc_root_table_%s\n"
-        "                               / sizeof __ncc_gc_root_table_%s[0]);\n"
-        "}\n",
-        tu_uniq, tu_uniq, tu_uniq, tu_uniq);
+        "%s static const n00b_gc_root_section_entry_t "
+        "__ncc_gc_root_section_entry_%s = {"
+        ".roots = __ncc_gc_root_table_%s,"
+        ".count = sizeof __ncc_gc_root_table_%s"
+        " / sizeof __ncc_gc_root_table_%s[0]};\n",
+        root_attr, tu_uniq, tu_uniq, tu_uniq, tu_uniq);
 
+    ncc_free(root_attr);
     return ncc_buffer_take(buf);
 }
 
@@ -1550,7 +1577,7 @@ xform_gc_globals_tu(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu)
     }
 
     char *tu_uniq = tu_uniq_suffix(data->input_file);
-    char *source  = build_emit_source(tu_uniq, &cands);
+    char *source  = build_emit_source(ctx, tu_uniq, &cands);
     ncc_free(tu_uniq);
     candvec_free(&cands);
 
