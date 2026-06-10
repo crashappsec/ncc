@@ -21,6 +21,7 @@
 
 #include "lib/alloc.h"
 #include "lib/buffer.h"
+#include "parse/type_infer.h"
 #include "util/type_normalize.h"
 #include "xform/xform_data.h"
 #include "xform/xform_gc_typemap.h"
@@ -1235,66 +1236,17 @@ derive_gcidx_attr(const char *stobj_attr)
     return derive_gc_section_attr(stobj_attr, "n00b_gcidx");
 }
 
-// Resolve a type name to its aggregate specifier (one carrying a member body)
-// via the scoped symbol table, following a typedef to its underlying tag. This
-// catches types the legacy aggregate table misses — notably _generic_struct
-// typedefs (n00b_variant_t, generic containers), whose alias the lazy collector
-// registers before generic-struct lowering and therefore cannot resolve.
-// Returns a struct/union specifier with a member_declaration_list, or nullptr.
+// Resolve a type name to its aggregate specifier via the type model, then keep
+// it only if it is file-scope: the descriptors are emitted at file scope, so a
+// block-local tag would dangle.
 static ncc_parse_tree_t *
 symtab_resolve_aggregate(ncc_symtab_t *st, const char *name)
 {
-    if (!st || !name) {
-        return nullptr;
-    }
-    ncc_string_t      nm   = ncc_string_from_cstr(name);
-    ncc_sym_entry_t  *sym  = ncc_symtab_lookup(st, ncc_string_empty(), nm);
-    ncc_parse_tree_t *spec = nullptr;
-
-    if (sym && sym->kind == NCC_SYM_TYPEDEF && sym->type_node) {
-        ncc_parse_tree_t *su = ncc_layout_first_descendant_nt(
-            sym->type_node, "struct_or_union_specifier");
-        if (su && ncc_xform_find_child_nt(su, "member_declaration_list")) {
-            spec = su; // typedef with an inline aggregate body
-        }
-        else if (su) {
-            // Tag reference: resolve the tag's definition via the tag namespace.
-            ncc_parse_tree_t *tagn = ncc_xform_find_child_nt(su, "tag_name");
-            if (tagn) {
-                // tag_name is a single identifier, so its text needs no trim.
-                ncc_string_t     tag = ncc_xform_node_to_text(tagn);
-                ncc_sym_entry_t *te  = ncc_symtab_lookup(
-                    st, NCC_STRING_STATIC("tag"), tag);
-                if (te && te->type_node
-                    && ncc_xform_find_child_nt(te->type_node,
-                                               "member_declaration_list")) {
-                    spec = te->type_node;
-                }
-                if (tag.data) {
-                    ncc_free(tag.data);
-                }
-            }
-        }
-    }
-
-    if (!spec) {
-        // The name may itself be a struct/union tag.
-        ncc_sym_entry_t *te = ncc_symtab_lookup(st, NCC_STRING_STATIC("tag"), nm);
-        if (te && te->type_node
-            && ncc_xform_find_child_nt(te->type_node, "member_declaration_list")) {
-            spec = te->type_node;
-        }
-    }
-    if (nm.data) {
-        ncc_free(nm.data);
-    }
-
-    // Only file-scope aggregates are usable: the descriptors are emitted at file
-    // scope, so a block-local tag would dangle.
+    ncc_parse_tree_t *spec = ncc_symtab_aggregate_spec(st, name);
     if (spec
         && (ncc_xform_find_ancestor(spec, "compound_statement")
             || ncc_xform_find_ancestor(spec, "function_definition"))) {
-        spec = nullptr;
+        return nullptr;
     }
     return spec;
 }

@@ -24,3 +24,13 @@
  *        @p st, or nullptr if the form is not yet typeable. Caller frees.
  */
 char *ncc_type_of_expr(ncc_symtab_t *st, ncc_parse_tree_t *expr);
+
+/**
+ * @brief Resolve a type name (e.g. "foo_t", "struct foo") to its aggregate
+ *        specifier carrying a member body, via the symbol table (following a
+ *        typedef to its underlying tag). Returns the specifier or nullptr.
+ *        Resolves types the legacy aggregate table misses, notably
+ *        `_generic_struct` typedefs.
+ */
+ncc_parse_tree_t *ncc_symtab_aggregate_spec(ncc_symtab_t *st,
+                                            const char *type_name);

@@ -10,8 +10,15 @@
 
 #include <stdint.h>
 
-static int  gi;
-static int *gp;
+typedef struct tpe_point {
+    int  x;
+    long y;
+} tpe_point_t;
+
+static int          gi;
+static int         *gp;
+static tpe_point_t  gs;
+static tpe_point_t *gpp;
 
 int
 main(void)
@@ -33,6 +40,12 @@ main(void)
     // typestr(expr) spells the inferred type, matching typestr(<that type>).
     ok &= (__builtin_strcmp(typestr(gi), typestr(int)) == 0);
     ok &= (__builtin_strcmp(typestr(*gp), typestr(int)) == 0);
+
+    // Member access: `s.field` (first and later members) and `p->field`.
+    ok &= (typehash(gs.x) == typehash(int));
+    ok &= (typehash(gs.y) == typehash(long));
+    ok &= (typehash(gpp->x) == typehash(int));
+    ok &= (typehash(gpp->y) == typehash(long));
 
     return ok ? 0 : 1;
 }
