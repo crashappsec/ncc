@@ -313,6 +313,50 @@ find_descendant_nt(ncc_parse_tree_t *node, const char *name)
     return nullptr;
 }
 
+// True if a leaf with the exact text `text` exists anywhere under `node`.
+static bool
+subtree_has_leaf_text(ncc_parse_tree_t *node, const char *text)
+{
+    if (!node) {
+        return false;
+    }
+    if (ncc_tree_is_leaf(node)) {
+        ncc_string_t t = leaf_text(node);
+        return t.data && strcmp(t.data, text) == 0;
+    }
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        if (subtree_has_leaf_text(ncc_tree_child(node, i), text)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// `auto x = e;` (C23 type inference): an `auto` storage class with no explicit
+// type specifier — the declared type is the initializer's type.
+static bool
+specs_are_auto(ncc_parse_tree_t *specs)
+{
+    return specs && !find_descendant_nt(specs, "type_specifier")
+        && subtree_has_leaf_text(specs, "auto");
+}
+
+// The initializer expression of declarator `declr`: walk up to the enclosing
+// init_declarator and take its <initializer>, or nullptr.
+static ncc_parse_tree_t *
+declarator_initializer(ncc_parse_tree_t *declr)
+{
+    ncc_parse_tree_t *p = declr;
+    while (p && !ncc_tree_is_leaf(p)) {
+        if (nt_is(p, "init_declarator")) {
+            return child_nt(p, "initializer");
+        }
+        p = ncc_tree_node_value(p).parent;
+    }
+    return nullptr;
+}
+
 // Text of the first IDENTIFIER/TYPEDEF_NAME leaf at or under `node`.
 static ncc_string_t
 identifier_text(ncc_parse_tree_t *node)
@@ -497,6 +541,15 @@ ncc_disambig_eval(void *ud, const char *predicate, ncc_token_info_t *tok)
         return sym->kind == NCC_SYM_TYPEDEF;
     }
 
+    // Any declared symbol at all. A real function specifier (inline / _Noreturn
+    // / _Once) is a keyword, never a declared name — so when the function-
+    // specifier soft-keyword alt matches a known identifier, that reading is
+    // wrong (e.g. `plain(5);` mis-read as a declaration with `plain` a
+    // specifier, or `static box_t f()` with `box_t` a specifier).
+    if (strcmp(predicate, "id_is_known") == 0) {
+        return true; // reached only when lookup found a symbol
+    }
+
     return false;
 }
 
@@ -562,21 +615,60 @@ type_of_member(ncc_parse_tree_t *spec, ncc_string_t name)
 // Expression typing
 // ============================================================================
 
-char *
-ncc_type_of_expr(ncc_symtab_t *st, ncc_parse_tree_t *expr)
+// Ambient lexical scope for the in-progress expression typing: resolved once
+// from the (non-leaf) expression node handed to the public ncc_type_of_expr and
+// read by identifier/callee lookups in the recursive worker. Leaf nodes carry
+// no parent pointer, so the scope cannot be re-derived mid-recursion; threading
+// it as an ambient value keeps the worker's signature and call sites untouched.
+static ncc_scope_t *s_type_scope = nullptr;
+
+// The retained lexical scope enclosing expression node `expr`: walk up parent
+// pointers to the nearest scope-creating node the symbol table tagged.
+static ncc_scope_t *
+scope_for_expr(ncc_symtab_t *st, ncc_parse_tree_t *expr)
+{
+    ncc_parse_tree_t *cur = expr;
+    while (cur && !ncc_tree_is_leaf(cur)) {
+        ncc_scope_t *s = ncc_symtab_scope_for_node(st, cur);
+        if (s) {
+            return s;
+        }
+        cur = ncc_tree_node_value(cur).parent;
+    }
+    return nullptr;
+}
+
+static char *
+type_of_expr_inner(ncc_symtab_t *st, ncc_parse_tree_t *expr)
 {
     if (!st || !expr) {
         return nullptr;
     }
 
-    // Identifier leaf -> variable/param/function lookup.
+    // Identifier leaf -> variable/param/function lookup, resolved in the
+    // expression's lexical scope (locals + params + globals with shadowing).
     if (ncc_tree_is_leaf(expr)) {
         ncc_token_info_t *tok = ncc_tree_leaf_value(expr);
         if (tok && tok->tid == NCC_TOK_IDENTIFIER) {
             ncc_string_t     name = leaf_text(expr);
-            ncc_sym_entry_t *sym  = ncc_symtab_lookup(st, ncc_string_empty(),
-                                                      name);
+            ncc_sym_entry_t *sym  = ncc_symtab_lookup_scoped(
+                st, s_type_scope, ncc_string_empty(), name);
             if (sym) {
+                // `auto v = init;` — infer v's type from its initializer (typed
+                // in v's scope, the current ambient scope). Bounded to avoid a
+                // pathological auto cycle.
+                if (specs_are_auto(sym->type_node)) {
+                    static int auto_depth = 0;
+                    ncc_parse_tree_t *init =
+                        declarator_initializer(sym->decl_node);
+                    if (!init || auto_depth > 32) {
+                        return nullptr;
+                    }
+                    auto_depth++;
+                    char *r = type_of_expr_inner(st, init);
+                    auto_depth--;
+                    return r;
+                }
                 return type_of_symbol(sym);
             }
         }
@@ -587,7 +679,7 @@ ncc_type_of_expr(ncc_symtab_t *st, ncc_parse_tree_t *expr)
     if (is_group(expr)) {
         ncc_parse_tree_t *only = nullptr;
         meaningful_children(expr, &only);
-        return only ? ncc_type_of_expr(st, only) : nullptr;
+        return only ? type_of_expr_inner(st, only) : nullptr;
     }
 
     // cast: ( type_name ) cast_expression  ->  the cast type.
@@ -603,12 +695,12 @@ ncc_type_of_expr(ncc_symtab_t *st, ncc_parse_tree_t *expr)
     if (nt_is(expr, "primary_expression")) {
         ncc_parse_tree_t *inner = child_nt(expr, "expression");
         if (inner) {
-            return ncc_type_of_expr(st, inner);
+            return type_of_expr_inner(st, inner);
         }
         // identifier directly under primary_expression.
         ncc_parse_tree_t *id = child_nt(expr, "identifier");
         if (id) {
-            return ncc_type_of_expr(st, id);
+            return type_of_expr_inner(st, id);
         }
     }
 
@@ -617,7 +709,7 @@ ncc_type_of_expr(ncc_symtab_t *st, ncc_parse_tree_t *expr)
         ncc_parse_tree_t *only = nullptr;
         meaningful_children(expr, &only);
         if (only) {
-            return ncc_type_of_expr(st, only);
+            return type_of_expr_inner(st, only);
         }
     }
 
@@ -637,11 +729,11 @@ ncc_type_of_expr(ncc_symtab_t *st, ncc_parse_tree_t *expr)
             }
             opc = leaf_text(opnode);
             if (opc.data && strcmp(opc.data, "&") == 0) {
-                char *inner = ncc_type_of_expr(st, rhs);
+                char *inner = type_of_expr_inner(st, rhs);
                 return append_stars(inner, 1);
             }
             if (opc.data && strcmp(opc.data, "*") == 0) {
-                char *inner = ncc_type_of_expr(st, rhs);
+                char *inner = type_of_expr_inner(st, rhs);
                 return strip_one_star(inner);
             }
             return nullptr; // other unary operators not typed yet
@@ -701,7 +793,7 @@ ncc_type_of_expr(ncc_symtab_t *st, ncc_parse_tree_t *expr)
         }
 
         if ((arrow || dot) && base && mem) {
-            char *bt = ncc_type_of_expr(st, base);
+            char *bt = type_of_expr_inner(st, base);
             if (arrow) {
                 bt = strip_one_star(bt); // p->m : deref then member
             }
@@ -717,12 +809,12 @@ ncc_type_of_expr(ncc_symtab_t *st, ncc_parse_tree_t *expr)
         }
         if (sub && base) {
             // a[i] : element type of a pointer (array decay handled as pointer).
-            return strip_one_star(ncc_type_of_expr(st, base));
+            return strip_one_star(type_of_expr_inner(st, base));
         }
         if (call && base) {
             ncc_string_t     fn  = identifier_text(base);
-            ncc_sym_entry_t *sym = fn.data ? ncc_symtab_lookup(
-                                       st, ncc_string_empty(), fn)
+            ncc_sym_entry_t *sym = fn.data ? ncc_symtab_lookup_scoped(
+                                       st, s_type_scope, ncc_string_empty(), fn)
                                            : nullptr;
             if (sym && sym->kind == NCC_SYM_FUNCTION && sym->type_node) {
                 char *b = canonical_base(sym->type_node, fn);
@@ -737,9 +829,25 @@ ncc_type_of_expr(ncc_symtab_t *st, ncc_parse_tree_t *expr)
     {
         ncc_parse_tree_t *only = nullptr;
         if (meaningful_children(expr, &only) == 1 && only) {
-            return ncc_type_of_expr(st, only);
+            return type_of_expr_inner(st, only);
         }
     }
 
     return nullptr; // calls, subscripts, arithmetic: TODO
+}
+
+char *
+ncc_type_of_expr(ncc_symtab_t *st, ncc_parse_tree_t *expr)
+{
+    if (!st || !expr) {
+        return nullptr;
+    }
+    // Resolve the expression's lexical scope once (locals/params are only
+    // resolvable here, not from leaf nodes mid-recursion), then thread it via
+    // the ambient s_type_scope. Save/restore makes nested resolutions safe.
+    ncc_scope_t *saved = s_type_scope;
+    s_type_scope       = scope_for_expr(st, expr);
+    char *result       = type_of_expr_inner(st, expr);
+    s_type_scope       = saved;
+    return result;
 }

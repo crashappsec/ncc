@@ -681,6 +681,50 @@ ncc_string_t ncc_xform_extract_type_string(ncc_xform_ctx_t *ctx,
 // Typed argument resolution (typehash / typeid / typestr of expressions)
 // ============================================================================
 
+// Find the first descendant nonterminal named `name` (preorder), or nullptr.
+static ncc_parse_tree_t *find_descendant_nt(ncc_parse_tree_t *n,
+                                            const char *name) {
+  if (!n || ncc_tree_is_leaf(n)) {
+    return nullptr;
+  }
+  if (ncc_xform_nt_name_is(n, name)) {
+    return n;
+  }
+  size_t nc = ncc_tree_num_children(n);
+  for (size_t i = 0; i < nc; i++) {
+    ncc_parse_tree_t *r = find_descendant_nt(ncc_tree_child(n, i), name);
+    if (r) {
+      return r;
+    }
+  }
+  return nullptr;
+}
+
+// Count the pointer levels an abstract_declarator adds (each `*`). Sets
+// `*simple` false if the declarator is anything other than plain pointers
+// (array / function declarator), so the caller can bail rather than guess.
+static int abstract_declarator_pointer_count(ncc_parse_tree_t *ad,
+                                             bool *simple) {
+  int count = 0;
+  if (!ad) {
+    return 0;
+  }
+  if (ncc_tree_is_leaf(ad)) {
+    const char *t = ncc_xform_leaf_text(ad);
+    if (t && strcmp(t, "*") == 0) {
+      count++;
+    } else if (t && (strcmp(t, "[") == 0 || strcmp(t, "(") == 0)) {
+      *simple = false; // array / function declarator: not a plain pointer
+    }
+    return count;
+  }
+  size_t nc = ncc_tree_num_children(ad);
+  for (size_t i = 0; i < nc; i++) {
+    count += abstract_declarator_pointer_count(ncc_tree_child(ad, i), simple);
+  }
+  return count;
+}
+
 char *
 ncc_xform_expr_arg_type(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *atom,
                         ncc_parse_tree_t *cont) {
@@ -707,5 +751,49 @@ ncc_xform_expr_arg_type(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *atom,
     return ncc_type_of_expr(st, expr);
   }
 
-  return nullptr;
+  // An explicit `typeof(<expr>)` written as the type argument, possibly with a
+  // trailing pointer abstract_declarator: `typehash(typeof(*p))`,
+  // `typehash(typeof(*p) *)`. The argument parses as a <type_name> whose type
+  // specifier is a <typeof_specifier>; resolve that expression via the type
+  // model and re-apply the abstract_declarator's pointers, so the result hashes
+  // identically to the spelled-out element type. (typeof(<type>) — no inner
+  // expression — is left to literal normalization.)
+  ncc_parse_tree_t *tn = ncc_xform_find_child_nt(tsa, "type_name");
+  if (!tn) {
+    return nullptr;
+  }
+  ncc_parse_tree_t *tspec = find_descendant_nt(tn, "typeof_specifier");
+  if (!tspec) {
+    return nullptr;
+  }
+  ncc_parse_tree_t *inner_tsa =
+      ncc_xform_find_child_nt(tspec, "typeof_specifier_argument");
+  ncc_parse_tree_t *inner_expr =
+      inner_tsa ? ncc_xform_find_child_nt(inner_tsa, "expression") : nullptr;
+  if (!inner_expr) {
+    return nullptr; // typeof(<type>) — not an expression
+  }
+  char *base = ncc_type_of_expr(st, inner_expr);
+  if (!base) {
+    return nullptr;
+  }
+
+  ncc_parse_tree_t *ad = ncc_xform_find_child_nt(tn, "abstract_declarator");
+  bool              simple = true;
+  int               ptrs   = abstract_declarator_pointer_count(ad, &simple);
+  if (!simple) {
+    ncc_free(base); // unusual declarator (array/function): leave to fallback
+    return nullptr;
+  }
+  if (ptrs == 0) {
+    return base;
+  }
+
+  ncc_buffer_t *buf = ncc_buffer_empty();
+  ncc_buffer_puts(buf, base);
+  for (int i = 0; i < ptrs; i++) {
+    ncc_buffer_putc(buf, '*');
+  }
+  ncc_free(base);
+  return ncc_buffer_take(buf);
 }

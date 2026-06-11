@@ -881,13 +881,21 @@ walk_struct_member(ncc_xform_ctx_t *ctx, const char *elem_type,
             }
         }
         else {
-            // No '*' in the declarator, but the SPECS may still make this a
-            // pointer: a pointer typedef, or an _Atomic(T *) wrapper. Detect
-            // that before treating it as a nested by-value aggregate —
-            // otherwise we would emit an offsetof THROUGH a pointer.
-            int ptr_specs = ncc_layout_pointer_depth_for_specs(ctx,
-                                                               member_specs);
-            if (ptr_specs > 0) {
+            // No '*' in the declarator. An INLINE struct/union/_generic_struct
+            // is a by-value aggregate member — recurse into it. This must come
+            // before the pointer-typedef test below: pointer_depth_for_specs
+            // sees pointer MEMBERS in the inline body (e.g. an inline
+            // n00b_list_t's `T *data`) and would wrongly classify the whole
+            // by-value member as a pointer.
+            ncc_parse_tree_t *nspec = ncc_layout_aggregate_spec_from_specs(
+                ctx, member_specs);
+            if (nspec) {
+                gc_walk(ctx, elem_type, nspec, path, offs, asserts, count,
+                        vacc, ok, depth + 1);
+            }
+            else if (ncc_layout_pointer_depth_for_specs(ctx, member_specs) > 0) {
+                // No inline aggregate, but the SPECS still make this a pointer:
+                // a pointer typedef or an _Atomic(T *) wrapper.
                 char *tdname = ncc_layout_first_typedef_name_text(member_specs);
                 bool  is_fnptr = tdname
                               && ncc_layout_typedef_name_is_function_pointer(
@@ -900,15 +908,7 @@ walk_struct_member(ncc_xform_ctx_t *ctx, const char *elem_type,
                 }
                 // function pointer -> excluded (code, not a heap pointer)
             }
-            else {
-                ncc_parse_tree_t *nspec = ncc_layout_aggregate_spec_from_specs(
-                    ctx, member_specs);
-                if (nspec) {
-                    gc_walk(ctx, elem_type, nspec, path, offs, asserts, count,
-                            vacc, ok, depth + 1);
-                }
-                // else: scalar by-value member -> no pointer words.
-            }
+            // else: scalar by-value member -> no pointer words.
         }
 
         ncc_free(path);

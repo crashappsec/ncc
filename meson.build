@@ -195,6 +195,7 @@ src_xform = files(
   'src/xform/xform_try.c',
   'src/xform/xform_nullable.c',
   'src/xform/nullability.c',
+  'src/xform/nodiscard.c',
   'src/xform/xform_generic_struct.c',
   'src/xform/xform_gc_globals.c',
   'src/xform/xform_gc_stack_maps.c',
@@ -400,6 +401,8 @@ ncc_static_descriptor_flags = [
 ncc_compile_tests = {
   'bang':          ['compile_run',  test_dir / 'test_bang.c'],
   'typehash_expr': ['compile_run',  test_dir / 'test_typehash_expr.c'],
+  'typehash_scoped': ['compile_run',  test_dir / 'test_typehash_scoped.c'],
+  'typehash_autotag': ['compile_run',  test_dir / 'test_typehash_autotag.c'],
   'array_literal': ['compile_run',  test_dir / 'test_array_literal.c'],
   'list_literal':  ['compile_run',  test_dir / 'test_list_literal.c'],
   'dict_literal':  ['compile_run',  test_dir / 'test_dict_literal.c'],
@@ -1432,6 +1435,25 @@ test('ncc_nullable_guards', test_runner,
   args : [ncc_exe, 'preprocess_stderr_omits',
           test_dir / 'test_nullable_guards.c',
           'null dereference']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_nodiscard_warn', test_runner,
+  args : [ncc_exe, 'preprocess_stderr_contains',
+          test_dir / 'test_nodiscard_warn.c',
+          'result of \'mk()\' is ignored',
+          '_generic_struct']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_nodiscard_ok', test_runner,
+  args : [ncc_exe, 'preprocess_stderr_omits',
+          test_dir / 'test_nodiscard_ok.c',
+          'is ignored']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
   suite : 'ncc',
   depends : ncc_exe,

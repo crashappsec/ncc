@@ -476,7 +476,7 @@
 # reading when the symbol table says the identifier names a typedef, so the type
 # reading wins. Real function specifiers (inline/_Noreturn/_Once) are never
 # typedefs, so they are unaffected.
-<function_specifier> @disambig(id_is_typedef) ::= <_kw_kw_fn_specifier>
+<function_specifier> @disambig(id_is_known) ::= <_kw_kw_fn_specifier>
     | %"_Once"
 
 <_kw_kw_gcc_asm> ::= %"__asm__"
