@@ -73,6 +73,7 @@ extern void ncc_register_constexpr_paste_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_kargs_vargs_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_contracts_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_defer_xform(ncc_xform_registry_t *reg);
+extern void ncc_register_try_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_option_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_array_literal_xform(ncc_xform_registry_t *reg);
 #include "scanner/scan_builtins.h"
@@ -2013,6 +2014,10 @@ compile_file(ncc_opts_t *opts)
     // kargs_vargs produce; running after any of those would see the
     // already-mangled signatures.
     ncc_register_rpc_xform(&xreg);
+    // _try lowers result-error propagation into a statement expression with an
+    // early return. Runs before generic_struct/typeid/defer/gc so the emitted
+    // result type, return, and any type-queries in the operand flow through.
+    ncc_register_try_xform(&xreg);
     ncc_register_generic_struct_xform(&xreg);
     // _defer lowers a function body's defers into source at each scope exit.
     // Runs early so the relocated bodies still flow through the type-query,

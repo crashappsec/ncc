@@ -192,6 +192,7 @@ src_xform = files(
   'src/xform/xform_constexpr_paste.c',
   'src/xform/xform_contracts.c',
   'src/xform/xform_defer.c',
+  'src/xform/xform_try.c',
   'src/xform/xform_generic_struct.c',
   'src/xform/xform_gc_globals.c',
   'src/xform/xform_gc_stack_maps.c',
@@ -411,6 +412,7 @@ ncc_compile_tests = {
   'kargs_many_metadata': ['compile_run',
                           test_dir / 'test_kargs_many_metadata.c'],
   'defer': ['compile_run', test_dir / 'test_defer.c'],
+  'try': ['compile_run', test_dir / 'test_try.c'],
   'function_contracts': ['compile_run',
                          test_dir / 'test_function_contracts.c'],
   'function_contracts_parse': ['preprocess',
@@ -1938,6 +1940,10 @@ ncc_error_contains_tests = {
   'err_defer_escape': [
     test_dir / 'err_defer_escape.c',
     'control transfer (return/break/continue/goto) inside a _defer body',
+  ],
+  'err_try_outside_function': [
+    test_dir / 'err_try_outside_function.c',
+    '_try is only valid inside a function',
   ],
   'err_function_contract_return': [
     test_dir / 'err_function_contract_return.c',

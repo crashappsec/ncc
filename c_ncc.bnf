@@ -813,7 +813,14 @@
     | %"_Countof" %"(" <type_name> %")"
     | %"_Countof" <unary_expression>
     | %"&&" <identifier>
+    | <try_expression>
     | <postfix_expression>
+
+# ncc `_try <unary-expression>`: error-propagation for n00b_result_t. Spelled
+# `_try` (not `try`) because n00b uses `try` as an ordinary identifier. Lowered
+# by xform_try: on a non-ok result, the enclosing function returns the error;
+# otherwise the expression yields the unwrapped `.ok` value.
+<try_expression> ::= %"_try" <unary_expression>
 
 <_kw_kw_alignof> ::= %"alignof"
     | %"_Alignof"
