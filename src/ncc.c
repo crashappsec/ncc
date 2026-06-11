@@ -38,6 +38,7 @@
 #include "parse/typedef_walk.h"
 #include "parse/symbol_populate.h"
 #include "parse/type_infer.h"
+#include "parse/nullability.h"
 #include "parse/c_tokenizer.h"
 #include "parse/emit.h"
 #include "xform/xform_gc_typemap.h"
@@ -2275,6 +2276,11 @@ compile_file(ncc_opts_t *opts)
     // Build the scoped symbol table for the type model. Runs after the typedef
     // reclassification walk so declarator names are settled.
     xdata.symtab = ncc_populate_symbols(g, tree);
+
+    // Flow-sensitive null-state analysis: must run before transforms strip the
+    // `?` nullable markers from the tree.
+    ncc_nullability_check(g, tree, xdata.symtab);
+
     xctx.user_data = &xdata;
     ncc_verbose("applying transforms");
     tree = ncc_xform_apply(&xreg, &xctx);

@@ -194,6 +194,7 @@ src_xform = files(
   'src/xform/xform_defer.c',
   'src/xform/xform_try.c',
   'src/xform/xform_nullable.c',
+  'src/xform/nullability.c',
   'src/xform/xform_generic_struct.c',
   'src/xform/xform_gc_globals.c',
   'src/xform/xform_gc_stack_maps.c',
@@ -1328,6 +1329,16 @@ test('ncc_auto_gc_roots_nomap_attribute_stripped', test_runner,
 # Uses the new `preprocess_stderr_contains` runner mode (added in
 # this dispatch) because none of the existing modes covers
 # "exit 0 + stderr substring + stdout omits substring".
+test('ncc_nullable_warn', test_runner,
+  args : [ncc_exe, 'preprocess_stderr_contains',
+          test_dir / 'test_nullable_warn.c',
+          'possible null dereference of nullable \'p\'',
+          '?']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 test('ncc_auto_gc_roots_incomplete_struct_warn', test_runner,
   args : [ncc_exe, 'preprocess_stderr_contains',
           test_dir / 'err_auto_gc_roots_incomplete_struct.c',
