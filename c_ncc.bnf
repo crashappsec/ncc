@@ -726,6 +726,7 @@
     | %"__restrict"
     | %"__volatile__"
     | %"__volatile"
+    | %"?"
     | %"_Nullable"
     | %"_Nonnull"
     | %"_Null_unspecified"
