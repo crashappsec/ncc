@@ -418,6 +418,8 @@ ncc_compile_tests = {
   'nullable_syntax': ['compile_run', test_dir / 'test_nullable_syntax.c'],
   'function_contracts': ['compile_run',
                          test_dir / 'test_function_contracts.c'],
+  'static_typedef_return': ['compile_run',
+                            test_dir / 'test_static_typedef_return.c'],
   'function_contracts_parse': ['preprocess',
                                test_dir / 'test_function_contracts_parse.c'],
   'function_contract_keyword_collision': ['compile_run',

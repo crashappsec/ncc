@@ -469,7 +469,14 @@
     | %"__inline"
     | %"__forceinline"
 
-<function_specifier> ::= <_kw_kw_fn_specifier>
+# A bare identifier can match function_specifier's soft-keyword alternative, so
+# a typedef-name in declaration_specifiers (e.g. the return type of
+# `static res_t f(void)`) parses ambiguously as a function_specifier instead of
+# a type_specifier. @disambig(id_is_typedef) penalizes the function-specifier
+# reading when the symbol table says the identifier names a typedef, so the type
+# reading wins. Real function specifiers (inline/_Noreturn/_Once) are never
+# typedefs, so they are unaffected.
+<function_specifier> @disambig(id_is_typedef) ::= <_kw_kw_fn_specifier>
     | %"_Once"
 
 <_kw_kw_gcc_asm> ::= %"__asm__"
