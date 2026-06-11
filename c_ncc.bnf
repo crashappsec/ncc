@@ -27,8 +27,16 @@
 <typedef_name_terminal> ::= %TYPEDEF_NAME
 
 # Ambiguity-aware typedef: the parser considers both interpretations
-# (typedef name vs plain identifier).  Tree scoring resolves the ambiguity.
-<typedef_name> ::= <typedef_name_terminal> | %IDENTIFIER
+# (typedef name vs plain identifier).  Tree scoring resolves the ambiguity:
+# @disambig(id_is_value) penalizes reading an identifier as a TYPE when the
+# symbol table says it names a value (variable/parameter/function), so a value
+# expression that mis-parsed as a type_name (e.g. `lp[2]`) loses to its
+# expression reading at forest->tree extraction. The penalty is deliberately
+# one-directional: it fires only on value names, never on a typedef name being
+# *declared* (a binding occurrence routes through the declarator/identifier, not
+# typedef_name), so it cannot disturb typedef declarations. Typedef *uses*
+# already resolve correctly under the default last-alternative policy.
+<typedef_name> @disambig(id_is_value) ::= <typedef_name_terminal> | %IDENTIFIER
 
 <non_bracket_token> ::= %IDENTIFIER
     | %INTEGER

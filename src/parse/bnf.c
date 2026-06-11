@@ -780,10 +780,13 @@ bnf_walk_expression(ncc_nt_node_t *pn, void *children, void *thunk)
 // Annotation walk data (annotations parsed and discarded)
 // ============================================================================
 
-// Penalty info extracted from @penalty annotations (the only
-// annotation that has a runtime effect on the grammar).
+// Info extracted from @annotations that have a runtime effect on the grammar:
+// @penalty(N) (error-recovery cost) and @disambig(predicate[, cost]) (TS-5
+// forest->tree disambiguation: a symtab-conditional extraction penalty).
 typedef struct {
-    int32_t penalty_cost;
+    int32_t      penalty_cost;
+    ncc_string_t disambig_predicate;  // .data == nullptr when absent
+    int32_t      disambig_cost;
 } bnf_annot_info_t;
 
 static void *
@@ -854,7 +857,9 @@ bnf_walk_annotation(ncc_nt_node_t *pn, void *children, void *thunk)
     }
 
     bnf_annot_info_t *info = ncc_alloc(bnf_annot_info_t);
-    info->penalty_cost = 0;
+    info->penalty_cost       = 0;
+    info->disambig_predicate = (ncc_string_t){0};
+    info->disambig_cost      = 0;
 
     ncc_string_t annot_str = tok_str(name_tok);
 
@@ -867,6 +872,26 @@ bnf_walk_annotation(ncc_nt_node_t *pn, void *children, void *thunk)
         }
         if (info->penalty_cost <= 0)
             info->penalty_cost = 1;
+    }
+    else if (str_eq_lit(annot_str, "disambig")) {
+        // @disambig(<predicate>[, <cost>]) — names a predicate evaluated against
+        // the symbol table at forest->tree extraction; when it holds, <cost>
+        // (default 1) is added to the alternative's score so the lowest-scoring
+        // (most type-consistent) parse is chosen.
+        if (args && args->len >= 1) {
+            ncc_token_info_t *pred_tok = (ncc_token_info_t *)slist_get(args, 0);
+            ncc_string_t      pred_val = tok_str(pred_tok);
+            if (pred_val.data)
+                info->disambig_predicate = ncc_string_from_cstr(pred_val.data);
+        }
+        if (args && args->len >= 2) {
+            ncc_token_info_t *cost_tok = (ncc_token_info_t *)slist_get(args, 1);
+            ncc_string_t      cost_val = tok_str(cost_tok);
+            if (cost_val.data)
+                info->disambig_cost = (int32_t)strtol(cost_val.data, nullptr, 10);
+        }
+        if (info->disambig_cost <= 0)
+            info->disambig_cost = 1;
     }
 
     if (args_r) {
@@ -1523,7 +1548,9 @@ populate_grammar(ncc_grammar_t *user_g, bnf_result_t *result,
             continue;
         }
 
-        int32_t penalty_cost = 0;
+        int32_t       penalty_cost       = 0;
+        ncc_string_t  disambig_predicate = {0};
+        int32_t       disambig_cost      = 0;
         bnf_result_t *annots_r = (pair->len >= 3) ? slist_get(pair, 2) : nullptr;
 
         if (annots_r && annots_r->tag == BNF_LIST) {
@@ -1537,6 +1564,10 @@ populate_grammar(ncc_grammar_t *user_g, bnf_result_t *result,
 
                     if (info->penalty_cost > 0) {
                         penalty_cost = info->penalty_cost;
+                    }
+                    if (info->disambig_predicate.data) {
+                        disambig_predicate = info->disambig_predicate;
+                        disambig_cost      = info->disambig_cost;
                     }
                 }
             }
@@ -1580,6 +1611,16 @@ populate_grammar(ncc_grammar_t *user_g, bnf_result_t *result,
                     ncc_match_t empty = {.kind = NCC_MATCH_EMPTY};
                     rule_p = ncc_add_rule_v(user_g, nt_id, 1, &empty);
                 }
+            }
+
+            // Attach the TS-5 disambiguation penalty to the (normal) rule. Set
+            // immediately after creation, before the next add_rule may realloc
+            // g->rules. Copy the predicate string — the bnf annotation info is
+            // freed during result cleanup.
+            if (rule_p && disambig_predicate.data) {
+                rule_p->disambig_predicate =
+                    ncc_string_from_cstr(disambig_predicate.data);
+                rule_p->disambig_cost = disambig_cost;
             }
 
             ncc_free(items);

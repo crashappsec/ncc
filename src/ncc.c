@@ -37,6 +37,7 @@
 #include "parse/pwz.h"
 #include "parse/typedef_walk.h"
 #include "parse/symbol_populate.h"
+#include "parse/type_infer.h"
 #include "parse/c_tokenizer.h"
 #include "parse/emit.h"
 #include "xform/xform_gc_typemap.h"
@@ -1959,22 +1960,42 @@ compile_file(ncc_opts_t *opts)
     ncc_pwz_report_stats();
 #endif
 
-    // Release PWZ per-parse intermediate state (arena, worklists) now that
-    // the tree has been extracted.  This drops peak live memory before the
-    // transform and emit stages run.
-    ncc_pwz_release_parse_state(parser);
-
-#ifdef NCC_MEM_DEBUG
-    ncc_mem_report("after arena release");
-#endif
-
-    // Stage 5: Reclassify walk (typedef tracking).
+    // Stage 5: Reclassify walk (typedef tracking).  Runs on the provisional
+    // tree (extracted under the default last-alternative policy). typedef
+    // DECLARATIONS are unambiguous, so this classifies every typedef name
+    // correctly regardless of how their USE sites were provisionally parsed.
     int32_t reclassified = ncc_typedef_walk(
         g, tree, ts->tokens, ts->token_count);
 
     if (reclassified > 0) {
         ncc_verbose("reclassified %d tokens", reclassified);
     }
+
+    // Stage 5b (TS-5): type-aware re-extraction. Build a provisional symbol
+    // table from the provisional tree, install it as the forest->tree
+    // disambiguation oracle, and re-extract the retained forest so the C
+    // typedef/identifier ambiguity (e.g. `lp[2]` as a value subscript vs an
+    // array-of-`lp` type) is resolved at the parse layer rather than patched up
+    // by downstream xforms. The provisional symtab's typedef classification is
+    // reliable because it derives from unambiguous declarations.
+    {
+        ncc_symtab_t *prov_symtab = ncc_populate_symbols(g, tree);
+
+        ncc_pwz_set_disambiguator(parser, ncc_disambig_eval, prov_symtab);
+        tree = ncc_pwz_reextract(parser);
+        ncc_pwz_set_disambiguator(parser, nullptr, nullptr);
+
+        ncc_symtab_free(prov_symtab);
+    }
+
+    // Release PWZ per-parse intermediate state (arena, worklists) now that the
+    // final tree has been (re-)extracted.  Drops peak live memory before the
+    // transform and emit stages run.
+    ncc_pwz_release_parse_state(parser);
+
+#ifdef NCC_MEM_DEBUG
+    ncc_mem_report("after arena release");
+#endif
 
     // Stage 5.5: Dump pre-transform tree.
     if (opts->dump_tree) {

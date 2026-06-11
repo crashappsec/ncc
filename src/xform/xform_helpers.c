@@ -577,27 +577,15 @@ ncc_xform_expr_arg_type(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *atom,
     return nullptr;
   }
 
-  // A direct expression argument.
+  // A direct expression argument. Since TS-5 (type-aware parse
+  // disambiguation), a value expression that the permissive typedef-name
+  // grammar could have mis-parsed as a `type_name` (e.g. `lp[2]`) is resolved
+  // to its expression reading at forest->tree extraction, so it arrives here as
+  // a genuine `<expression>` — no type_name reinterpretation is needed.
   ncc_parse_tree_t *expr = ncc_xform_find_child_nt(tsa, "expression");
   if (expr) {
     return ncc_type_of_expr(st, expr);
   }
 
-  // A type_name argument that is really a value expression (e.g. `lp[2]`): the
-  // grammar's permissive typedef-name rule let an expression parse as a type.
-  // Re-parse its text as an expression and type that.
-  ncc_parse_tree_t *tn = ncc_xform_find_child_nt(tsa, "type_name");
-  if (tn && ncc_type_name_is_value_expr(st, tn)) {
-    ncc_string_t      text = ncc_xform_node_to_text(tn);
-    ncc_parse_tree_t *re =
-        text.data ? ncc_xform_parse_source(ctx->grammar, "expression",
-                                           text.data, "expr_arg_reinterpret")
-                  : nullptr;
-    char *result = re ? ncc_type_of_expr(st, re) : nullptr;
-    if (text.data) {
-      ncc_free(text.data);
-    }
-    return result;
-  }
   return nullptr;
 }

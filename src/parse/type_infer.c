@@ -457,33 +457,47 @@ ncc_symtab_aggregate_spec(ncc_symtab_t *st, const char *type_name)
     return result;
 }
 
-// True if a parsed `type_name` is really a mis-parsed expression: its base is a
-// plain identifier that names a VALUE (variable / parameter / function) rather
-// than a type. The grammar lets any identifier stand in as a typedef-name, so
-// expressions like `lp[2]` or `gp` can parse as type_names; the symbol table
-// disambiguates. struct/union/enum specifiers and builtin keywords are real
-// types; an unknown identifier is treated conservatively as a type.
+// `@disambig` predicate evaluator (TS-5). Matches ncc_pwz_disambig_fn: `ud` is
+// the symbol table. Classifies `tok`'s identifier against the symbol table so
+// the forest->tree extractor can resolve the C typedef/value ambiguity:
+//   - "id_is_value":   the identifier names a variable/parameter/function, so a
+//                      parse treating it as a TYPE (typedef_name) is penalized.
+//   - "id_is_typedef": the identifier names a typedef, so a parse treating it as
+//                      a VALUE (provided_identifier) is penalized.
+// An unknown identifier (not in the symtab) matches neither — both readings
+// score equally and the default last-alternative policy applies, preserving the
+// pre-TS-5 behavior for forward-referenced or out-of-scope names.
 bool
-ncc_type_name_is_value_expr(ncc_symtab_t *st, ncc_parse_tree_t *type_name)
+ncc_disambig_eval(void *ud, const char *predicate, ncc_token_info_t *tok)
 {
-    if (!st || !type_name) {
+    ncc_symtab_t *st = (ncc_symtab_t *)ud;
+
+    if (!st || !predicate || !tok || !ncc_option_is_set(tok->value)) {
         return false;
     }
-    if (find_descendant_nt(type_name, "struct_or_union_specifier")
-        || find_descendant_nt(type_name, "enum_specifier")) {
+
+    ncc_string_t name = ncc_option_get(tok->value);
+
+    if (!name.data || name.u8_bytes == 0) {
         return false;
     }
-    ncc_parse_tree_t *tdn = find_descendant_nt(type_name, "typedef_name");
-    if (!tdn) {
-        return false; // a builtin/keyword type, not an identifier
+
+    ncc_sym_entry_t *sym = ncc_symtab_lookup(st, ncc_string_empty(), name);
+
+    if (!sym) {
+        return false;
     }
-    ncc_string_t     id  = identifier_text(tdn);
-    ncc_sym_entry_t *sym = id.data ? ncc_symtab_lookup(st, ncc_string_empty(),
-                                                       id)
-                                   : nullptr;
-    return sym
-        && (sym->kind == NCC_SYM_VARIABLE || sym->kind == NCC_SYM_PARAM
-            || sym->kind == NCC_SYM_FUNCTION);
+
+    if (strcmp(predicate, "id_is_value") == 0) {
+        return sym->kind == NCC_SYM_VARIABLE || sym->kind == NCC_SYM_PARAM
+            || sym->kind == NCC_SYM_FUNCTION;
+    }
+
+    if (strcmp(predicate, "id_is_typedef") == 0) {
+        return sym->kind == NCC_SYM_TYPEDEF;
+    }
+
+    return false;
 }
 
 // Type spelling of a single member_declaration whose field name is `fname`.

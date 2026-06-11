@@ -17,6 +17,7 @@
 #include "scanner/token_stream.h"
 
 #include <assert.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -1015,6 +1016,98 @@ typedef struct {
     ncc_pwz_parser_t *parser;
 } tree_convert_state_t;
 
+// ----------------------------------------------------------------------------
+// TS-5 type-aware disambiguation scoring
+// ----------------------------------------------------------------------------
+
+// Resolve a result PWZ_SEQ exp to its grammar rule. exp->rule_ix is the LOCAL
+// rule index (position in the nonterminal's rule_ids); convert to the global
+// index, mirroring ncc_get_node_rule for parse-tree nodes.
+static ncc_parse_rule_t *
+exp_to_rule(ncc_pwz_parser_t *p, pwz_exp_t *exp)
+{
+    if (!exp || exp->kind != PWZ_SEQ || exp->nt_id < 0 || exp->rule_ix < 0) {
+        return nullptr;
+    }
+
+    ncc_nonterm_t *nt = ncc_get_nonterm(p->grammar, exp->nt_id);
+
+    if (!nt || (size_t)exp->rule_ix >= ncc_list_len(nt->rule_ids)) {
+        return nullptr;
+    }
+
+    return ncc_get_rule(p->grammar, nt->rule_ids.data[exp->rule_ix]);
+}
+
+// Disambiguation cost of a result-exp subtree: the sum of `@disambig` rule
+// penalties whose predicate holds (per the installed oracle), with nested
+// ambiguities resolved to their own minimum — exactly as convert_exp_to_tree
+// will resolve them. `*pos` advances over the consumed tokens (all alternatives
+// of an ambiguity span the same tokens, so the span length is well-defined).
+static int32_t
+score_exp(ncc_pwz_parser_t *p, pwz_exp_t *exp, int32_t *pos)
+{
+    if (!exp || exp == p->exp_bottom) {
+        return 0;
+    }
+
+    switch (exp->kind) {
+    case PWZ_TOK:
+    case PWZ_CLASS:
+    case PWZ_ANY:
+        (*pos)++;
+        return 0;
+
+    case PWZ_SEQ: {
+        int32_t           cost  = 0;
+        ncc_parse_rule_t *rule  = exp_to_rule(p, exp);
+
+        if (rule && rule->disambig_predicate.data && p->disambig_cb) {
+            // The annotated rule's decisive token is its leading token (the
+            // routed identifier for the typedef/value rules).
+            ncc_token_info_t *tok = get_token(p, *pos);
+
+            if (p->disambig_cb(p->disambig_ud, rule->disambig_predicate.data,
+                               tok)) {
+                cost += rule->disambig_cost;
+            }
+        }
+
+        for (int32_t i = 0; i < exp->nchildren; i++) {
+            cost += score_exp(p, exp->seq.children[i], pos);
+        }
+
+        return cost;
+    }
+
+    case PWZ_ALT: {
+        size_t nalts = ncc_list_len(exp->alt.alts);
+
+        if (nalts == 0) {
+            return 0;
+        }
+
+        int32_t best     = INT32_MAX;
+        int32_t best_end = *pos;
+
+        for (size_t i = 0; i < nalts; i++) {
+            int32_t p2 = *pos;
+            int32_t c  = score_exp(p, exp->alt.alts.data[i], &p2);
+
+            if (c <= best) {  // ties resolve to the last alternative
+                best     = c;
+                best_end = p2;
+            }
+        }
+
+        *pos = best_end;
+        return best;
+    }
+    }
+
+    return 0;
+}
+
 static ncc_parse_tree_t *
 convert_exp_to_tree(ncc_pwz_parser_t *p, pwz_exp_t *exp,
                     tree_convert_state_t *st)
@@ -1116,11 +1209,31 @@ convert_exp_to_tree(ncc_pwz_parser_t *p, pwz_exp_t *exp,
     case PWZ_ALT: {
         size_t nalts = ncc_list_len(exp->alt.alts);
 
-        if (nalts > 0) {
-            return convert_exp_to_tree(p, exp->alt.alts.data[nalts - 1], st);
+        if (nalts == 0) {
+            return make_epsilon_node(st->pos);
         }
 
-        return make_epsilon_node(st->pos);
+        // Default policy: last alternative (grammar order). With a TS-5
+        // disambiguation oracle installed, score each alternative and pick the
+        // lowest-scoring (most type-consistent) one; ties keep the last-alt
+        // default.
+        size_t pick = nalts - 1;
+
+        if (p->disambig_cb && nalts > 1) {
+            int32_t best = INT32_MAX;
+
+            for (size_t i = 0; i < nalts; i++) {
+                int32_t pos = st->pos;
+                int32_t c   = score_exp(p, exp->alt.alts.data[i], &pos);
+
+                if (c <= best) {  // ties resolve to the last alternative
+                    best = c;
+                    pick = i;
+                }
+            }
+        }
+
+        return convert_exp_to_tree(p, exp->alt.alts.data[pick], st);
     }
     }
 
@@ -1239,6 +1352,8 @@ ncc_pwz_new(ncc_grammar_t *g)
     p->worklist      = ncc_list_new(pwz_zipper_t);
     p->worklist_swap = ncc_list_new(pwz_zipper_t);
     p->tops          = ncc_list_new(pwz_exp_ptr_t);
+    p->disambig_cb   = nullptr;
+    p->disambig_ud   = nullptr;
 
     // Sentinel nodes.
     p->exp_bottom       = ncc_alloc(pwz_exp_t);
@@ -1348,6 +1463,33 @@ ncc_pwz_parse(ncc_pwz_parser_t   *p,
 ncc_parse_tree_t *
 ncc_pwz_get_tree(ncc_pwz_parser_t *p)
 {
+    return p->result_tree;
+}
+
+void
+ncc_pwz_set_disambiguator(ncc_pwz_parser_t    *p,
+                          ncc_pwz_disambig_fn  cb,
+                          void                *ud)
+{
+    if (!p) {
+        return;
+    }
+
+    p->disambig_cb = cb;
+    p->disambig_ud = ud;
+}
+
+ncc_parse_tree_t *
+ncc_pwz_reextract(ncc_pwz_parser_t *p)
+{
+    if (!p || ncc_list_len(p->tops) == 0) {
+        return p ? p->result_tree : nullptr;
+    }
+
+    // The forest top is retained until ncc_pwz_release_parse_state; rebuild a
+    // single tree from it under the currently-installed disambiguation oracle.
+    p->result_tree = build_result_tree(p, p->tops.data[0]);
+
     return p->result_tree;
 }
 
