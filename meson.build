@@ -1339,6 +1339,16 @@ test('ncc_nullable_warn', test_runner,
   depends : ncc_exe,
 )
 
+test('ncc_nullable_interproc', test_runner,
+  args : [ncc_exe, 'preprocess_stderr_contains',
+          test_dir / 'test_nullable_interproc.c',
+          'to non-nullable parameter 1 of \'need\'',
+          '?']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 test('ncc_auto_gc_roots_incomplete_struct_warn', test_runner,
   args : [ncc_exe, 'preprocess_stderr_contains',
           test_dir / 'err_auto_gc_roots_incomplete_struct.c',

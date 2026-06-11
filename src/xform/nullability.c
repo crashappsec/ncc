@@ -205,13 +205,147 @@ collect_nullable_vars(ncc_parse_tree_t *node, nvars_t *out)
 }
 
 // ---------------------------------------------------------------------------
+// Interprocedural signature table: which functions return `?`, and which of
+// their parameters are `?`.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    char  *name;
+    bool   ret_nullable;
+    bool  *param_nullable;
+    size_t nparams;
+} nsig_t;
+
+typedef struct {
+    nsig_t *sigs;
+    size_t  count;
+} nsigtab_t;
+
+static ncc_parse_tree_t *
+find_desc(ncc_parse_tree_t *n, const char *name)
+{
+    if (!n || ncc_tree_is_leaf(n)) {
+        return nullptr;
+    }
+    if (ncc_xform_nt_name_is(n, name)) {
+        return n;
+    }
+    size_t nc = ncc_tree_num_children(n);
+    for (size_t i = 0; i < nc; i++) {
+        ncc_parse_tree_t *r = find_desc(ncc_tree_child(n, i), name);
+        if (r) {
+            return r;
+        }
+    }
+    return nullptr;
+}
+
+// Collect the TOP-LEVEL parameter_declarations of a parameter list in order
+// (without descending into nested function-pointer parameter lists), recording
+// each one's nullability.
+static void
+collect_params(ncc_parse_tree_t *n, bool **out, size_t *count, size_t *cap)
+{
+    if (!n || ncc_tree_is_leaf(n)) {
+        return;
+    }
+    if (ncc_xform_nt_name_is(n, "parameter_declaration")) {
+        // `(void)` parses as a single `void` parameter_declaration but means
+        // "no parameters" — skip it.
+        ncc_string_t t      = ncc_xform_node_to_text(n);
+        bool         isvoid = t.data && strcmp(t.data, "void") == 0;
+        if (t.data) {
+            ncc_free(t.data);
+        }
+        if (!isvoid) {
+            if (*count >= *cap) {
+                *cap = *cap ? *cap * 2 : 4;
+                *out = ncc_realloc(*out, *cap * sizeof(bool));
+            }
+            (*out)[(*count)++] = subtree_has_q(n);
+        }
+        return; // do not descend into the parameter's own (nested) params
+    }
+    size_t nc = ncc_tree_num_children(n);
+    for (size_t i = 0; i < nc; i++) {
+        collect_params(ncc_tree_child(n, i), out, count, cap);
+    }
+}
+
+static const nsig_t *
+sig_lookup(nsigtab_t *tab, const char *name)
+{
+    if (!tab || !name) {
+        return nullptr;
+    }
+    for (size_t i = 0; i < tab->count; i++) {
+        if (strcmp(tab->sigs[i].name, name) == 0) {
+            return &tab->sigs[i];
+        }
+    }
+    return nullptr;
+}
+
+// Record the signature of a function declaration / definition.
+static void
+add_signature(nsigtab_t *tab, ncc_parse_tree_t *node)
+{
+    // The declarator is a direct child of a function_definition but is nested
+    // under init_declarator_list in a prototype declaration; find_desc covers
+    // both (it returns the outermost declarator first).
+    ncc_parse_tree_t *declr = find_desc(node, "declarator");
+    if (!declr) {
+        return;
+    }
+    ncc_parse_tree_t *ptl = find_desc(declr, "parameter_type_list");
+    if (!ptl) {
+        return; // not a function declarator
+    }
+    char *name = ncc_layout_declarator_name(declr);
+    if (!name) {
+        return;
+    }
+    if (sig_lookup(tab, name)) {
+        ncc_free(name); // first declaration wins
+        return;
+    }
+
+    ncc_parse_tree_t *specs = ncc_xform_find_child_nt(node,
+                                                      "declaration_specifiers");
+
+    nsig_t s = {.name = name, .ret_nullable = specs && subtree_has_q(specs)};
+    size_t cap = 0;
+    collect_params(ptl, &s.param_nullable, &s.nparams, &cap);
+
+    tab->sigs = ncc_realloc(tab->sigs, (tab->count + 1) * sizeof(nsig_t));
+    tab->sigs[tab->count++] = s;
+}
+
+static void
+build_signatures(ncc_parse_tree_t *node, nsigtab_t *tab)
+{
+    if (!node || ncc_tree_is_leaf(node)) {
+        return;
+    }
+    if (ncc_xform_nt_name_is(node, "function_definition")
+        || ncc_xform_nt_name_is(node, "declaration")) {
+        add_signature(tab, node);
+    }
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        build_signatures(ncc_tree_child(node, i), tab);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Deref checking
 // ---------------------------------------------------------------------------
 
 typedef struct {
-    nvars_t  *vars;
-    nstate_t *state;
-    int       warnings;
+    nvars_t   *vars;
+    nstate_t  *state;
+    nsigtab_t *sigs;
+    int        warnings;
 } ncheck_t;
 
 static void
@@ -242,8 +376,80 @@ check_base(ncheck_t *ck, ncc_parse_tree_t *base, ncc_parse_tree_t *at)
     ncc_free(name);
 }
 
+// Collect the TOP-LEVEL argument expressions of a call's argument list, in
+// order (not descending into a nested call's own arguments).
+static void
+collect_args(ncc_parse_tree_t *n, ncc_parse_tree_t ***out, size_t *count,
+             size_t *cap)
+{
+    if (!n || ncc_tree_is_leaf(n)) {
+        return;
+    }
+    if (ncc_xform_nt_name_is(n, "assignment_expression")) {
+        if (*count >= *cap) {
+            *cap = *cap ? *cap * 2 : 4;
+            *out = ncc_realloc(*out, *cap * sizeof(ncc_parse_tree_t *));
+        }
+        (*out)[(*count)++] = n;
+        return;
+    }
+    size_t nc = ncc_tree_num_children(n);
+    for (size_t i = 0; i < nc; i++) {
+        collect_args(ncc_tree_child(n, i), out, count, cap);
+    }
+}
+
+// A call passing a possibly-null argument to a non-nullable parameter is
+// reported.
+static void
+check_call(ncheck_t *ck, ncc_parse_tree_t *call)
+{
+    char *callee = expr_ident(ncc_tree_child(call, 0));
+    if (!callee) {
+        return;
+    }
+    const nsig_t *sig = sig_lookup(ck->sigs, callee);
+    if (!sig) {
+        ncc_free(callee);
+        return;
+    }
+
+    ncc_parse_tree_t *arglist = ncc_xform_find_child_nt(
+        call, "argument_expression_list");
+    ncc_parse_tree_t **args = nullptr;
+    size_t             n    = 0;
+    size_t             cap  = 0;
+    if (arglist) {
+        collect_args(arglist, &args, &n, &cap);
+    }
+
+    for (size_t i = 0; i < n && i < sig->nparams; i++) {
+        if (sig->param_nullable[i]) {
+            continue; // the parameter accepts null
+        }
+        char *an = expr_ident(args[i]);
+        if (an) {
+            int ix = nv_index(ck->vars, an);
+            if (ix >= 0 && !ck->state->nonnull[ix]) {
+                uint32_t line = 0;
+                uint32_t col  = 0;
+                ncc_xform_first_leaf_pos(args[i], &line, &col);
+                fprintf(stderr,
+                        "ncc: warning: passing possibly-null '%s' to "
+                        "non-nullable parameter %zu of '%s' (line %u, col %u)\n",
+                        an, i + 1, callee, line, col);
+                ck->warnings++;
+            }
+            ncc_free(an);
+        }
+    }
+
+    ncc_free(args);
+    ncc_free(callee);
+}
+
 // Recursively scan an expression for dereferences of tracked nullable vars:
-// `*x`, `x->m`, `x[i]`.
+// `*x`, `x->m`, `x[i]`, and for calls passing nullable args to non-`?` params.
 static void
 check_derefs(ncheck_t *ck, ncc_parse_tree_t *node)
 {
@@ -273,6 +479,9 @@ check_derefs(ncheck_t *ck, ncc_parse_tree_t *node)
             if (op && (strcmp(op, "->") == 0 || strcmp(op, "[") == 0)) {
                 check_base(ck, ncc_tree_child(node, 0), node);
             }
+            else if (op && strcmp(op, "(") == 0) {
+                check_call(ck, node);
+            }
         }
     }
 
@@ -288,6 +497,8 @@ check_derefs(ncheck_t *ck, ncc_parse_tree_t *node)
 static bool stmt_exits(ncc_parse_tree_t *node);
 
 static void analyze_stmt(ncheck_t *ck, ncc_parse_tree_t *node);
+
+static ncc_parse_tree_t *unwrap_single(ncc_parse_tree_t *n);
 
 // Set the nonnull bit of a tracked var.
 static void
@@ -337,21 +548,44 @@ apply_assignment(ncheck_t *ck, ncc_parse_tree_t *node)
             ncc_free(rid);
         }
         else {
-            // A complex RHS: treat an explicit null constant as nullable,
-            // everything else (address-of, string, call, ...) as non-null.
-            // Erring toward non-null avoids false positives; interprocedural
-            // call results are handled in a later stage.
-            ncc_string_t rt = ncc_xform_node_to_text(rhs);
-            bool         is_null = false;
-            if (rt.data) {
-                const char *r = rt.data;
-                while (*r == ' ') {
-                    r++;
+            bool handled = false;
+            // A call to a known `?`-returning function taints the target as
+            // nullable; a call to a known non-`?`-returning function makes it
+            // non-null.
+            ncc_parse_tree_t *u = unwrap_single(rhs);
+            if (u && ncc_xform_nt_name_is(u, "postfix_expression")
+                && ncc_tree_num_children(u) >= 2) {
+                ncc_parse_tree_t *opn = ncc_tree_child(u, 1);
+                if (opn && ncc_tree_is_leaf(opn)
+                    && ncc_xform_leaf_text_eq(opn, "(")) {
+                    char         *callee = expr_ident(ncc_tree_child(u, 0));
+                    const nsig_t *sig = callee ? sig_lookup(ck->sigs, callee)
+                                               : nullptr;
+                    if (sig) {
+                        nn      = !sig->ret_nullable;
+                        handled = true;
+                    }
+                    if (callee) {
+                        ncc_free(callee);
+                    }
                 }
-                is_null = strcmp(r, "0") == 0 || strcmp(r, "nullptr") == 0;
-                ncc_free(rt.data);
             }
-            nn = !is_null;
+            if (!handled) {
+                // Otherwise: an explicit null constant is nullable; everything
+                // else (address-of, string, unknown call, ...) is treated as
+                // non-null. Erring toward non-null avoids false positives.
+                ncc_string_t rt      = ncc_xform_node_to_text(rhs);
+                bool         is_null = false;
+                if (rt.data) {
+                    const char *r = rt.data;
+                    while (*r == ' ') {
+                        r++;
+                    }
+                    is_null = strcmp(r, "0") == 0 || strcmp(r, "nullptr") == 0;
+                    ncc_free(rt.data);
+                }
+                nn = !is_null;
+            }
         }
         set_nonnull(ck, lhs, nn);
     }
@@ -386,8 +620,11 @@ static ncc_parse_tree_t *
 unwrap_single(ncc_parse_tree_t *n)
 {
     while (n && !ncc_tree_is_leaf(n)) {
-        if (ncc_xform_nt_name_is(n, "unary_expression")
-            || ncc_xform_nt_name_is(n, "postfix_expression")) {
+        // Stop at a postfix_expression (a call/deref/subscript). A
+        // unary_expression with an operator (e.g. `!x`) stops via the
+        // single-child check below; a 1-child unary wrapper descends into its
+        // postfix.
+        if (ncc_xform_nt_name_is(n, "postfix_expression")) {
             break;
         }
         ncc_parse_tree_t *only  = nullptr;
@@ -728,23 +965,29 @@ analyze_stmt(ncheck_t *ck, ncc_parse_tree_t *node)
 // ---------------------------------------------------------------------------
 
 static int
-analyze_function(ncc_parse_tree_t *func)
+analyze_function(ncc_parse_tree_t *func, nsigtab_t *sigs)
 {
     nvars_t vars = {0};
     collect_nullable_vars(func, &vars);
-    if (vars.count == 0) {
-        return 0;
-    }
 
     ncc_parse_tree_t *body = ncc_xform_find_child_nt(func, "function_body");
     ncc_parse_tree_t *comp = body ? ncc_xform_find_child_nt(body,
                                                             "compound_statement")
                                   : nullptr;
 
+    // With no `?` variables there is nothing to track for deref warnings, but a
+    // call may still pass a non-tracked value — no, only tracked (nullable)
+    // values can taint, so an empty tracked set means no possible warning.
+    if (vars.count == 0) {
+        ncc_free(vars.names);
+        return 0;
+    }
+
     int result = 0;
     if (comp) {
         nstate_t state = ns_new(&vars); // all NULLABLE
-        ncheck_t ck    = {.vars = &vars, .state = &state, .warnings = 0};
+        ncheck_t ck = {
+            .vars = &vars, .state = &state, .sigs = sigs, .warnings = 0};
         analyze_stmt(&ck, comp);
         result = ck.warnings;
         ns_free(&state);
@@ -758,19 +1001,19 @@ analyze_function(ncc_parse_tree_t *func)
 }
 
 static int
-walk_functions(ncc_parse_tree_t *node)
+walk_functions(ncc_parse_tree_t *node, nsigtab_t *sigs)
 {
     if (!node || ncc_tree_is_leaf(node)) {
         return 0;
     }
     int n = 0;
     if (ncc_xform_nt_name_is(node, "function_definition")) {
-        n += analyze_function(node);
+        n += analyze_function(node, sigs);
         return n; // no nested functions in C
     }
     size_t nc = ncc_tree_num_children(node);
     for (size_t i = 0; i < nc; i++) {
-        n += walk_functions(ncc_tree_child(node, i));
+        n += walk_functions(ncc_tree_child(node, i), sigs);
     }
     return n;
 }
@@ -780,5 +1023,16 @@ ncc_nullability_check(ncc_grammar_t *g, ncc_parse_tree_t *tu, ncc_symtab_t *st)
 {
     (void)g;
     (void)st;
-    return walk_functions(tu);
+
+    nsigtab_t sigs = {0};
+    build_signatures(tu, &sigs);
+
+    int n = walk_functions(tu, &sigs);
+
+    for (size_t i = 0; i < sigs.count; i++) {
+        ncc_free(sigs.sigs[i].name);
+        ncc_free(sigs.sigs[i].param_nullable);
+    }
+    ncc_free(sigs.sigs);
+    return n;
 }
