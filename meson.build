@@ -191,6 +191,7 @@ src_xform = files(
   'src/xform/xform_constexpr.c',
   'src/xform/xform_constexpr_paste.c',
   'src/xform/xform_contracts.c',
+  'src/xform/xform_defer.c',
   'src/xform/xform_generic_struct.c',
   'src/xform/xform_gc_globals.c',
   'src/xform/xform_gc_stack_maps.c',
@@ -409,6 +410,7 @@ ncc_compile_tests = {
                         test_dir / 'test_kargs_void_params.c'],
   'kargs_many_metadata': ['compile_run',
                           test_dir / 'test_kargs_many_metadata.c'],
+  'defer': ['compile_run', test_dir / 'test_defer.c'],
   'function_contracts': ['compile_run',
                          test_dir / 'test_function_contracts.c'],
   'function_contracts_parse': ['preprocess',
@@ -1928,6 +1930,14 @@ ncc_error_contains_tests = {
   'err_function_contract_old_requires': [
     test_dir / 'err_function_contract_old_requires.c',
     'old(...) is not allowed in a \'requires\' clause',
+  ],
+  'err_defer_goto': [
+    test_dir / 'err_defer_goto.c',
+    'may not (yet) also use goto',
+  ],
+  'err_defer_escape': [
+    test_dir / 'err_defer_escape.c',
+    'control transfer (return/break/continue/goto) inside a _defer body',
   ],
   'err_function_contract_return': [
     test_dir / 'err_function_contract_return.c',
