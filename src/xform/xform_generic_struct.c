@@ -16,8 +16,11 @@
 
 #include "lib/alloc.h"
 #include "lib/dict.h"
+#include "lib/string.h"
+#include "parse/symtab.h"
 #include "xform/xform_data.h"
 #include "xform/xform_helpers.h"
+#include "xform/xform_type_layout.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -211,6 +214,29 @@ static ncc_parse_tree_t *xform_generic_struct(ncc_xform_ctx_t *ctx,
         }
 
         ncc_xform_insert_child(container, insert_pos, decl_tree);
+      }
+
+      // Register the freshly-minted concrete tag in the symbol table. This
+      // struct is created mid-xform, so it is absent from the pre-xform symtab
+      // that the shared aggregate resolver (ncc_layout_lookup_aggregate_type ->
+      // ncc_symtab_aggregate_spec) consults. Adding it here keeps the symtab the
+      // single source of truth for aggregate resolution — which is what lets the
+      // eager aggregate-definition collector stay retired: later passes
+      // (gc-globals/auto-roots, gc-stack-maps, array-literal) resolve `struct
+      // <tag>` fields of static aggregates through the symtab rather than a
+      // separate definition walk.
+      ncc_symtab_t *st = ncc_xform_get_data(ctx)->symtab;
+      if (st) {
+        ncc_parse_tree_t *spec = ncc_layout_first_descendant_nt(
+            decl_tree, "struct_or_union_specifier");
+        if (spec && ncc_xform_find_child_nt(spec, "member_declaration_list")) {
+          ncc_sym_entry_t *e = ncc_symtab_add(st, NCC_STRING_STATIC("tag"),
+                                              ncc_string_from_cstr(tag),
+                                              NCC_SYM_TAG, spec);
+          if (e) {
+            e->type_node = spec;
+          }
+        }
       }
     }
   }
