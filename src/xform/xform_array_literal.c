@@ -1104,12 +1104,6 @@ format_cstr(const char *fmt, ...)
     return ncc_buffer_take(buf);
 }
 
-static ncc_dict_t *
-array_aggregate_types(ncc_xform_ctx_t *ctx)
-{
-    ncc_xform_data_t *data = ncc_xform_get_data(ctx);
-    return data ? &data->gc_aggregate_types : nullptr;
-}
 
 static ncc_dict_t *
 array_pointer_typedefs(ncc_xform_ctx_t *ctx)
@@ -1204,15 +1198,8 @@ aggregate_specifier_has_members(ncc_parse_tree_t *su)
 static array_aggregate_type_info_t *
 lookup_aggregate_type(ncc_xform_ctx_t *ctx, const char *key)
 {
-    ncc_dict_t *types = array_aggregate_types(ctx);
-    if (!types || !key) {
-        return nullptr;
-    }
-
-    bool found = false;
-    array_aggregate_type_info_t *info =
-        ncc_dict_get(types, (void *)key, &found);
-    return found ? info : nullptr;
+    // Delegate to the shared symtab-backed resolver (single source of truth).
+    return ncc_layout_lookup_aggregate_type(ctx, key);
 }
 
 static ncc_parse_tree_t *

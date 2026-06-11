@@ -10,8 +10,20 @@
 
 #include <stdint.h>
 
-static int  gi;
-static int *gp;
+typedef struct tpe_point {
+    int  x;
+    long y;
+} tpe_point_t;
+
+static int          gi;
+static int         *gp;
+static tpe_point_t  gs;
+static tpe_point_t *gpp;
+
+// Prototypes for call typing (never actually called — typehash is a
+// compile-time type query — so no definition is needed).
+int         tpe_id_fn(int);
+tpe_point_t tpe_mk_fn(void);
 
 int
 main(void)
@@ -29,6 +41,26 @@ main(void)
 
     // Cast: type of `(char)gi` is `char`.
     ok &= (typehash((char)gi) == typehash(char));
+
+    // typestr(expr) spells the inferred type, matching typestr(<that type>).
+    ok &= (__builtin_strcmp(typestr(gi), typestr(int)) == 0);
+    ok &= (__builtin_strcmp(typestr(*gp), typestr(int)) == 0);
+
+    // Member access: `s.field` (first and later members) and `p->field`.
+    ok &= (typehash(gs.x) == typehash(int));
+    ok &= (typehash(gs.y) == typehash(long));
+    ok &= (typehash(gpp->x) == typehash(int));
+    ok &= (typehash(gpp->y) == typehash(long));
+
+    // Function call: type of `f(args)` is f's return type.
+    ok &= (typehash(tpe_id_fn(0)) == typehash(int));
+
+    // Member access on a call result: type of `mk().y` is the field type.
+    ok &= (typehash(tpe_mk_fn().y) == typehash(long));
+
+    // Subscript `gp[1]` is `int`. The grammar mis-parses this as a type_name;
+    // the symbol table reinterprets it as an expression.
+    ok &= (typehash(gp[1]) == typehash(int));
 
     return ok ? 0 : 1;
 }

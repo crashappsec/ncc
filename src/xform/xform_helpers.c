@@ -2,6 +2,8 @@
 
 #include "xform/xform_helpers.h"
 #include "xform/xform_template.h"
+#include "xform/xform_data.h"
+#include "parse/type_infer.h"
 #include "lib/alloc.h"
 #include "lib/buffer.h"
 #include "lib/string.h"
@@ -553,4 +555,37 @@ ncc_string_t ncc_xform_extract_type_string(ncc_xform_ctx_t *ctx,
   ncc_free(cb->data);
   ncc_free(cb);
   return result;
+}
+
+// ============================================================================
+// Typed argument resolution (typehash / typeid / typestr of expressions)
+// ============================================================================
+
+char *
+ncc_xform_expr_arg_type(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *atom,
+                        ncc_parse_tree_t *cont) {
+  if (!ctx || !atom || cont) {
+    return nullptr; // a continuation is a multi-arg generic form, not an expr
+  }
+  ncc_symtab_t *st = ncc_xform_get_data(ctx)->symtab;
+  if (!st) {
+    return nullptr;
+  }
+  ncc_parse_tree_t *tsa =
+      ncc_xform_find_child_nt(atom, "typeof_specifier_argument");
+  if (!tsa) {
+    return nullptr;
+  }
+
+  // A direct expression argument. Since TS-5 (type-aware parse
+  // disambiguation), a value expression that the permissive typedef-name
+  // grammar could have mis-parsed as a `type_name` (e.g. `lp[2]`) is resolved
+  // to its expression reading at forest->tree extraction, so it arrives here as
+  // a genuine `<expression>` — no type_name reinterpretation is needed.
+  ncc_parse_tree_t *expr = ncc_xform_find_child_nt(tsa, "expression");
+  if (expr) {
+    return ncc_type_of_expr(st, expr);
+  }
+
+  return nullptr;
 }

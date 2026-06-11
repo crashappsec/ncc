@@ -1320,13 +1320,6 @@ has_parenthesized_pointer_array(ncc_parse_tree_t *declarator)
 }
 
 static ncc_dict_t *
-gc_aggregate_types(ncc_xform_ctx_t *ctx)
-{
-    ncc_xform_data_t *data = ncc_xform_get_data(ctx);
-    return data ? &data->gc_aggregate_types : nullptr;
-}
-
-static ncc_dict_t *
 gc_pointer_typedefs(ncc_xform_ctx_t *ctx)
 {
     ncc_xform_data_t *data = ncc_xform_get_data(ctx);
@@ -1373,14 +1366,10 @@ aggregate_specifier_has_members(ncc_parse_tree_t *su)
 static aggregate_type_info_t *
 lookup_aggregate_type(ncc_xform_ctx_t *ctx, const char *key)
 {
-    ncc_dict_t *types = gc_aggregate_types(ctx);
-    if (!types || !key) {
-        return nullptr;
-    }
-
-    bool found = false;
-    aggregate_type_info_t *info = ncc_dict_get(types, (void *)key, &found);
-    return found ? info : nullptr;
+    // Delegate to the shared resolver (single source of truth): it consults the
+    // aggregate table and falls back to the symbol table, so this pass resolves
+    // _generic_struct / generic types too. The info structs are the same type.
+    return ncc_layout_lookup_aggregate_type(ctx, key);
 }
 
 static ncc_parse_tree_t *

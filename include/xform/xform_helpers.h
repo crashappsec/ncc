@@ -71,3 +71,13 @@ ncc_string_t pprint_subtree(ncc_grammar_t *g, ncc_parse_tree_t *node);
 ncc_parse_tree_t **collect_arguments(ncc_parse_tree_t *arglist, int *nargs);
 char *collect_file_scope_declarations(ncc_xform_ctx_t *ctx,
                                       ncc_parse_tree_t *call_node);
+
+// For a single (non-continuation) typeid_atom argument, return the canonical
+// type spelling if the argument is — or, via the symbol table, is really — an
+// EXPRESSION (so its inferred type should be used) rather than a written type.
+// Returns nullptr when the argument is a genuine type or a string literal, so
+// the caller falls back to its written-type path. Caller frees. This is where
+// `typehash`/`typeid`/`typestr` of expressions resolve, including expressions
+// the grammar mis-parsed as type_names (e.g. `lp[2]`).
+char *ncc_xform_expr_arg_type(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *atom,
+                              ncc_parse_tree_t *cont);

@@ -148,15 +148,52 @@ ns_tag(void)
 static void scan_params(ncc_symtab_t *st, ncc_parse_tree_t *node,
                         int64_t id_tid);
 
-// True if a declarator subtree is a function declarator (has a parameter list).
+// In-order leaf scan deciding whether a declarator declares a FUNCTION (vs a
+// variable or function-pointer). A function declaration's name precedes its
+// parameter parenthesis (`f(args)`, `*f(args)`); a function-pointer variable
+// parenthesizes the name first (`(*fp)(args)`). So: the first '(' falls AFTER
+// the first identifier, and a parameter list exists.
+typedef struct {
+    bool seen_id;
+    int  decision; // 0 = undecided, 1 = function, 2 = not-a-function
+} fn_scan_t;
+
+static void
+fn_scan(ncc_parse_tree_t *node, fn_scan_t *s)
+{
+    if (!node || s->decision != 0) {
+        return;
+    }
+    if (ncc_tree_is_leaf(node)) {
+        ncc_token_info_t *tok = ncc_tree_leaf_value(node);
+        ncc_string_t      t   = (tok && ncc_option_is_set(tok->value))
+                                    ? ncc_option_get(tok->value)
+                                    : ncc_string_empty();
+        if (tok && tok->tid == NCC_TOK_IDENTIFIER) {
+            s->seen_id = true;
+        }
+        else if (t.data && strcmp(t.data, "(") == 0) {
+            s->decision = s->seen_id ? 1 : 2;
+        }
+        return;
+    }
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc && s->decision == 0; i++) {
+        fn_scan(ncc_tree_child(node, i), s);
+    }
+}
+
 static bool
 declarator_is_function(ncc_parse_tree_t *declarator)
 {
     if (!declarator) {
         return false;
     }
-    return child_nt(declarator, "parameter_type_list") != nullptr
-        || child_nt(declarator, "parameter_list") != nullptr;
+    // decision == 1 requires a '(' after an identifier — i.e. a parameter list
+    // on the declared name, so no separate param-list check is needed.
+    fn_scan_t s = {.seen_id = false, .decision = 0};
+    fn_scan(declarator, &s);
+    return s.decision == 1;
 }
 
 static void

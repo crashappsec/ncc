@@ -53,6 +53,15 @@ struct ncc_parse_rule_t {
     int32_t                               cost;
     int32_t                               link_ix;
     ncc_string_t                         doc;
+    // TS-5 disambiguation scoring: a NORMAL participating rule (unlike
+    // penalty_rule, which is skipped in graph build) that carries a
+    // symtab-conditional penalty consulted only at forest->tree extraction.
+    // disambig_predicate names a predicate registered with the extractor; when
+    // it holds for this rule's extracted subtree, disambig_cost is added to the
+    // alternative's score and the lowest-scoring alternative is chosen. Empty
+    // predicate => no disambiguation penalty.
+    ncc_string_t                         disambig_predicate;
+    int32_t                               disambig_cost;
     bool                                  penalty_rule;
     bool                                  first_has_any;
     void                                 *thunk;

@@ -51,12 +51,25 @@ typedef struct vmap_scalar_variant_t {
     } value;
 } vmap_scalar_variant_t;
 
+// The real n00b_variant_t shape: a _generic_struct typedef. The legacy
+// aggregate table cannot resolve this (its alias is recorded before
+// generic-struct lowering), so it used to be skipped silently. The type model
+// resolves it, so it now gets a precise variant descriptor too.
+typedef _generic_struct typeid("n00b_variant", n00b_string_t *, uint64_t) {
+    uint64_t selector;
+    union {
+        n00b_string_t *field_0;
+        uint64_t       field_1;
+    } value;
+} vmap_generic_variant_t;
+
 static uint64_t h_variant = typehash(vmap_variant_t *);
 static uint64_t h_holder  = typehash(vmap_holder_t *);
 static uint64_t h_scalar  = typehash(vmap_scalar_variant_t *);
+static uint64_t h_generic = typehash(vmap_generic_variant_t *);
 
 int
 main(void)
 {
-    return (int)((h_variant ^ h_holder ^ h_scalar) == 0);
+    return (int)((h_variant ^ h_holder ^ h_scalar ^ h_generic) == 0);
 }

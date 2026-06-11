@@ -940,6 +940,18 @@ test('ncc_gc_typemap_variant_all_scalar_no_descriptor', test_runner,
   depends : ncc_exe,
 )
 
+# A _generic_struct variant (the real n00b_variant_t shape) resolves via the
+# type model and gets a precise variant descriptor, even though the legacy
+# aggregate table cannot resolve its typedef alias.
+test('ncc_gc_typemap_variant_generic_struct', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap_variant.c',
+          '__builtin_offsetof(vmap_generic_variant_t,selector)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 if host_machine.system() != 'windows' and cc.has_header('pthread.h')
   test('ncc_constexpr_pthread', test_runner,
     args : [ncc_exe, 'compile_run', test_dir / 'test_constexpr_pthread.c']

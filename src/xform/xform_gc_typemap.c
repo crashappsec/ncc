@@ -1257,19 +1257,19 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
         }
 
         bool scalar_no_ptr = elem_type_is_scalar_no_ptr(records[i].elem_type);
-        ncc_layout_aggregate_type_info_t *info = nullptr;
+        ncc_parse_tree_t *spec = nullptr;
         if (!scalar_no_ptr) {
-            info = ncc_layout_aggregate_info_from_type_name(ctx,
-                                                            records[i].elem_type);
-            if (!info || !info->specifier) {
+            // Aggregate resolution now flows through the type model: the shared
+            // lookup falls back to the symbol table, so _generic_struct typedefs
+            // (the n00b_variant_t / generic-container shape) resolve here too.
+            ncc_layout_aggregate_type_info_t *info =
+                ncc_layout_aggregate_info_from_type_name(ctx,
+                                                         records[i].elem_type);
+            if (!info || !info->specifier
+                || !aggregate_type_is_file_visible(info) || info->is_atomic) {
                 continue;
             }
-            if (!aggregate_type_is_file_visible(info)) {
-                continue;
-            }
-            if (info->is_atomic) {
-                continue;
-            }
+            spec = info->specifier;
         }
 
         ncc_buffer_t *offs    = ncc_buffer_empty();
@@ -1284,7 +1284,7 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
         };
 
         if (!scalar_no_ptr) {
-            gc_walk(ctx, records[i].elem_type, info->specifier, "", offs, asserts,
+            gc_walk(ctx, records[i].elem_type, spec, "", offs, asserts,
                     &count, &vacc, &ok, 0);
         }
 

@@ -168,4 +168,8 @@ struct ncc_pwz_parser_t {
 
     pwz_mem_t                   *mem_bottom;
     pwz_exp_t                   *exp_bottom;
+
+    // TS-5 type-aware disambiguation oracle (nullptr => default last-alt policy).
+    ncc_pwz_disambig_fn         disambig_cb;
+    void                       *disambig_ud;
 };

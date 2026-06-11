@@ -50,7 +50,18 @@ static ncc_parse_tree_t *xform_typestr(ncc_xform_ctx_t *ctx,
     return nullptr;
   }
 
-  ncc_string_t type_str = ncc_xform_extract_type_string(ctx, atom, cont);
+  // typestr(<expression>): spell the expression's inferred type. Falls back to
+  // the written-type path when the expression is not yet typeable.
+  char *inferred = ncc_xform_expr_arg_type(ctx, atom, cont);
+
+  ncc_string_t type_str = {0};
+  if (inferred) {
+    type_str.data     = inferred;
+    type_str.u8_bytes = strlen(inferred);
+  }
+  else {
+    type_str = ncc_xform_extract_type_string(ctx, atom, cont);
+  }
 
   // Build quoted string: "\"type_str\""
   size_t len = type_str.u8_bytes;

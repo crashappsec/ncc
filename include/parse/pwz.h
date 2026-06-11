@@ -10,8 +10,33 @@
 
 #include "parse/grammar.h"
 #include "parse/parse_forest.h"
+#include "parse/token.h"
 
 typedef struct ncc_token_stream_t ncc_token_stream_t;
+
+// ============================================================================
+// Type-aware disambiguation (TS-5)
+// ============================================================================
+
+/**
+ * @brief Predicate callback consulted at forest->tree extraction.
+ *
+ * The grammar annotates ambiguous productions with `@disambig(<predicate>)`.
+ * When a rule carrying such an annotation is a candidate at an ambiguity node,
+ * the extractor invokes this callback with the predicate name and the rule's
+ * leading token. A true result adds the rule's disambiguation cost to the
+ * alternative's score; the lowest-scoring (most type-consistent) alternative
+ * wins. This lets the symbol table — passed back through @p ud — resolve the
+ * C typedef/identifier ambiguity at the parse layer.
+ *
+ * @param ud         Opaque user data (the symbol table).
+ * @param predicate  Predicate name from the `@disambig` annotation.
+ * @param tok        The leading token of the candidate rule's span.
+ * @return True if the predicate holds (penalty applies).
+ */
+typedef bool (*ncc_pwz_disambig_fn)(void             *ud,
+                                    const char       *predicate,
+                                    ncc_token_info_t *tok);
 
 // ============================================================================
 // Opaque parser state
@@ -91,6 +116,36 @@ bool ncc_pwz_parse(ncc_pwz_parser_t   *p,
  * @return The parse tree, or nullptr if the last parse failed.
  */
 ncc_parse_tree_t *ncc_pwz_get_tree(ncc_pwz_parser_t *p);
+
+/**
+ * @brief Install (or clear) the type-aware disambiguation oracle.
+ *
+ * With an oracle set, the next extraction (see ncc_pwz_reextract) scores
+ * ambiguous alternatives via `@disambig` annotations + this callback and picks
+ * the lowest-scoring parse. Pass @p cb == nullptr to restore the default
+ * (grammar-order, last-alternative) policy.
+ *
+ * @param p   PWZ parser.
+ * @param cb  Predicate callback (nullptr to clear).
+ * @param ud  Opaque user data passed to @p cb (the symbol table).
+ */
+void ncc_pwz_set_disambiguator(ncc_pwz_parser_t    *p,
+                               ncc_pwz_disambig_fn  cb,
+                               void                *ud);
+
+/**
+ * @brief Re-extract a single tree from the retained forest of the last parse.
+ *
+ * Re-runs forest->tree extraction over the forest from the last successful
+ * parse, applying the currently-installed disambiguation oracle. Valid only
+ * before ncc_pwz_release_parse_state(). Returns the new tree (also stored as
+ * the parser's current result tree), or the existing tree if no forest is
+ * retained.
+ *
+ * @param p  PWZ parser.
+ * @return The re-extracted parse tree.
+ */
+ncc_parse_tree_t *ncc_pwz_reextract(ncc_pwz_parser_t *p);
 
 /**
  * @brief Get all parse trees from an ambiguous parse.

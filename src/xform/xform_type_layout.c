@@ -5,6 +5,7 @@
 #include "lib/alloc.h"
 #include "lib/buffer.h"
 #include "lib/dict.h"
+#include "parse/type_infer.h"
 #include "xform/xform_data.h"
 #include "xform/xform_helpers.h"
 
@@ -749,6 +750,11 @@ ncc_layout_aggregate_specifier_has_members(ncc_parse_tree_t *su)
         && ncc_xform_find_child_nt(su, "member_declaration_list") != nullptr;
 }
 
+static void
+record_aggregate_type(ncc_xform_ctx_t *ctx, const char *key,
+                      ncc_parse_tree_t *specifier, bool is_atomic,
+                      const char *offset_type);
+
 ncc_layout_aggregate_type_info_t *
 ncc_layout_lookup_aggregate_type(ncc_xform_ctx_t *ctx, const char *key)
 {
@@ -760,7 +766,35 @@ ncc_layout_lookup_aggregate_type(ncc_xform_ctx_t *ctx, const char *key)
     bool found = false;
     ncc_layout_aggregate_type_info_t *info =
         ncc_dict_get(types, (void *)key, &found);
-    return found ? info : nullptr;
+    if (found) {
+        return info;
+    }
+
+    // Fall back to the symbol table — the single source of truth for types.
+    // The eager collector populates `types` from declarations as it sees them,
+    // but misses forms it cannot resolve at collection time (notably
+    // _generic_struct typedefs: the real n00b_variant_t / generic-container
+    // shape). The symbol table resolves those; cache the result so later
+    // lookups hit the dict. The resolver returns a spec only for a genuine
+    // aggregate (it yields null for pointer typedefs), so this never turns a
+    // pointer into a by-value aggregate.
+    ncc_symtab_t *st = ncc_xform_get_data(ctx)->symtab;
+    ncc_parse_tree_t *spec = st ? ncc_symtab_aggregate_spec(st, key) : nullptr;
+    // The symbol table records system-header tags too (it has no system gate),
+    // but layout/GC passes must NOT resolve a system aggregate to its definition:
+    // the eager collector deliberately excluded system-header definitions
+    // (!node_starts_in_system_header), so those types were scanned conservatively
+    // rather than descended into. Descending breaks on system shapes the GC walker
+    // can't address — e.g. `struct sigaction`, whose handler pointers live in an
+    // anonymous union reached only through a macro, yielding bogus member paths
+    // (`sa.__sa_handler`). Preserve that policy here so the symtab is the single
+    // source of truth WITHOUT widening which types get descended.
+    if (spec && !ncc_layout_node_starts_in_system_header(spec)) {
+        record_aggregate_type(ctx, key, spec, false, key);
+        info = ncc_dict_get(types, (void *)key, &found);
+        return found ? info : nullptr;
+    }
+    return nullptr;
 }
 
 static void
@@ -1193,29 +1227,6 @@ contains_leaf_text(ncc_parse_tree_t *node, const char *text)
 }
 
 static void
-collect_aggregate_definitions(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *node)
-{
-    if (!node || ncc_tree_is_leaf(node)) {
-        return;
-    }
-
-    if (ncc_xform_nt_name_is(node, "struct_or_union_specifier")
-        && ncc_layout_aggregate_specifier_has_members(node)
-        && !ncc_layout_node_starts_in_system_header(node)) {
-        char *key = ncc_layout_aggregate_key_from_specifier(node);
-        if (key) {
-            record_aggregate_type(ctx, key, node, false, key);
-            ncc_free(key);
-        }
-    }
-
-    size_t nc = ncc_tree_num_children(node);
-    for (size_t i = 0; i < nc; i++) {
-        collect_aggregate_definitions(ctx, ncc_tree_child(node, i));
-    }
-}
-
-static void
 collect_typedef_aliases_from_decl(ncc_xform_ctx_t *ctx,
                                   ncc_parse_tree_t *decl)
 {
@@ -1304,6 +1315,15 @@ collect_typedef_aliases(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *node)
 void
 ncc_layout_collect_type_info(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *tu)
 {
-    collect_aggregate_definitions(ctx, tu);
+    // The eager struct/union *definition* walk is retired: the symbol table is
+    // now the single source of truth for aggregate-tag resolution. Every pass
+    // resolves through ncc_layout_lookup_aggregate_type, which falls back to the
+    // symtab (and caches) when the legacy dict misses, so a standalone
+    // `struct X { ... }` tag no longer needs to be pre-recorded here.
+    //
+    // The typedef-alias walk stays: it performs the load-bearing pointer- and
+    // function-pointer-typedef classification (and records aggregate *aliases*
+    // with their precise offset_type/is_atomic info) that the symtab fallback
+    // does not reproduce.
     collect_typedef_aliases(ctx, tu);
 }

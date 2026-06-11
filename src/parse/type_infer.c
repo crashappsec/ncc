@@ -134,6 +134,31 @@ declarator_ptr_depth(ncc_parse_tree_t *node)
     return total;
 }
 
+// Pointer depth of a function declarator's RETURN type: the `*` stars outside
+// the parameter list (and array dimensions). Unlike declarator_ptr_depth this
+// does not bail on the parameter list — it skips it. `int *f(args)` -> 1.
+static int
+return_ptr_depth(ncc_parse_tree_t *node)
+{
+    if (!node) {
+        return 0;
+    }
+    if (ncc_tree_is_leaf(node)) {
+        ncc_string_t t = leaf_text(node);
+        return (t.data && strcmp(t.data, "*") == 0) ? 1 : 0;
+    }
+    if (nt_is(node, "parameter_type_list") || nt_is(node, "parameter_list")
+        || nt_is(node, "array_declarator")) {
+        return 0;
+    }
+    int    total = 0;
+    size_t nc    = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        total += return_ptr_depth(ncc_tree_child(node, i));
+    }
+    return total;
+}
+
 // Storage-class and function specifiers are not part of a value's type; drop
 // them from a normalized specifier spelling (keep const/volatile, which are).
 static bool
@@ -265,6 +290,275 @@ type_of_symbol(ncc_sym_entry_t *sym)
 }
 
 // ============================================================================
+// Aggregate / member resolution
+// ============================================================================
+
+// First descendant (incl. self) with NT name `name`.
+static ncc_parse_tree_t *
+find_descendant_nt(ncc_parse_tree_t *node, const char *name)
+{
+    if (!node || ncc_tree_is_leaf(node)) {
+        return nullptr;
+    }
+    if (nt_is(node, name)) {
+        return node;
+    }
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        ncc_parse_tree_t *f = find_descendant_nt(ncc_tree_child(node, i), name);
+        if (f) {
+            return f;
+        }
+    }
+    return nullptr;
+}
+
+// Text of the first IDENTIFIER/TYPEDEF_NAME leaf at or under `node`.
+static ncc_string_t
+identifier_text(ncc_parse_tree_t *node)
+{
+    if (!node) {
+        return ncc_string_empty();
+    }
+    if (ncc_tree_is_leaf(node)) {
+        ncc_token_info_t *tok = ncc_tree_leaf_value(node);
+        if (tok
+            && (tok->tid == NCC_TOK_IDENTIFIER
+                || tok->tid == NCC_TOK_TYPEDEF_NAME)) {
+            return leaf_text(node);
+        }
+        return ncc_string_empty();
+    }
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        ncc_string_t t = identifier_text(ncc_tree_child(node, i));
+        if (t.data && t.u8_bytes > 0) {
+            return t;
+        }
+    }
+    return ncc_string_empty();
+}
+
+// Last IDENTIFIER leaf in DFS order under a member_declaration — its declared
+// field name — skipping nested aggregate bodies and parameter lists (whose
+// identifiers belong to inner declarations, not this field). Works whether the
+// name sits in the declarator (`T *x`) or folds into the specifiers (`T x`).
+static void
+last_field_identifier(ncc_parse_tree_t *node, ncc_string_t *out)
+{
+    if (!node) {
+        return;
+    }
+    if (ncc_tree_is_leaf(node)) {
+        ncc_token_info_t *tok = ncc_tree_leaf_value(node);
+        if (tok && tok->tid == NCC_TOK_IDENTIFIER) {
+            *out = leaf_text(node);
+        }
+        return;
+    }
+    if (nt_is(node, "member_declaration_list") || nt_is(node, "parameter_type_list")
+        || nt_is(node, "parameter_list")) {
+        return;
+    }
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        last_field_identifier(ncc_tree_child(node, i), out);
+    }
+}
+
+// Resolve a type name to its aggregate specifier (one carrying a member body)
+// via the scoped symbol table, following a typedef to its underlying tag. A
+// leading struct/union/enum keyword (a tag-reference spelling) is handled.
+// Catches types the legacy aggregate table misses (notably _generic_struct
+// typedefs). Returns a specifier with a member_declaration_list, or nullptr.
+ncc_parse_tree_t *
+ncc_symtab_aggregate_spec(ncc_symtab_t *st, const char *type_name)
+{
+    if (!st || !type_name) {
+        return nullptr;
+    }
+
+    // A tag-reference spelling ("struct foo") resolves directly in the tag ns
+    // by its bare tag name. A BARE identifier (no struct/union/enum keyword) is
+    // a type only via a typedef — never directly via the tag namespace — so the
+    // tag fallback below is gated on an explicit keyword. (Otherwise a bare name
+    // that happens to match a struct tag — e.g. md4c's `MD_SPAN_WIKILINK`, both
+    // an enum constant and a struct tag — would wrongly resolve as that struct.)
+    bool        had_prefix = false;
+    const char *bare       = type_name;
+    for (const char *kw = nullptr;;) {
+        kw = nullptr;
+        if (strncmp(bare, "struct ", 7) == 0) {
+            kw = bare + 7;
+        }
+        else if (strncmp(bare, "union ", 6) == 0) {
+            kw = bare + 6;
+        }
+        else if (strncmp(bare, "enum ", 5) == 0) {
+            kw = bare + 5;
+        }
+        if (!kw) {
+            break;
+        }
+        while (*kw == ' ') {
+            kw++;
+        }
+        bare       = kw;
+        had_prefix = true;
+    }
+
+    ncc_string_t      nm     = ncc_string_from_cstr(type_name);
+    ncc_string_t      barenm = ncc_string_from_cstr(bare);
+    ncc_parse_tree_t *result = nullptr;
+
+    ncc_sym_entry_t *sym = ncc_symtab_lookup(st, ncc_string_empty(), nm);
+    // A pointer/array typedef (e.g. `typedef struct MIR_item *MIR_item_t;`)
+    // aliases a VALUE, not a by-value aggregate. Its specifiers still contain
+    // the pointee's struct, so resolving it here would wrongly report the
+    // pointee as a by-value aggregate (and a caller would emit offsetof through
+    // a pointer). Only a typedef whose declarator adds no `*`/`[]` is a genuine
+    // aggregate alias.
+    if (sym && sym->kind == NCC_SYM_TYPEDEF && sym->type_node
+        && declarator_ptr_depth(sym->decl_node) == 0) {
+        ncc_parse_tree_t *su = find_descendant_nt(sym->type_node,
+                                                  "struct_or_union_specifier");
+        if (su && child_nt(su, "member_declaration_list")) {
+            result = su;
+        }
+        else if (su) {
+            ncc_parse_tree_t *tagn = child_nt(su, "tag_name");
+            if (tagn) {
+                ncc_string_t     tag = identifier_text(tagn);
+                ncc_sym_entry_t *te  = ncc_symtab_lookup(
+                    st, NCC_STRING_STATIC("tag"), tag);
+                if (te && te->type_node
+                    && child_nt(te->type_node, "member_declaration_list")) {
+                    result = te->type_node;
+                }
+            }
+        }
+    }
+    if (!result && had_prefix) {
+        // Only an explicit `struct X` / `union X` reaches the tag namespace.
+        ncc_sym_entry_t *te = ncc_symtab_lookup(st, NCC_STRING_STATIC("tag"),
+                                                barenm);
+        if (te && te->type_node
+            && child_nt(te->type_node, "member_declaration_list")) {
+            result = te->type_node;
+        }
+    }
+
+    if (nm.data) {
+        ncc_free(nm.data);
+    }
+    if (barenm.data) {
+        ncc_free(barenm.data);
+    }
+    return result;
+}
+
+// `@disambig` predicate evaluator (TS-5). Matches ncc_pwz_disambig_fn: `ud` is
+// the symbol table. Classifies `tok`'s identifier against the symbol table so
+// the forest->tree extractor can resolve the C typedef/value ambiguity:
+//   - "id_is_value":   the identifier names a variable/parameter/function, so a
+//                      parse treating it as a TYPE (typedef_name) is penalized.
+//   - "id_is_typedef": the identifier names a typedef, so a parse treating it as
+//                      a VALUE (provided_identifier) is penalized.
+// An unknown identifier (not in the symtab) matches neither — both readings
+// score equally and the default last-alternative policy applies, preserving the
+// pre-TS-5 behavior for forward-referenced or out-of-scope names.
+bool
+ncc_disambig_eval(void *ud, const char *predicate, ncc_token_info_t *tok)
+{
+    ncc_symtab_t *st = (ncc_symtab_t *)ud;
+
+    if (!st || !predicate || !tok || !ncc_option_is_set(tok->value)) {
+        return false;
+    }
+
+    ncc_string_t name = ncc_option_get(tok->value);
+
+    if (!name.data || name.u8_bytes == 0) {
+        return false;
+    }
+
+    ncc_sym_entry_t *sym = ncc_symtab_lookup(st, ncc_string_empty(), name);
+
+    if (!sym) {
+        return false;
+    }
+
+    if (strcmp(predicate, "id_is_value") == 0) {
+        return sym->kind == NCC_SYM_VARIABLE || sym->kind == NCC_SYM_PARAM
+            || sym->kind == NCC_SYM_FUNCTION;
+    }
+
+    if (strcmp(predicate, "id_is_typedef") == 0) {
+        return sym->kind == NCC_SYM_TYPEDEF;
+    }
+
+    return false;
+}
+
+// Type spelling of a single member_declaration whose field name is `fname`.
+static char *
+member_decl_type(ncc_parse_tree_t *m, ncc_string_t fname)
+{
+    ncc_parse_tree_t *specs = child_nt(m, "specifier_qualifier_list");
+    if (!specs) {
+        return nullptr;
+    }
+    ncc_parse_tree_t *declr = find_descendant_nt(m, "declarator");
+    int               depth = declr ? declarator_ptr_depth(declr) : 0;
+    if (depth < 0) {
+        return nullptr; // array / function member — not yet typed
+    }
+    char *base = canonical_base(specs, fname);
+    return base ? append_stars(base, depth) : nullptr;
+}
+
+// Find member `name` and return its type spelling, recursing through the
+// (left-recursive) member_declaration_list structure but NOT into a member's
+// own nested aggregate body. Returns the type, or nullptr if not found / not
+// yet typeable. `*found` is set when the name matched (even if untypeable).
+static char *
+find_member_type(ncc_parse_tree_t *node, ncc_string_t name, bool *found)
+{
+    if (!node || ncc_tree_is_leaf(node)) {
+        return nullptr;
+    }
+    if (nt_is(node, "member_declaration")) {
+        ncc_string_t fname = ncc_string_empty();
+        last_field_identifier(node, &fname);
+        if (fname.data && ncc_string_eq(fname, name)) {
+            *found = true;
+            return member_decl_type(node, fname);
+        }
+        return nullptr; // a different field — do not descend into its body
+    }
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        char *r = find_member_type(ncc_tree_child(node, i), name, found);
+        if (*found) {
+            return r;
+        }
+    }
+    return nullptr;
+}
+
+// Type spelling of member `name` within aggregate `spec`, or nullptr.
+static char *
+type_of_member(ncc_parse_tree_t *spec, ncc_string_t name)
+{
+    ncc_parse_tree_t *members = child_nt(spec, "member_declaration_list");
+    if (!members || !name.data) {
+        return nullptr;
+    }
+    bool found = false;
+    return find_member_type(members, name, &found);
+}
+
+// ============================================================================
 // Expression typing
 // ============================================================================
 
@@ -354,6 +648,91 @@ ncc_type_of_expr(ncc_symtab_t *st, ncc_parse_tree_t *expr)
         }
     }
 
+    // Postfix forms: member access (e.f / e->f), call (f(args)), subscript
+    // (a[i]). One scan classifies the operator and captures the operand(s).
+    if (nt_is(expr, "postfix_expression")) {
+        bool              arrow = false, dot = false, call = false, sub = false;
+        ncc_parse_tree_t *base  = nullptr;
+        ncc_parse_tree_t *mem   = nullptr;
+        size_t            nc    = ncc_tree_num_children(expr);
+        for (size_t i = 0; i < nc; i++) {
+            ncc_parse_tree_t *c = ncc_tree_child(expr, i);
+            if (!c) {
+                continue;
+            }
+            if (ncc_tree_is_leaf(c)) {
+                const char *s = leaf_text(c).data;
+                s             = s ? s : "";
+                if (strcmp(s, "->") == 0) {
+                    arrow = true;
+                }
+                else if (strcmp(s, ".") == 0) {
+                    dot = true;
+                }
+                else if (strcmp(s, "(") == 0) {
+                    call = true;
+                }
+                else if (strcmp(s, "[") == 0) {
+                    sub = true;
+                }
+                // ) ] , ++ -- ! and other punctuation are ignored; a non-punct
+                // leaf (e.g. a member-name identifier) falls through below.
+                else if (strcmp(s, ")") == 0 || strcmp(s, "]") == 0
+                         || strcmp(s, ",") == 0 || strcmp(s, "++") == 0
+                         || strcmp(s, "--") == 0 || strcmp(s, "!") == 0) {
+                    continue;
+                }
+                else {
+                    if (!base) {
+                        base = c;
+                    }
+                    else if (!mem) {
+                        mem = c;
+                    }
+                }
+                continue;
+            }
+            if (!base) {
+                base = c; // first nonterminal: aggregate / callee / array
+            }
+            else if (!mem) {
+                mem = c; // member name / argument list / index
+            }
+        }
+
+        if ((arrow || dot) && base && mem) {
+            char *bt = ncc_type_of_expr(st, base);
+            if (arrow) {
+                bt = strip_one_star(bt); // p->m : deref then member
+            }
+            char *result = nullptr;
+            if (bt) {
+                ncc_parse_tree_t *spec = ncc_symtab_aggregate_spec(st, bt);
+                if (spec) {
+                    result = type_of_member(spec, identifier_text(mem));
+                }
+                ncc_free(bt);
+            }
+            return result;
+        }
+        if (sub && base) {
+            // a[i] : element type of a pointer (array decay handled as pointer).
+            return strip_one_star(ncc_type_of_expr(st, base));
+        }
+        if (call && base) {
+            ncc_string_t     fn  = identifier_text(base);
+            ncc_sym_entry_t *sym = fn.data ? ncc_symtab_lookup(
+                                       st, ncc_string_empty(), fn)
+                                           : nullptr;
+            if (sym && sym->kind == NCC_SYM_FUNCTION && sym->type_node) {
+                char *b = canonical_base(sym->type_node, fn);
+                if (b) {
+                    return append_stars(b, return_ptr_depth(sym->decl_node));
+                }
+            }
+        }
+    }
+
     // Pass-through precedence cascade: a single meaningful child.
     {
         ncc_parse_tree_t *only = nullptr;
@@ -362,5 +741,5 @@ ncc_type_of_expr(ncc_symtab_t *st, ncc_parse_tree_t *expr)
         }
     }
 
-    return nullptr; // member access, calls, subscripts, arithmetic: TODO
+    return nullptr; // calls, subscripts, arithmetic: TODO
 }
