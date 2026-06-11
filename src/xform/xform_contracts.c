@@ -795,6 +795,37 @@ static bool postfix_expression_is_call(ncc_parse_tree_t *node) {
   return false;
 }
 
+// True if a call node's callee is exactly the identifier `old`, i.e. this is an
+// `old(E)` entry-value reference rather than an ordinary (forbidden) call.
+static bool postfix_call_callee_is_old(ncc_parse_tree_t *node) {
+  size_t nc = ncc_tree_num_children(node);
+  for (size_t i = 0; i < nc; i++) {
+    ncc_parse_tree_t *child = ncc_tree_child(node, i);
+    if (!child || ncc_tree_is_leaf(child)) {
+      continue;
+    }
+    if (!ncc_xform_nt_name_is(child, "postfix_expression")) {
+      continue;
+    }
+    ncc_string_t t       = ncc_xform_node_to_text(child);
+    bool         is_old  = false;
+    if (t.data) {
+      const char *s = t.data;
+      while (*s && isspace((unsigned char)*s)) {
+        s++;
+      }
+      size_t len = strlen(s);
+      while (len > 0 && isspace((unsigned char)s[len - 1])) {
+        len--;
+      }
+      is_old = (len == 3 && memcmp(s, "old", 3) == 0);
+      ncc_free(t.data);
+    }
+    return is_old;
+  }
+  return false;
+}
+
 static bool postfix_expression_is_inc_dec(ncc_parse_tree_t *node) {
   return ncc_xform_nt_name_is(node, "postfix_expression") &&
          (node_has_direct_leaf(node, "++") ||
@@ -1079,11 +1110,13 @@ static void analyze_contract_semantics_node(contract_semantic_ctx_t *cctx,
     }
   }
 
-  if (postfix_expression_is_call(node)) {
+  if (postfix_expression_is_call(node) && !postfix_call_callee_is_old(node)) {
     contract_semantic_error(node,
                             "function calls are not allowed in function "
                             "contracts");
   }
+  // An `old(E)` reference is permitted (it is not a real call); fall through so
+  // its argument E is still validated — no calls or mutations inside old().
 
   ncc_parse_tree_t *lhs = assignment_lhs(node);
   if (lhs) {
@@ -1295,6 +1328,130 @@ static void build_helper_signature_parts(const char *params,
   *out_names = ncc_buffer_take(name_buf);
 }
 
+// --- old(<expr>) capture: entry-state values for `ensures` ------------------
+//
+// `ensures` runs in the wrapper AFTER the body helper returns, so a bare
+// expression there observes post-call state. `old(E)` lets a clause refer to
+// E's value at function ENTRY: each distinct E is captured into a temp at the
+// top of the wrapper and the reference is rewritten to that temp. The temp is
+// declared `typeof(E)`, so it works for any expression type (scalars, pointers,
+// aggregates), and E is evaluated exactly once at entry.
+
+// True if `old` appears as a call (an `old` identifier followed by `(`) in any
+// item — used to reject `old()` in a `requires` clause, where entry state is
+// just the current state.
+static bool contract_items_use_old(strvec_t *items) {
+  for (size_t i = 0; i < items->len; i++) {
+    const char *p = items->items[i];
+    while (*p) {
+      if (*p == '"' || *p == '\'') {
+        p = skip_quoted(p);
+        continue;
+      }
+      if (is_ident_start_char(*p)) {
+        const char *ids = p;
+        while (*p && is_ident_char(*p)) {
+          p++;
+        }
+        if ((size_t)(p - ids) == 3 && memcmp(ids, "old", 3) == 0
+            && *skip_spaces(p) == '(') {
+          return true;
+        }
+        continue;
+      }
+      p++;
+    }
+  }
+  return false;
+}
+
+// Rewrite one ensures item, replacing each `old(E)` with its capture temp.
+// New captures are appended to `decls` as `typeof(E) __ncc_old_N = (E);`;
+// `exprs` holds the captured E texts for dedup (index N == position in both).
+static char *rewrite_old_in_item(const char *item, strvec_t *exprs,
+                                 strvec_t *decls) {
+  ncc_buffer_t *out = ncc_buffer_empty();
+  const char   *p   = item;
+
+  while (*p) {
+    if (*p == '"' || *p == '\'') {
+      const char *q = skip_quoted(p);
+      ncc_buffer_append(out, p, (size_t)(q - p));
+      p = q;
+      continue;
+    }
+    if (is_ident_start_char(*p)) {
+      const char *ids = p;
+      while (*p && is_ident_char(*p)) {
+        p++;
+      }
+      size_t      idlen   = (size_t)(p - ids);
+      const char *aftersp = skip_spaces(p);
+
+      if (idlen == 3 && memcmp(ids, "old", 3) == 0 && *aftersp == '(') {
+        const char *close = skip_balanced_text(aftersp);  // just past ')'
+        const char *es    = aftersp + 1;                  // start of E
+        const char *ee    = close - 1;                    // the ')'
+        while (es < ee && isspace((unsigned char)*es)) {
+          es++;
+        }
+        while (ee > es && isspace((unsigned char)ee[-1])) {
+          ee--;
+        }
+        size_t elen  = (size_t)(ee - es);
+        char  *etext = ncc_alloc_size(1, elen + 1);
+        memcpy(etext, es, elen);
+        etext[elen] = '\0';
+
+        int idx = -1;
+        for (size_t i = 0; i < exprs->len; i++) {
+          if (strcmp(exprs->items[i], etext) == 0) {
+            idx = (int)i;
+            break;
+          }
+        }
+        char tmpname[32];
+        if (idx < 0) {
+          idx = (int)exprs->len;
+          snprintf(tmpname, sizeof(tmpname), "__ncc_old_%d", idx);
+          strvec_push(exprs, etext);  // takes ownership
+          ncc_buffer_t *d = ncc_buffer_empty();
+          ncc_buffer_printf(d, "typeof(%s) %s = (%s);", etext, tmpname, etext);
+          strvec_push(decls, ncc_buffer_take(d));
+        } else {
+          snprintf(tmpname, sizeof(tmpname), "__ncc_old_%d", idx);
+          ncc_free(etext);
+        }
+        ncc_buffer_puts(out, tmpname);
+        p = close;
+        continue;
+      }
+
+      ncc_buffer_append(out, ids, idlen);
+      continue;
+    }
+    ncc_buffer_putc(out, *p);
+    p++;
+  }
+
+  return ncc_buffer_take(out);
+}
+
+// Rewrite all ensures items in place, collecting entry-value capture decls.
+static void collect_old_captures(strvec_t *ensures_items, strvec_t *decls) {
+  strvec_t exprs;
+  strvec_init(&exprs);
+
+  for (size_t i = 0; i < ensures_items->len; i++) {
+    char *rewritten = rewrite_old_in_item(ensures_items->items[i], &exprs,
+                                           decls);
+    ncc_free(ensures_items->items[i]);
+    ensures_items->items[i] = rewritten;
+  }
+
+  strvec_free(&exprs);
+}
+
 static void emit_contract_block(ncc_buffer_t *src, strvec_t *items) {
   ncc_buffer_puts(src, "{\n");
   for (size_t i = 0; i < items->len; i++) {
@@ -1327,6 +1484,28 @@ static void emit_contract_wrapper(ncc_buffer_t *src, bool void_ret,
     ncc_buffer_putc(src, '\n');
   }
 
+  // `old(E)` is an entry-state value, only meaningful in `ensures` (in
+  // `requires`, entry state IS the current state).
+  if (has_requires && contract_items_use_old(requires_items)) {
+    fprintf(stderr,
+            "ncc: error: old(...) is not allowed in a 'requires' clause "
+            "(entry state equals the current state there)\n");
+    exit(1);
+  }
+
+  // Capture old(E) entry values before any user code runs, and rewrite the
+  // ensures references to the captured temps. Placed after kargs extraction so
+  // old() may also refer to unpacked keyword arguments.
+  strvec_t old_decls;
+  strvec_init(&old_decls);
+  if (has_ensures) {
+    collect_old_captures(ensures_items, &old_decls);
+    for (size_t i = 0; i < old_decls.len; i++) {
+      ncc_buffer_puts(src, old_decls.items[i]);
+      ncc_buffer_putc(src, '\n');
+    }
+  }
+
   if (has_requires) {
     emit_contract_block(src, requires_items);
   }
@@ -1347,6 +1526,8 @@ static void emit_contract_wrapper(ncc_buffer_t *src, bool void_ret,
   } else {
     ncc_buffer_puts(src, "return result;\n}\n");
   }
+
+  strvec_free(&old_decls);
 }
 
 static ncc_parse_tree_t *raw_token(const char *text) {
