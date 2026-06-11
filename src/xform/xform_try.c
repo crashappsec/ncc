@@ -32,7 +32,6 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
 static int ncc_try_counter = 0;
 
@@ -65,30 +64,46 @@ enclosing_function(ncc_parse_tree_t *node)
     return nullptr;
 }
 
-// A leading word in declaration_specifiers that is a storage-class or
-// function specifier, not part of the type. (A bare typedef-name return type
-// after `static` can mis-parse as a function_specifier, so we strip by text
-// rather than trusting the specifier classification.)
-static bool
-is_specifier_keyword(const char *w, size_t len)
+// Append the type-relevant specifiers of a declaration_specifiers subtree to
+// `buf`, in order, dropping storage-class and function specifiers (which are
+// part of the declaration but not the return type). `*first` tracks spacing.
+//
+//   declaration_specifier ::= storage_class_specifier
+//       | type_specifier_qualifier | function_specifier
+//
+// The fix that lets a bare typedef-name return type after `static` parse as a
+// type_specifier_qualifier (rather than mis-classifying as a function
+// specifier) is what makes this classification trustworthy.
+static void
+collect_type_specs(ncc_parse_tree_t *n, ncc_buffer_t *buf, bool *first)
 {
-    static const char *kw[] = {
-        "static",   "extern",        "auto",      "register",
-        "typedef",  "_Thread_local", "thread_local", "constexpr",
-        "inline",   "_Noreturn",     "__inline",  "__inline__",
-        "__forceinline",
-    };
-    for (size_t i = 0; i < sizeof(kw) / sizeof(kw[0]); i++) {
-        if (strlen(kw[i]) == len && memcmp(w, kw[i], len) == 0) {
-            return true;
-        }
+    if (!n || ncc_tree_is_leaf(n)) {
+        return;
     }
-    return false;
+    if (ncc_xform_nt_name_is(n, "declaration_specifier")) {
+        ncc_parse_tree_t *inner = ncc_tree_child(n, 0);
+        if (inner && ncc_xform_nt_name_is(inner, "type_specifier_qualifier")) {
+            ncc_string_t t = ncc_xform_node_to_text(inner);
+            if (t.data) {
+                if (!*first) {
+                    ncc_buffer_putc(buf, ' ');
+                }
+                ncc_buffer_puts(buf, t.data);
+                *first = false;
+                ncc_free(t.data);
+            }
+        }
+        return; // classified — do not descend into the specifier's own body
+    }
+    size_t nc = ncc_tree_num_children(n);
+    for (size_t i = 0; i < nc; i++) {
+        collect_type_specs(ncc_tree_child(n, i), buf, first);
+    }
 }
 
-// The enclosing function's return type spelling: the declaration_specifiers
-// text with leading storage-class / function specifiers stripped, plus any
-// leading pointer on the declarator. Caller frees. Returns nullptr on failure.
+// The enclosing function's return type spelling: its declaration_specifiers
+// with storage-class / function specifiers dropped, plus any leading pointer on
+// the declarator. Caller frees. Returns nullptr on failure.
 static char *
 return_type_text(ncc_parse_tree_t *func)
 {
@@ -97,35 +112,14 @@ return_type_text(ncc_parse_tree_t *func)
     if (!specs) {
         return nullptr;
     }
-    ncc_string_t spec_text = ncc_xform_node_to_text(specs);
-    if (!spec_text.data) {
+
+    ncc_buffer_t *buf   = ncc_buffer_empty();
+    bool          first = true;
+    collect_type_specs(specs, buf, &first);
+    if (first) {
+        ncc_free(ncc_buffer_take(buf)); // no type specifier found
         return nullptr;
     }
-
-    // Skip leading specifier-keyword words; everything from the first
-    // non-keyword word on is the type.
-    const char *p = spec_text.data;
-    for (;;) {
-        while (*p == ' ') {
-            p++;
-        }
-        const char *w = p;
-        while (*p && *p != ' ') {
-            p++;
-        }
-        size_t len = (size_t)(p - w);
-        if (len == 0) {
-            break; // only specifiers — no type (shouldn't happen)
-        }
-        if (!is_specifier_keyword(w, len)) {
-            p = w;
-            break;
-        }
-    }
-
-    ncc_buffer_t *buf = ncc_buffer_empty();
-    ncc_buffer_puts(buf, p);
-    ncc_free(spec_text.data);
 
     ncc_parse_tree_t *declr = ncc_xform_find_child_nt(func, "declarator");
     ncc_parse_tree_t *ptr   = declr ? ncc_xform_find_child_nt(declr, "pointer")

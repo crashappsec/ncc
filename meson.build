@@ -415,6 +415,8 @@ ncc_compile_tests = {
                           test_dir / 'test_kargs_many_metadata.c'],
   'defer': ['compile_run', test_dir / 'test_defer.c'],
   'try': ['compile_run', test_dir / 'test_try.c'],
+  'try_static_typedef': ['compile_run',
+                         test_dir / 'test_try_static_typedef.c'],
   'nullable_syntax': ['compile_run', test_dir / 'test_nullable_syntax.c'],
   'function_contracts': ['compile_run',
                          test_dir / 'test_function_contracts.c'],
