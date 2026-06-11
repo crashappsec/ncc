@@ -831,3 +831,9 @@
     | <attribute_specifier_sequence>? <primary_block>
     | <attribute_specifier_sequence>? <jump_statement>
     | <gcc_asm_statement>
+    | <defer_statement>
+
+# ncc `_defer <secondary-block>` (N3199-semantics defer, spelled `_defer` to
+# avoid colliding with libn00b's existing `defer` macro). The block runs at exit
+# of the enclosing scope, LIFO, on all exit paths; lowered by xform_defer.
+<defer_statement> ::= %"_defer" <secondary_block>
