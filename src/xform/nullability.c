@@ -126,8 +126,8 @@ subtree_has_q(ncc_parse_tree_t *node)
     return false;
 }
 
-// If `node` reduces to a lone identifier, return that name (caller frees);
-// else nullptr. (Parenthesized forms are not unwrapped — conservative.)
+// If `node` reduces to a lone identifier (ignoring surrounding spaces and
+// balanced parentheses), return that name (caller frees); else nullptr.
 static char *
 expr_ident(ncc_parse_tree_t *node)
 {
@@ -135,13 +135,39 @@ expr_ident(ncc_parse_tree_t *node)
     if (!t.data) {
         return nullptr;
     }
-    const char *s = t.data;
-    while (*s == ' ') {
-        s++;
-    }
-    size_t len = strlen(s);
-    while (len > 0 && s[len - 1] == ' ') {
-        len--;
+    const char *s   = t.data;
+    size_t      len = strlen(s);
+    // Trim surrounding spaces and balanced parentheses: `( p )`, `((p))` -> `p`.
+    for (;;) {
+        while (len > 0 && s[0] == ' ') {
+            s++;
+            len--;
+        }
+        while (len > 0 && s[len - 1] == ' ') {
+            len--;
+        }
+        if (len >= 2 && s[0] == '(' && s[len - 1] == ')') {
+            int  depth   = 0;
+            bool matched = true;
+            for (size_t i = 1; i + 1 < len; i++) {
+                if (s[i] == '(') {
+                    depth++;
+                }
+                else if (s[i] == ')') {
+                    if (depth == 0) {
+                        matched = false; // the leading '(' closed early
+                        break;
+                    }
+                    depth--;
+                }
+            }
+            if (matched && depth == 0) {
+                s += 1;
+                len -= 2;
+                continue;
+            }
+        }
+        break;
     }
     bool ident = len > 0 && (isalpha((unsigned char)s[0]) || s[0] == '_');
     for (size_t i = 0; ident && i < len; i++) {
@@ -155,6 +181,31 @@ expr_ident(ncc_parse_tree_t *node)
         memcpy(r, s, len);
         r[len] = '\0';
     }
+    ncc_free(t.data);
+    return r;
+}
+
+// True if the expression is a null constant: `0`, `nullptr`, or the NULL macro
+// in any spacing (the preprocessor expands `NULL` to `((void *)0)`).
+static bool
+expr_is_null_constant(ncc_parse_tree_t *n)
+{
+    ncc_string_t t = ncc_xform_node_to_text(n);
+    if (!t.data) {
+        return false;
+    }
+    char  *c = ncc_alloc_array(char, strlen(t.data) + 1);
+    size_t j = 0;
+    for (const char *p = t.data; *p; p++) {
+        if (*p != ' ') {
+            c[j++] = *p;
+        }
+    }
+    c[j]   = '\0';
+    bool r = strcmp(c, "0") == 0 || strcmp(c, "nullptr") == 0
+          || strcmp(c, "NULL") == 0 || strcmp(c, "(void*)0") == 0
+          || strcmp(c, "((void*)0)") == 0;
+    ncc_free(c);
     ncc_free(t.data);
     return r;
 }
@@ -361,6 +412,22 @@ warn_deref(ncheck_t *ck, ncc_parse_tree_t *at, const char *name)
     ck->warnings++;
 }
 
+// Warn that a `?`-returning call's result is being bound to a non-`?` target,
+// silently discarding the nullability the callee advertised.
+static void
+warn_bind(ncheck_t *ck, ncc_parse_tree_t *at, const char *callee,
+          const char *target)
+{
+    uint32_t line = 0;
+    uint32_t col  = 0;
+    ncc_xform_first_leaf_pos(at, &line, &col);
+    fprintf(stderr,
+            "ncc: warning: nullable result of '%s()' assigned to non-nullable "
+            "'%s' (line %u, col %u)\n",
+            callee, target, line, col);
+    ck->warnings++;
+}
+
 // Warn if `base` is a tracked variable currently NULLABLE.
 static void
 check_base(ncheck_t *ck, ncc_parse_tree_t *base, ncc_parse_tree_t *at)
@@ -448,6 +515,28 @@ check_call(ncheck_t *ck, ncc_parse_tree_t *call)
     ncc_free(callee);
 }
 
+static void check_derefs(ncheck_t *ck, ncc_parse_tree_t *node);
+static char *cond_var(ncc_parse_tree_t *cond, bool *true_means_nonnull);
+
+// Run check_derefs on `e`, but with tracked var `v` temporarily treated as
+// non-null when `refine` is set — a short-circuit / ternary guard proved it
+// non-null for the side being evaluated. check_derefs only reads the state, so
+// the flip is restored before returning and is invisible to callers.
+static void
+check_derefs_refined(ncheck_t *ck, ncc_parse_tree_t *e, const char *v,
+                     bool refine)
+{
+    int ix = (v && refine) ? nv_index(ck->vars, v) : -1;
+    if (ix < 0) {
+        check_derefs(ck, e);
+        return;
+    }
+    bool saved             = ck->state->nonnull[ix];
+    ck->state->nonnull[ix] = true;
+    check_derefs(ck, e);
+    ck->state->nonnull[ix] = saved;
+}
+
 // Recursively scan an expression for dereferences of tracked nullable vars:
 // `*x`, `x->m`, `x[i]`, and for calls passing nullable args to non-`?` params.
 static void
@@ -458,6 +547,46 @@ check_derefs(ncheck_t *ck, ncc_parse_tree_t *node)
     }
 
     size_t nc = ncc_tree_num_children(node);
+
+    // Short-circuit / ternary operators guard the side they evaluate: refine
+    // the guarded sub-expression instead of checking it under the entry state.
+    if (ncc_xform_nt_name_is(node, "conditional_expression") && nc >= 5) {
+        // cond ? then : else
+        ncc_parse_tree_t *c = ncc_tree_child(node, 0);
+        check_derefs(ck, c);
+        bool  tnn = false;
+        char *v   = cond_var(c, &tnn);
+        check_derefs_refined(ck, ncc_tree_child(node, 2), v, tnn);
+        check_derefs_refined(ck, ncc_tree_child(node, 4), v, !tnn);
+        if (v) {
+            ncc_free(v);
+        }
+        return;
+    }
+    if (ncc_xform_nt_name_is(node, "logical_AND_expression") && nc >= 3) {
+        // A && B — B is evaluated only when A is true.
+        ncc_parse_tree_t *a = ncc_tree_child(node, 0);
+        check_derefs(ck, a);
+        bool  tnn = false;
+        char *v   = cond_var(a, &tnn);
+        check_derefs_refined(ck, ncc_tree_child(node, 2), v, tnn);
+        if (v) {
+            ncc_free(v);
+        }
+        return;
+    }
+    if (ncc_xform_nt_name_is(node, "logical_OR_expression") && nc >= 3) {
+        // A || B — B is evaluated only when A is false.
+        ncc_parse_tree_t *a = ncc_tree_child(node, 0);
+        check_derefs(ck, a);
+        bool  tnn = false;
+        char *v   = cond_var(a, &tnn);
+        check_derefs_refined(ck, ncc_tree_child(node, 2), v, !tnn);
+        if (v) {
+            ncc_free(v);
+        }
+        return;
+    }
 
     if (ncc_xform_nt_name_is(node, "unary_expression") && nc >= 2) {
         // <unary_operator> <cast_expression> — the `*` deref.
@@ -508,6 +637,32 @@ set_nonnull(ncheck_t *ck, const char *name, bool nn)
     if (ix >= 0) {
         ck->state->nonnull[ix] = nn;
     }
+}
+
+// If expression `e` reduces to a call of a known `?`-returning function, return
+// that callee's name (caller frees); otherwise nullptr.
+static char *
+nullable_call_name(ncheck_t *ck, ncc_parse_tree_t *e)
+{
+    ncc_parse_tree_t *u = unwrap_single(e);
+    if (!u || !ncc_xform_nt_name_is(u, "postfix_expression")
+        || ncc_tree_num_children(u) < 2) {
+        return nullptr;
+    }
+    ncc_parse_tree_t *opn = ncc_tree_child(u, 1);
+    if (!opn || !ncc_tree_is_leaf(opn) || !ncc_xform_leaf_text_eq(opn, "(")) {
+        return nullptr;
+    }
+    char *callee = expr_ident(ncc_tree_child(u, 0));
+    if (!callee) {
+        return nullptr;
+    }
+    const nsig_t *sig = sig_lookup(ck->sigs, callee);
+    if (sig && sig->ret_nullable) {
+        return callee;
+    }
+    ncc_free(callee);
+    return nullptr;
 }
 
 // Apply a top-level `x = e;` assignment effect: x becomes NONNULL only if e is
@@ -574,22 +729,54 @@ apply_assignment(ncheck_t *ck, ncc_parse_tree_t *node)
                 // Otherwise: an explicit null constant is nullable; everything
                 // else (address-of, string, unknown call, ...) is treated as
                 // non-null. Erring toward non-null avoids false positives.
-                ncc_string_t rt      = ncc_xform_node_to_text(rhs);
-                bool         is_null = false;
-                if (rt.data) {
-                    const char *r = rt.data;
-                    while (*r == ' ') {
-                        r++;
-                    }
-                    is_null = strcmp(r, "0") == 0 || strcmp(r, "nullptr") == 0;
-                    ncc_free(rt.data);
-                }
-                nn = !is_null;
+                nn = !expr_is_null_constant(rhs);
             }
         }
         set_nonnull(ck, lhs, nn);
     }
+    else {
+        // The target isn't a `?` variable, so its nullability is no longer
+        // tracked. If the RHS is a `?`-returning call, that nullability is
+        // being silently discarded — warn.
+        char *callee = nullable_call_name(ck, ncc_tree_child(node, 2));
+        if (callee) {
+            warn_bind(ck, node, callee, lhs);
+            ncc_free(callee);
+        }
+    }
     ncc_free(lhs);
+}
+
+// In a declaration, warn for any non-`?` declared variable that is initialized
+// from a `?`-returning call: `int *y = mk();` where `mk` returns `?T` silently
+// drops the nullability. Declaring `y` as `?` suppresses the warning.
+static void
+check_decl_binds(ncheck_t *ck, ncc_parse_tree_t *n)
+{
+    if (!n || ncc_tree_is_leaf(n)) {
+        return;
+    }
+    if (ncc_xform_nt_name_is(n, "init_declarator")) {
+        ncc_parse_tree_t *init = ncc_xform_find_child_nt(n, "initializer");
+        if (init) {
+            char *callee = nullable_call_name(ck, init);
+            if (callee) {
+                char *name = ncc_layout_declarator_name(n);
+                if (name && nv_index(ck->vars, name) < 0) {
+                    warn_bind(ck, init, callee, name);
+                }
+                if (name) {
+                    ncc_free(name);
+                }
+                ncc_free(callee);
+            }
+        }
+        return; // don't descend into a nested function-pointer init_declarator
+    }
+    size_t nc = ncc_tree_num_children(n);
+    for (size_t i = 0; i < nc; i++) {
+        check_decl_binds(ck, ncc_tree_child(n, i));
+    }
 }
 
 // Find a top-level assignment_expression in an expression statement subtree.
@@ -668,6 +855,38 @@ cond_var(ncc_parse_tree_t *cond, bool *true_means_nonnull)
                 return v;
             }
         }
+    }
+    // `x != NULL` / `x == NULL` (operands in either order).
+    if (ncc_xform_nt_name_is(cond, "equality_expression")
+        && ncc_tree_num_children(cond) >= 3) {
+        ncc_parse_tree_t *l   = ncc_tree_child(cond, 0);
+        ncc_parse_tree_t *opn = ncc_tree_child(cond, 1);
+        ncc_parse_tree_t *r   = ncc_tree_child(cond, 2);
+        ncc_string_t      ot  = ncc_xform_node_to_text(opn);
+        bool              is_ne = ot.data && strcmp(ot.data, "!=") == 0;
+        bool              is_eq = ot.data && strcmp(ot.data, "==") == 0;
+        if (ot.data) {
+            ncc_free(ot.data);
+        }
+        if (is_ne || is_eq) {
+            char *v = nullptr;
+            if (expr_is_null_constant(r)) {
+                v = expr_ident(l);
+            }
+            else if (expr_is_null_constant(l)) {
+                v = expr_ident(r);
+            }
+            if (v) {
+                *true_means_nonnull = is_ne; // x != NULL true => x nonnull
+                return v;
+            }
+        }
+    }
+    // `x && ...`: in the true (then) sense the leftmost conjunct holds. `||`
+    // gives no such guarantee in its true sense, so it is left unrefined.
+    if (ncc_xform_nt_name_is(cond, "logical_AND_expression")
+        && ncc_tree_num_children(cond) >= 3) {
+        return cond_var(ncc_tree_child(cond, 0), true_means_nonnull);
     }
     char *v = expr_ident(cond);
     if (v) {
@@ -929,6 +1148,9 @@ analyze_stmt(ncheck_t *ck, ncc_parse_tree_t *node)
     if (ncc_xform_nt_name_is(node, "expression_statement")
         || ncc_xform_nt_name_is(node, "declaration")) {
         check_derefs(ck, node);
+        if (ncc_xform_nt_name_is(node, "declaration")) {
+            check_decl_binds(ck, node);
+        }
         ncc_parse_tree_t *a = find_assignment(node);
         if (a) {
             apply_assignment(ck, a);
@@ -964,6 +1186,30 @@ analyze_stmt(ncheck_t *ck, ncc_parse_tree_t *node)
 // Per-function driver
 // ---------------------------------------------------------------------------
 
+// A function with no `?` variables needs no flow analysis (nothing to track for
+// deref warnings), but it can still bind a `?`-returning call to one of its
+// (necessarily non-`?`) variables, dropping the nullability — so run only the
+// bind check (#3). No flow state is consulted: with an empty tracked set every
+// `?`-call result binds to a non-`?` target.
+static void
+scan_binds_only(ncheck_t *ck, ncc_parse_tree_t *n)
+{
+    if (!n || ncc_tree_is_leaf(n)) {
+        return;
+    }
+    if (ncc_xform_nt_name_is(n, "declaration")) {
+        check_decl_binds(ck, n);
+    }
+    else if (ncc_xform_nt_name_is(n, "assignment_expression")
+             && ncc_tree_num_children(n) >= 3) {
+        apply_assignment(ck, n);
+    }
+    size_t nc = ncc_tree_num_children(n);
+    for (size_t i = 0; i < nc; i++) {
+        scan_binds_only(ck, ncc_tree_child(n, i));
+    }
+}
+
 static int
 analyze_function(ncc_parse_tree_t *func, nsigtab_t *sigs)
 {
@@ -979,8 +1225,17 @@ analyze_function(ncc_parse_tree_t *func, nsigtab_t *sigs)
     // call may still pass a non-tracked value — no, only tracked (nullable)
     // values can taint, so an empty tracked set means no possible warning.
     if (vars.count == 0) {
+        int result = 0;
+        if (comp) {
+            nstate_t state = ns_new(&vars); // empty
+            ncheck_t ck    = {
+                   .vars = &vars, .state = &state, .sigs = sigs, .warnings = 0};
+            scan_binds_only(&ck, comp);
+            result = ck.warnings;
+            ns_free(&state);
+        }
         ncc_free(vars.names);
-        return 0;
+        return result;
     }
 
     int result = 0;

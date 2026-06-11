@@ -1351,6 +1351,45 @@ test('ncc_nullable_interproc', test_runner,
   depends : ncc_exe,
 )
 
+test('ncc_nullable_paren', test_runner,
+  args : [ncc_exe, 'preprocess_stderr_contains',
+          test_dir / 'test_nullable_paren.c',
+          'possible null dereference of nullable \'p\'',
+          '?']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_nullable_nullmacro', test_runner,
+  args : [ncc_exe, 'preprocess_stderr_contains',
+          test_dir / 'test_nullable_nullmacro.c',
+          'possible null dereference of nullable \'p\'',
+          '?']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_nullable_bind', test_runner,
+  args : [ncc_exe, 'preprocess_stderr_contains',
+          test_dir / 'test_nullable_bind.c',
+          'nullable result of \'mk()\' assigned to non-nullable',
+          '?']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_nullable_guards', test_runner,
+  args : [ncc_exe, 'preprocess_stderr_omits',
+          test_dir / 'test_nullable_guards.c',
+          'null dereference']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 test('ncc_auto_gc_roots_incomplete_struct_warn', test_runner,
   args : [ncc_exe, 'preprocess_stderr_contains',
           test_dir / 'err_auto_gc_roots_incomplete_struct.c',
