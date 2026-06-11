@@ -28,6 +28,28 @@ record_value(int *out, int value)
     *out = value;
 }
 
+// old(E) captures the entry value of E. `*out` here appears twice, exercising
+// capture dedup (a single entry temp).
+static void
+increment_pointee(int *out)
+    requires { out != nullptr; }
+    ensures { *out == old(*out) + 1; *out > old(*out); }
+{
+    *out = *out + 1;
+}
+
+// The canonical old() case: each result is stated in terms of the OTHER's
+// entry value, which is unstateable without capturing pre-state.
+static void
+swap_ints(int *a, int *b)
+    requires { a != nullptr; b != nullptr; }
+    ensures { *a == old(*b); *b == old(*a); }
+{
+    int t = *a;
+    *a    = *b;
+    *b    = t;
+}
+
 static int
 with_keyword_bias(int x)
     _kargs { int bias = 2; }
@@ -265,6 +287,19 @@ main(void)
     }
     if (statement_keyword_default_counter != 0) {
         return 22;
+    }
+
+    int pointee = 10;
+    increment_pointee(&pointee);
+    if (pointee != 11) {
+        return 23;
+    }
+
+    int lhs = 3;
+    int rhs = 7;
+    swap_ints(&lhs, &rhs);
+    if (lhs != 7 || rhs != 3) {
+        return 24;
     }
 
     return 0;

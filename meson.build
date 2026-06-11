@@ -1925,6 +1925,10 @@ ncc_error_contains_tests = {
     test_dir / 'err_function_contract_call.c',
     'function calls are not allowed in function contracts',
   ],
+  'err_function_contract_old_requires': [
+    test_dir / 'err_function_contract_old_requires.c',
+    'old(...) is not allowed in a \'requires\' clause',
+  ],
   'err_function_contract_return': [
     test_dir / 'err_function_contract_return.c',
     'return is not allowed in function contracts',
