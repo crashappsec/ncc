@@ -10,6 +10,8 @@
 #   preprocess_not_contains — run with -E, expect output to omit substring
 #   preprocess_stderr_contains — run with -E, expect exit 0 AND stderr substring
 #                                 AND a second substring absent from stdout
+#   preprocess_stderr_omits — run with -E, expect exit 0 AND stderr to omit
+#                              a substring (a safe pattern must not warn)
 #   no_ncc       — compile with --no-ncc, run the binary, expect exit 0
 #   expect_error — compile, expect non-zero exit
 #   expect_error_contains — compile, expect non-zero exit and stderr substring
@@ -132,6 +134,27 @@ case "$MODE" in
             echo "FAIL: stdout contained text that should have been skipped:" \
                  "$UNEXPECTED_STDOUT" >&2
             cat "$OUTBIN.stdout" >&2
+            exit 1
+        fi
+        ;;
+
+    preprocess_stderr_omits)
+        # Run with -E; expect exit 0 (enforced by `set -e`) AND a specific
+        # substring ABSENT from stderr — for safe patterns that must NOT
+        # produce a diagnostic (e.g. a properly-guarded nullable deref).
+        UNEXPECTED_STDERR="$1"
+        shift || true
+        if [ -z "$UNEXPECTED_STDERR" ]; then
+            echo "FAIL: preprocess_stderr_omits needs <stderr-omit-substring>" \
+                 >&2
+            exit 1
+        fi
+        "$NCC" "$@" -E "$SRC" \
+            > "$OUTBIN.stdout" 2> "$OUTBIN.stderr"
+        if grep -F -q "$UNEXPECTED_STDERR" "$OUTBIN.stderr"; then
+            echo "FAIL: stderr contained text that should be absent:" \
+                 "$UNEXPECTED_STDERR" >&2
+            cat "$OUTBIN.stderr" >&2
             exit 1
         fi
         ;;

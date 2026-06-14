@@ -192,6 +192,9 @@ src_xform = files(
   'src/xform/xform_constexpr_paste.c',
   'src/xform/xform_contracts.c',
   'src/xform/xform_defer.c',
+  'src/xform/xform_try.c',
+  'src/xform/xform_nullable.c',
+  'src/xform/nullability.c',
   'src/xform/xform_generic_struct.c',
   'src/xform/xform_gc_globals.c',
   'src/xform/xform_gc_stack_maps.c',
@@ -411,8 +414,14 @@ ncc_compile_tests = {
   'kargs_many_metadata': ['compile_run',
                           test_dir / 'test_kargs_many_metadata.c'],
   'defer': ['compile_run', test_dir / 'test_defer.c'],
+  'try': ['compile_run', test_dir / 'test_try.c'],
+  'try_static_typedef': ['compile_run',
+                         test_dir / 'test_try_static_typedef.c'],
+  'nullable_syntax': ['compile_run', test_dir / 'test_nullable_syntax.c'],
   'function_contracts': ['compile_run',
                          test_dir / 'test_function_contracts.c'],
+  'static_typedef_return': ['compile_run',
+                            test_dir / 'test_static_typedef_return.c'],
   'function_contracts_parse': ['preprocess',
                                test_dir / 'test_function_contracts_parse.c'],
   'function_contract_keyword_collision': ['compile_run',
@@ -1324,6 +1333,65 @@ test('ncc_auto_gc_roots_nomap_attribute_stripped', test_runner,
 # Uses the new `preprocess_stderr_contains` runner mode (added in
 # this dispatch) because none of the existing modes covers
 # "exit 0 + stderr substring + stdout omits substring".
+test('ncc_nullable_warn', test_runner,
+  args : [ncc_exe, 'preprocess_stderr_contains',
+          test_dir / 'test_nullable_warn.c',
+          'possible null dereference of nullable \'p\'',
+          '?']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_nullable_interproc', test_runner,
+  args : [ncc_exe, 'preprocess_stderr_contains',
+          test_dir / 'test_nullable_interproc.c',
+          'to non-nullable parameter 1 of \'need\'',
+          '?']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_nullable_paren', test_runner,
+  args : [ncc_exe, 'preprocess_stderr_contains',
+          test_dir / 'test_nullable_paren.c',
+          'possible null dereference of nullable \'p\'',
+          '?']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_nullable_nullmacro', test_runner,
+  args : [ncc_exe, 'preprocess_stderr_contains',
+          test_dir / 'test_nullable_nullmacro.c',
+          'possible null dereference of nullable \'p\'',
+          '?']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_nullable_bind', test_runner,
+  args : [ncc_exe, 'preprocess_stderr_contains',
+          test_dir / 'test_nullable_bind.c',
+          'nullable result of \'mk()\' assigned to non-nullable',
+          '?']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_nullable_guards', test_runner,
+  args : [ncc_exe, 'preprocess_stderr_omits',
+          test_dir / 'test_nullable_guards.c',
+          'null dereference']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 test('ncc_auto_gc_roots_incomplete_struct_warn', test_runner,
   args : [ncc_exe, 'preprocess_stderr_contains',
           test_dir / 'err_auto_gc_roots_incomplete_struct.c',
@@ -1938,6 +2006,10 @@ ncc_error_contains_tests = {
   'err_defer_escape': [
     test_dir / 'err_defer_escape.c',
     'control transfer (return/break/continue/goto) inside a _defer body',
+  ],
+  'err_try_outside_function': [
+    test_dir / 'err_try_outside_function.c',
+    '_try is only valid inside a function',
   ],
   'err_function_contract_return': [
     test_dir / 'err_function_contract_return.c',

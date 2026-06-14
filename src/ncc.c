@@ -38,6 +38,7 @@
 #include "parse/typedef_walk.h"
 #include "parse/symbol_populate.h"
 #include "parse/type_infer.h"
+#include "parse/nullability.h"
 #include "parse/c_tokenizer.h"
 #include "parse/emit.h"
 #include "xform/xform_gc_typemap.h"
@@ -73,6 +74,8 @@ extern void ncc_register_constexpr_paste_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_kargs_vargs_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_contracts_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_defer_xform(ncc_xform_registry_t *reg);
+extern void ncc_register_try_xform(ncc_xform_registry_t *reg);
+extern void ncc_register_nullable_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_option_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_array_literal_xform(ncc_xform_registry_t *reg);
 #include "scanner/scan_builtins.h"
@@ -2013,6 +2016,14 @@ compile_file(ncc_opts_t *opts)
     // kargs_vargs produce; running after any of those would see the
     // already-mangled signatures.
     ncc_register_rpc_xform(&xreg);
+    // _try lowers result-error propagation into a statement expression with an
+    // early return. Runs before generic_struct/typeid/defer/gc so the emitted
+    // result type, return, and any type-queries in the operand flow through.
+    ncc_register_try_xform(&xreg);
+    // Strip `?` nullable qualifiers before any type-inspecting pass; the
+    // nullability info is read from the symbol table (built earlier) by the
+    // null-state analysis.
+    ncc_register_nullable_xform(&xreg);
     ncc_register_generic_struct_xform(&xreg);
     // _defer lowers a function body's defers into source at each scope exit.
     // Runs early so the relocated bodies still flow through the type-query,
@@ -2265,6 +2276,11 @@ compile_file(ncc_opts_t *opts)
     // Build the scoped symbol table for the type model. Runs after the typedef
     // reclassification walk so declarator names are settled.
     xdata.symtab = ncc_populate_symbols(g, tree);
+
+    // Flow-sensitive null-state analysis: must run before transforms strip the
+    // `?` nullable markers from the tree.
+    ncc_nullability_check(g, tree, xdata.symtab);
+
     xctx.user_data = &xdata;
     ncc_verbose("applying transforms");
     tree = ncc_xform_apply(&xreg, &xctx);
