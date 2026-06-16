@@ -1016,6 +1016,55 @@ make_group_node(const char *name, int32_t start, int32_t end)
     return ncc_tree_node(ncc_nt_node_t, ncc_token_info_ptr_t, pn);
 }
 
+static bool
+same_group_node(ncc_parse_tree_t *a, ncc_parse_tree_t *b)
+{
+    if (!a || !b || ncc_tree_is_leaf(a) || ncc_tree_is_leaf(b)) {
+        return false;
+    }
+
+    ncc_nt_node_t an = ncc_tree_node_value(a);
+    ncc_nt_node_t bn = ncc_tree_node_value(b);
+
+    if (!an.group_top || !bn.group_top) {
+        return false;
+    }
+
+    if (an.name.u8_bytes != bn.name.u8_bytes) {
+        return false;
+    }
+
+    if (an.name.u8_bytes == 0) {
+        return true;
+    }
+
+    return an.name.data && bn.name.data
+        && memcmp(an.name.data, bn.name.data,
+                  (size_t)an.name.u8_bytes) == 0;
+}
+
+static void
+add_child_flattening_same_group(ncc_parse_tree_t *parent,
+                                ncc_parse_tree_t *child)
+{
+    if (!parent || !child) {
+        return;
+    }
+
+    if (same_group_node(parent, child)) {
+        size_t nch = ncc_tree_num_children(child);
+
+        for (size_t i = 0; i < nch; i++) {
+            (void)ncc_tree_add_child(parent, ncc_tree_child(child, i));
+        }
+
+        ncc_tree_free_node(child);
+        return;
+    }
+
+    (void)ncc_tree_add_child(parent, child);
+}
+
 // ============================================================================
 // Result exp -> parse tree conversion
 // ============================================================================
@@ -1207,7 +1256,7 @@ convert_exp_to_tree(ncc_pwz_parser_t *p, pwz_exp_t *exp,
         size_t nch = ncc_list_len(children);
 
         for (size_t i = 0; i < nch; i++) {
-            (void)ncc_tree_add_child(tree, children.data[i]);
+            add_child_flattening_same_group(tree, children.data[i]);
         }
 
         ncc_list_free(children);

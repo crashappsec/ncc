@@ -205,6 +205,16 @@ test_msvc_extensions_parse(void)
                 "__declspec", "__forceinline", nullptr,
             },
         },
+        {
+            .name = "msvc pointer qualifiers parse",
+            .source =
+                "typedef void * __ptr64 HANDLE64;\n"
+                "void *Ptr32ToPtr(const void * __ptr32 p);\n"
+                "int main(void) { return 0; }\n",
+            .expected_tokens = {
+                "__ptr64", "__ptr32", nullptr,
+            },
+        },
     };
 
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {

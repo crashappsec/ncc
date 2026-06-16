@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 #ifdef _WIN32
 #if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600
@@ -483,17 +484,18 @@ char *
 ncc_platform_temp_dir_create(const char *prefix)
 {
     wchar_t temp_root[MAX_PATH + 1];
+    DWORD   root_cap = (DWORD)(sizeof(temp_root) / sizeof(*temp_root));
 
-    DWORD root_len = GetTempPathW(MAX_PATH, temp_root);
-    if (root_len == 0 || root_len > MAX_PATH) {
+    DWORD root_len = GetTempPathW(root_cap, temp_root);
+    if (root_len == 0 || root_len >= root_cap) {
         return nullptr;
     }
 
-    char prefix_buf[4] = "ncc";
+    char prefix_buf[32] = "ncc";
     if (prefix && prefix[0]) {
         size_t len = 0;
         for (const char *p = prefix; *p && len < sizeof(prefix_buf) - 1; p++) {
-            if (isalnum((unsigned char)*p)) {
+            if (isalnum((unsigned char)*p) || *p == '_') {
                 prefix_buf[len++] = *p;
             }
         }
@@ -503,24 +505,47 @@ ncc_platform_temp_dir_create(const char *prefix)
         }
     }
 
-    wchar_t wprefix[4];
+    wchar_t wprefix[32];
     int prefix_len = MultiByteToWideChar(CP_UTF8, 0, prefix_buf, -1,
                                          wprefix, (int)(sizeof(wprefix) / sizeof(*wprefix)));
     if (prefix_len <= 0) {
         return nullptr;
     }
 
-    wchar_t temp_file[MAX_PATH + 1];
-    if (!GetTempFileNameW(temp_root, wprefix, 0, temp_file)) {
-        return nullptr;
+    static volatile LONG temp_counter = 0;
+    DWORD                pid          = GetCurrentProcessId();
+    ULONGLONG            ticks        = GetTickCount64();
+
+    for (int attempt = 0; attempt < 128; attempt++) {
+        LONG seq = InterlockedIncrement(&temp_counter);
+        wchar_t temp_dir[MAX_PATH + 1];
+        int written = swprintf(temp_dir,
+                               sizeof(temp_dir) / sizeof(*temp_dir),
+                               L"%ls%ls%lu_%llx_%ld",
+                               temp_root,
+                               wprefix,
+                               (unsigned long)pid,
+                               (unsigned long long)ticks,
+                               (long)(seq + attempt));
+        if (written <= 0
+            || written >= (int)(sizeof(temp_dir) / sizeof(*temp_dir))) {
+            return nullptr;
+        }
+
+        if (CreateDirectoryW(temp_dir, nullptr)) {
+            char *result = utf16_to_utf8(temp_dir);
+            if (!result) {
+                RemoveDirectoryW(temp_dir);
+            }
+            return result;
+        }
+
+        if (GetLastError() != ERROR_ALREADY_EXISTS) {
+            return nullptr;
+        }
     }
 
-    DeleteFileW(temp_file);
-    if (!CreateDirectoryW(temp_file, nullptr)) {
-        return nullptr;
-    }
-
-    return utf16_to_utf8(temp_file);
+    return nullptr;
 }
 
 bool
