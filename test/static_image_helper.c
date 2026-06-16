@@ -4,6 +4,20 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32) && defined(_MSC_VER)
+static char *
+ncc_strtok_r(char *str, const char *delim, char **saveptr)
+{
+    return strtok_s(str, delim, saveptr);
+}
+#else
+static char *
+ncc_strtok_r(char *str, const char *delim, char **saveptr)
+{
+    return strtok_r(str, delim, saveptr);
+}
+#endif
+
 typedef struct {
     char    *key_expr;
     char    *value_expr;
@@ -136,9 +150,9 @@ static int
 parse_request(char *input, request_t *req)
 {
     char *save = NULL;
-    for (char *line = strtok_r(input, "\n", &save);
+    for (char *line = ncc_strtok_r(input, "\n", &save);
          line;
-         line = strtok_r(NULL, "\n", &save)) {
+         line = ncc_strtok_r(NULL, "\n", &save)) {
         if (strncmp(line, "type_hex ", 9) == 0) {
             req->type = hex_decode_string(line + 9);
         }

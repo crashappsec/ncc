@@ -122,6 +122,8 @@
     | %"__nonnull"
     | %"__null_unspecified"
     | %"__nullable"
+    | %"__ptr32"
+    | %"__ptr64"
     | %"__restrict__"
     | %"__restrict"
     | %"__signed__"
@@ -740,6 +742,8 @@
     | %"__nullable"
     | %"__nonnull"
     | %"__null_unspecified"
+    | %"__ptr32"
+    | %"__ptr64"
 
 <type_qualifier_list> ::= <_kw_kw_type_qualifier>+
 

@@ -265,7 +265,14 @@ ncc_exe = executable('ncc',
 
 # ── Smoke tests ──────────────────────────────────────────────────────────────
 
-test_runner = find_program('test/run_test.sh')
+if host_machine.system() == 'windows'
+  python = import('python').find_installation()
+  test_runner = python
+  test_runner_args = [meson.current_source_dir() / 'test' / 'run_test.py']
+else
+  test_runner = find_program('test/run_test.sh')
+  test_runner_args = []
+endif
 test_dir    = meson.current_source_dir() / 'test'
 
 static_image_helper = executable('test_static_image_helper',
@@ -464,15 +471,26 @@ foreach name, params : ncc_compile_tests
   # reason — these fixtures don't link libn00b and therefore do not
   # provide the n00b GC root section types. Opt out per-test.
   test('ncc_' + name, test_runner,
-    args : [ncc_exe, params[0], params[1]] + ncc_test_flags + extra_args
+    args : test_runner_args + [ncc_exe, params[0], params[1]] + ncc_test_flags + extra_args
            + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
     suite : 'ncc',
     depends : test_deps,
   )
 endforeach
 
+if host_machine.system() == 'windows'
+  test('ncc_windows_sdk_winsock_headers', test_runner,
+    args : test_runner_args + [ncc_exe, 'compile_only',
+            test_dir / 'test_windows_sdk_winsock.c']
+           + ncc_test_flags
+           + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+    suite : 'ncc',
+    depends : ncc_exe,
+  )
+endif
+
 test('ncc_function_contracts_helper_shape', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_function_contracts_wrapper_shape.c',
           'static int __ncc_cw_shaped_body']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps',
@@ -482,7 +500,7 @@ test('ncc_function_contracts_helper_shape', test_runner,
 )
 
 test('ncc_function_contracts_result_return', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_function_contracts_wrapper_shape.c',
           'return result']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps',
@@ -492,7 +510,7 @@ test('ncc_function_contracts_result_return', test_runner,
 )
 
 test('ncc_function_contracts_debug_gate', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_function_contracts_wrapper_shape.c',
           '#ifndef NDEBUG']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps',
@@ -502,7 +520,7 @@ test('ncc_function_contracts_debug_gate', test_runner,
 )
 
 test('ncc_function_contracts_trap', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_function_contracts_wrapper_shape.c',
           '__builtin_trap']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps',
@@ -512,7 +530,7 @@ test('ncc_function_contracts_trap', test_runner,
 )
 
 test('ncc_function_contracts_later_requires_lowered', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_function_contracts_wrapper_shape.c',
           'x < 1000']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps',
@@ -522,7 +540,7 @@ test('ncc_function_contracts_later_requires_lowered', test_runner,
 )
 
 test('ncc_function_contracts_later_ensures_lowered', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_function_contracts_wrapper_shape.c',
           'result < 1000']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps',
@@ -532,7 +550,7 @@ test('ncc_function_contracts_later_ensures_lowered', test_runner,
 )
 
 test('ncc_function_contracts_requires_removed', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_function_contracts_wrapper_shape.c',
           'requires']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps',
@@ -542,7 +560,7 @@ test('ncc_function_contracts_requires_removed', test_runner,
 )
 
 test('ncc_function_contracts_ensures_removed', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_function_contracts_wrapper_shape.c',
           'ensures']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps',
@@ -552,7 +570,7 @@ test('ncc_function_contracts_ensures_removed', test_runner,
 )
 
 test('ncc_function_contracts_kargs_requires_removed', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_function_contracts.c',
           'requires']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps',
@@ -562,7 +580,7 @@ test('ncc_function_contracts_kargs_requires_removed', test_runner,
 )
 
 test('ncc_function_contracts_kargs_ensures_removed', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_function_contracts.c',
           'ensures']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps',
@@ -572,7 +590,7 @@ test('ncc_function_contracts_kargs_ensures_removed', test_runner,
 )
 
 test('ncc_function_contracts_fnptr_arg_forwarding', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_function_contracts_wrapper_shape.c',
           '__ncc_cw_apply_fn_body (fn, x)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps',
@@ -582,7 +600,7 @@ test('ncc_function_contracts_fnptr_arg_forwarding', test_runner,
 )
 
 test('ncc_function_contracts_array_arg_forwarding', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_function_contracts_wrapper_shape.c',
           '__ncc_cw_first_value_body (values)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps',
@@ -592,7 +610,7 @@ test('ncc_function_contracts_array_arg_forwarding', test_runner,
 )
 
 test('ncc_function_contracts_support_statements_preserved', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_function_contracts_wrapper_shape.c',
           'support_shadow = x + 1']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps',
@@ -602,7 +620,7 @@ test('ncc_function_contracts_support_statements_preserved', test_runner,
 )
 
 test('ncc_function_contracts_kargs_helper_uses_local', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_function_contracts_wrapper_shape.c',
           '__ncc_cw_shaped_kargs_body (x, bias)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps',
@@ -612,7 +630,7 @@ test('ncc_function_contracts_kargs_helper_uses_local', test_runner,
 )
 
 test('ncc_function_contracts_extension_helper_shape', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_function_contracts_wrapper_shape.c',
           'static int __ncc_cw_extension_contract_body']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps',
@@ -622,7 +640,7 @@ test('ncc_function_contracts_extension_helper_shape', test_runner,
 )
 
 test('ncc_function_contracts_release_kargs_statement_default', test_runner,
-  args : [ncc_exe, 'compile_run',
+  args : test_runner_args + [ncc_exe, 'compile_run',
           test_dir / 'test_function_contracts.c']
          + ncc_test_flags + ['-DNDEBUG', '--ncc-no-gc-stack-maps',
                              '--ncc-no-auto-gc-roots'],
@@ -631,7 +649,7 @@ test('ncc_function_contracts_release_kargs_statement_default', test_runner,
 )
 
 test('ncc_static_object_descriptors', test_runner,
-  args : [ncc_exe, 'compile_run',
+  args : test_runner_args + [ncc_exe, 'compile_run',
           test_dir / 'test_static_object_descriptors.c']
          + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags
          + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -640,7 +658,7 @@ test('ncc_static_object_descriptors', test_runner,
 )
 
 test('ncc_static_object_descriptors_array_desc', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
           'n00b_static_object_desc_t __ncc_arraylit_']
          + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
@@ -649,7 +667,7 @@ test('ncc_static_object_descriptors_array_desc', test_runner,
 )
 
 test('ncc_static_object_descriptors_rstr_desc', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
           'n00b_static_object_desc_t _ncc_rsd_']
          + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
@@ -658,7 +676,7 @@ test('ncc_static_object_descriptors_rstr_desc', test_runner,
 )
 
 test('ncc_static_object_descriptors_pointer_scan', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
           '.scan_kind = 2']
          + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
@@ -667,7 +685,7 @@ test('ncc_static_object_descriptors_pointer_scan', test_runner,
 )
 
 test('ncc_static_object_descriptors_nested_scan', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
           'n00b_gc_scan_cb_struct_field']
          + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
@@ -676,7 +694,7 @@ test('ncc_static_object_descriptors_nested_scan', test_runner,
 )
 
 test('ncc_static_object_descriptors_sparse_scan', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
           'n00b_gc_scan_cb_struct_layout']
          + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
@@ -685,7 +703,7 @@ test('ncc_static_object_descriptors_sparse_scan', test_runner,
 )
 
 test('ncc_static_object_descriptors_sparse_offset', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
           '__builtin_offsetof (descriptor_sparse_item_t, left)']
          + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
@@ -694,7 +712,7 @@ test('ncc_static_object_descriptors_sparse_offset', test_runner,
 )
 
 test('ncc_static_object_descriptors_entry_attr', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
           '__attribute__ ((used))']
          + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
@@ -703,7 +721,7 @@ test('ncc_static_object_descriptors_entry_attr', test_runner,
 )
 
 test('ncc_static_image_response_contract', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_image.c',
           'n00b_static_image_response_t __ncc_static_image_']
          + ncc_test_flags + static_image_helper_flags,
@@ -712,7 +730,7 @@ test('ncc_static_image_response_contract', test_runner,
 )
 
 test('ncc_static_image_dependency_contract', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_image.c',
           '.dependency_count = 1']
          + ncc_test_flags + static_image_helper_flags,
@@ -721,7 +739,7 @@ test('ncc_static_image_dependency_contract', test_runner,
 )
 
 test('ncc_gc_typemap_direct_pointer_offset', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap.c',
           '__builtin_offsetof(gcmap_direct_fn_t,payload)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -730,7 +748,7 @@ test('ncc_gc_typemap_direct_pointer_offset', test_runner,
 )
 
 test('ncc_gc_typemap_direct_function_pointer_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_typemap.c',
           '__builtin_offsetof(gcmap_direct_fn_t,callback)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -739,7 +757,7 @@ test('ncc_gc_typemap_direct_function_pointer_skipped', test_runner,
 )
 
 test('ncc_gc_typemap_typedef_pointer_offset', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap.c',
           '__builtin_offsetof(gcmap_typedef_fn_t,payload)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -748,7 +766,7 @@ test('ncc_gc_typemap_typedef_pointer_offset', test_runner,
 )
 
 test('ncc_gc_typemap_typedef_function_pointer_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_typemap.c',
           '__builtin_offsetof(gcmap_typedef_fn_t,callback)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -757,7 +775,7 @@ test('ncc_gc_typemap_typedef_function_pointer_skipped', test_runner,
 )
 
 test('ncc_gc_typemap_user_scan_user_scanned', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap.c',
           '__builtin_offsetof(gcmap_user_scan_field_t,scan_user)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -766,7 +784,7 @@ test('ncc_gc_typemap_user_scan_user_scanned', test_runner,
 )
 
 test('ncc_gc_typemap_runtime_scan_user_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_typemap.c',
           '__builtin_offsetof(gcmap_runtime_shape_t,scan_user)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -775,7 +793,7 @@ test('ncc_gc_typemap_runtime_scan_user_skipped', test_runner,
 )
 
 test('ncc_gc_typemap_runtime_lock_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_typemap.c',
           '__builtin_offsetof(gcmap_runtime_shape_t,lock)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -784,7 +802,7 @@ test('ncc_gc_typemap_runtime_lock_skipped', test_runner,
 )
 
 test('ncc_gc_typemap_runtime_allocator_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_typemap.c',
           '__builtin_offsetof(gcmap_runtime_shape_t,allocator)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -793,7 +811,7 @@ test('ncc_gc_typemap_runtime_allocator_skipped', test_runner,
 )
 
 test('ncc_gc_typemap_runtime_payload_scanned', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap.c',
           '__builtin_offsetof(gcmap_runtime_shape_t,payload)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -802,7 +820,7 @@ test('ncc_gc_typemap_runtime_payload_scanned', test_runner,
 )
 
 test('ncc_gc_typemap_runtime_near_miss_scan_user_scanned', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap.c',
           '__builtin_offsetof(gcmap_runtime_near_miss_t,scan_user)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -856,7 +874,7 @@ test('ncc_gc_typemap_noscan_attribute_stripped', test_runner,
 )
 
 test('ncc_gc_typemap_static_assert_c23', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap.c',
           'static_assert((__builtin_offsetof(gcmap_direct_fn_t,payload)%sizeof(void*))==0']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -865,7 +883,7 @@ test('ncc_gc_typemap_static_assert_c23', test_runner,
 )
 
 test('ncc_gc_typemap_no_legacy_static_assert', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_typemap.c',
           '_Static_assert']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -874,7 +892,7 @@ test('ncc_gc_typemap_no_legacy_static_assert', test_runner,
 )
 
 test('ncc_gc_typemap_section_attr_c23', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap.c',
           '[[gnu::section("n00b_gcmap"), gnu::used]]']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -883,7 +901,7 @@ test('ncc_gc_typemap_section_attr_c23', test_runner,
 )
 
 test('ncc_gc_typemap_legacy_section_attr_rewritten_c23', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap.c',
           '[[gnu::section("__DATA,n00b_gcmap"), gnu::used]]']
          + ncc_test_flags
@@ -895,7 +913,7 @@ test('ncc_gc_typemap_legacy_section_attr_rewritten_c23', test_runner,
 )
 
 test('ncc_gc_typemap_legacy_section_attr_no_legacy_attribute', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_typemap.c',
           '__attribute__((section("__DATA,n00b_gcmap")']
          + ncc_test_flags
@@ -907,7 +925,7 @@ test('ncc_gc_typemap_legacy_section_attr_no_legacy_attribute', test_runner,
 )
 
 test('ncc_gc_typemap_gcidx_entry', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap.c',
           '__ncc_gcidx_ent_']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -916,7 +934,7 @@ test('ncc_gc_typemap_gcidx_entry', test_runner,
 )
 
 test('ncc_gc_typemap_pointer_array_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_typemap.c',
           'sizeof(gcmap_pointer_array_t)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -925,7 +943,7 @@ test('ncc_gc_typemap_pointer_array_skipped', test_runner,
 )
 
 test('ncc_gc_typemap_union_mixed_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_typemap.c',
           'sizeof(gcmap_union_mixed_t)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -939,7 +957,7 @@ test('ncc_gc_typemap_union_mixed_skipped', test_runner,
 
 # A pointer-bearing variant emits a variant descriptor (not a flat offset).
 test('ncc_gc_typemap_variant_descriptor_emitted', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap_variant.c',
           'n00b_gc_variant_field_t']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -949,7 +967,7 @@ test('ncc_gc_typemap_variant_descriptor_emitted', test_runner,
 
 # The descriptor records the selector and value word offsets.
 test('ncc_gc_typemap_variant_selector_offset', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap_variant.c',
           '__builtin_offsetof(vmap_variant_t,selector)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -958,7 +976,7 @@ test('ncc_gc_typemap_variant_selector_offset', test_runner,
 )
 
 test('ncc_gc_typemap_variant_value_offset', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap_variant.c',
           '__builtin_offsetof(vmap_variant_t,value)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -969,7 +987,7 @@ test('ncc_gc_typemap_variant_value_offset', test_runner,
 # An EMBEDDED variant field is described in-place: the selector/value offsets
 # are taken through the containing struct's field path.
 test('ncc_gc_typemap_variant_embedded', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap_variant.c',
           '__builtin_offsetof(vmap_holder_t,choice.selector)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -980,7 +998,7 @@ test('ncc_gc_typemap_variant_embedded', test_runner,
 # The containing struct still gets its ordinary (unconditional) pointer offsets
 # alongside the variant descriptor.
 test('ncc_gc_typemap_variant_embedded_flat_offset', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap_variant.c',
           '__builtin_offsetof(vmap_holder_t,head)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -991,7 +1009,7 @@ test('ncc_gc_typemap_variant_embedded_flat_offset', test_runner,
 # An all-scalar variant stays precise without a variant descriptor (its value
 # word is never a heap pointer) and must not be skipped.
 test('ncc_gc_typemap_variant_all_scalar_no_descriptor', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap_variant.c',
           'sizeof(vmap_scalar_variant_t)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -1003,7 +1021,7 @@ test('ncc_gc_typemap_variant_all_scalar_no_descriptor', test_runner,
 # type model and gets a precise variant descriptor, even though the legacy
 # aggregate table cannot resolve its typedef alias.
 test('ncc_gc_typemap_variant_generic_struct', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap_variant.c',
           '__builtin_offsetof(vmap_generic_variant_t,selector)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -1013,7 +1031,7 @@ test('ncc_gc_typemap_variant_generic_struct', test_runner,
 
 if host_machine.system() != 'windows' and cc.has_header('pthread.h')
   test('ncc_constexpr_pthread', test_runner,
-    args : [ncc_exe, 'compile_run', test_dir / 'test_constexpr_pthread.c']
+    args : test_runner_args + [ncc_exe, 'compile_run', test_dir / 'test_constexpr_pthread.c']
            + ncc_test_flags + ['--ncc-no-gc-stack-maps'],
     suite : 'ncc',
     depends : ncc_exe,
@@ -1022,14 +1040,14 @@ endif
 
 # rstr_ansi test links against libncc (ncc_string_to_ansi lives there).
 test('ncc_rstr_ansi', test_runner,
-  args : [ncc_exe, 'compile_run', test_dir / 'test_rstr_ansi.c']
+  args : test_runner_args + [ncc_exe, 'compile_run', test_dir / 'test_rstr_ansi.c']
          + ncc_test_flags + [libncc.full_path()] + ['--ncc-no-gc-stack-maps'],
   suite : 'ncc',
   depends : [ncc_exe, libncc],
 )
 
 test('ncc_gc_stack_maps_default_off', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_stack_maps_flag.c', 'n00b_gc_stack_']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps'],
   suite : 'ncc',
@@ -1043,7 +1061,7 @@ test('ncc_gc_stack_maps_default_off', test_runner,
 # on a function with an eligible stack-local pointer slot. Locks the
 # default-on behavior against future regressions.
 test('ncc_gc_stack_maps_default_on', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_stack_maps_default_on.c', 'n00b_gc_stack_']
          + ncc_test_flags,
   suite : 'ncc',
@@ -1051,7 +1069,7 @@ test('ncc_gc_stack_maps_default_on', test_runner,
 )
 
 test('ncc_gc_stack_maps_nogc_attribute_skips_function', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_stack_maps_nogc_attribute.c', 'n00b_gc_stack_']
          + ncc_test_flags,
   suite : 'ncc',
@@ -1059,7 +1077,7 @@ test('ncc_gc_stack_maps_nogc_attribute_skips_function', test_runner,
 )
 
 test('ncc_gc_stack_maps_nogc_attribute_stripped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_stack_maps_nogc_attribute.c', 'n00b::nogc']
          + ncc_test_flags,
   suite : 'ncc',
@@ -1075,7 +1093,7 @@ test('ncc_gc_stack_maps_nogc_attribute_stripped', test_runner,
 # on, so this test must explicitly pass --ncc-no-auto-gc-roots to
 # exercise the off path that the assertion pins.
 test('ncc_auto_gc_roots_flag_off_no_op', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_auto_gc_roots_flag_off_no_op.c',
           '__ncc_gc_root_table_']
          + ncc_test_flags + ['--ncc-no-auto-gc-roots'],
@@ -1090,7 +1108,7 @@ test('ncc_auto_gc_roots_flag_off_no_op', test_runner,
 # xform_gc_globals transform on a TU-scope pointer-bearing decl.
 # Locks the default-on behavior against future regressions.
 test('ncc_auto_gc_roots_default_on', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_default_on.c',
           '__ncc_gc_root_table_']
          + ncc_test_flags,
@@ -1105,7 +1123,7 @@ test('ncc_auto_gc_roots_default_on', test_runner,
 # descriptor. All use the same source so a missing emit fails every
 # check.
 test('ncc_auto_gc_roots_pointer_scalar_x', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_pointer_scalar.c',
           '(void *) & x']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1114,7 +1132,7 @@ test('ncc_auto_gc_roots_pointer_scalar_x', test_runner,
 )
 
 test('ncc_auto_gc_roots_pointer_scalar_y', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_pointer_scalar.c',
           '(void *) & y']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1123,7 +1141,7 @@ test('ncc_auto_gc_roots_pointer_scalar_y', test_runner,
 )
 
 test('ncc_auto_gc_roots_pointer_scalar_section_entry', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_pointer_scalar.c',
           '__ncc_gc_root_section_entry_']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1136,7 +1154,7 @@ test('ncc_auto_gc_roots_pointer_scalar_section_entry', test_runner,
 # alongside so the per-decl skip rule is exercised (not the
 # zero-qualifying-decls emit-nothing rule of spec § 4.3).
 test('ncc_auto_gc_roots_extern_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_auto_gc_roots_extern_skipped.c',
           '(void *) & extern_singleton']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1145,7 +1163,7 @@ test('ncc_auto_gc_roots_extern_skipped', test_runner,
 )
 
 test('ncc_auto_gc_roots_extern_skipped_local_registered', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_extern_skipped.c',
           '(void *) & local_root']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1156,7 +1174,7 @@ test('ncc_auto_gc_roots_extern_skipped_local_registered', test_runner,
 # WP-001 Phase 2: function pointers do NOT register
 # (spec § 2.2 row 2).
 test('ncc_auto_gc_roots_function_pointer_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_auto_gc_roots_function_pointer_skipped.c',
           '(void *) & fn_ptr']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1165,7 +1183,7 @@ test('ncc_auto_gc_roots_function_pointer_skipped', test_runner,
 )
 
 test('ncc_auto_gc_roots_function_pointer_other_registered', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_function_pointer_skipped.c',
           '(void *) & registered']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1178,7 +1196,7 @@ test('ncc_auto_gc_roots_function_pointer_other_registered', test_runner,
 # pipelines — static-image, once-guard, buflit, future ones — and
 # are registered by their own machinery; spec § 2.2 row 3).
 test('ncc_auto_gc_roots_ncc_emitted_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_auto_gc_roots_ncc_emitted_skipped.c',
           '(void *) & __ncc_marker_static']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1187,7 +1205,7 @@ test('ncc_auto_gc_roots_ncc_emitted_skipped', test_runner,
 )
 
 test('ncc_auto_gc_roots_ncc_emitted_other_registered', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_ncc_emitted_skipped.c',
           '(void *) & regular_static']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1202,7 +1220,7 @@ test('ncc_auto_gc_roots_ncc_emitted_other_registered', test_runner,
 # transform fires on this source; the not-contains-check confirms
 # the per-decl skip rule.
 test('ncc_auto_gc_roots_const_char_literal_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_auto_gc_roots_const_char_star_skipped.c',
           '(void *) & literal_str']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1211,7 +1229,7 @@ test('ncc_auto_gc_roots_const_char_literal_skipped', test_runner,
 )
 
 test('ncc_auto_gc_roots_const_char_non_literal_registered', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_const_char_star_skipped.c',
           '(void *) & buffer_ref']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1222,7 +1240,7 @@ test('ncc_auto_gc_roots_const_char_non_literal_registered', test_runner,
 # WP-001 Phase 3: pointer-array TU-scope decls register as a SINGLE
 # table entry with `num_words = N` (spec § 4.1, plan Phase 3 DoD #1).
 test('ncc_auto_gc_roots_pointer_array_addr', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_pointer_array.c',
           '(void *) & xs']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1231,7 +1249,7 @@ test('ncc_auto_gc_roots_pointer_array_addr', test_runner,
 )
 
 test('ncc_auto_gc_roots_pointer_array_num_words', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_pointer_array.c',
           '.num_words = 8']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1244,7 +1262,7 @@ test('ncc_auto_gc_roots_pointer_array_num_words', test_runner,
 # pointer-array decl alongside so the per-decl skip rule is the
 # subject of the assertion, not the zero-decls emit-nothing rule.
 test('ncc_auto_gc_roots_function_pointer_array_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_auto_gc_roots_function_pointer_array_skipped.c',
           '(void *) & fns']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1253,7 +1271,7 @@ test('ncc_auto_gc_roots_function_pointer_array_skipped', test_runner,
 )
 
 test('ncc_auto_gc_roots_function_pointer_array_other_registered', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_function_pointer_array_skipped.c',
           '(void *) & registered']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1266,7 +1284,7 @@ test('ncc_auto_gc_roots_function_pointer_array_other_registered', test_runner,
 # separated by a non-pointer slot, the emit produces two entries
 # (one per run), each addressed via `__builtin_offsetof(typeof(...))`.
 test('ncc_auto_gc_roots_struct_with_pointers_field_a', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_struct_with_pointers.c',
           '(void *) & (mixed).a']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1275,7 +1293,7 @@ test('ncc_auto_gc_roots_struct_with_pointers_field_a', test_runner,
 )
 
 test('ncc_auto_gc_roots_struct_with_pointers_field_c', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_struct_with_pointers.c',
           '(void *) & (mixed).c']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1291,7 +1309,7 @@ test('ncc_auto_gc_roots_struct_with_pointers_field_c', test_runner,
 # applied to a designated subobject expression yields the same
 # byte address.
 test('ncc_auto_gc_roots_nested_struct_offset', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_nested_struct.c',
           '(void *) & (outer).in.p']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1304,7 +1322,7 @@ test('ncc_auto_gc_roots_nested_struct_offset', test_runner,
 # definition has been emitted. This is the shape used by embedded
 # `n00b_list_t(...)` fields in Wax globals.
 test('ncc_auto_gc_roots_nested_generic_struct', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_nested_generic_struct.c',
           '(void *) & (g_endpoint).events.data']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1317,7 +1335,7 @@ test('ncc_auto_gc_roots_nested_generic_struct', test_runner,
 # two pointer fields followed by an `int`; the emit must show one
 # 2-word run, NOT two 1-word entries.
 test('ncc_auto_gc_roots_pointer_run_coalescing_num_words', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_pointer_run_coalescing.c',
           '.num_words = 2']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1326,7 +1344,7 @@ test('ncc_auto_gc_roots_pointer_run_coalescing_num_words', test_runner,
 )
 
 test('ncc_auto_gc_roots_pointer_run_coalescing_no_split', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_auto_gc_roots_pointer_run_coalescing.c',
           '(void *) & (pair).b']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1337,7 +1355,7 @@ test('ncc_auto_gc_roots_pointer_run_coalescing_no_split', test_runner,
 # WP-001 Phase 5: `[[n00b::nomap]]` skips the decl silently (no
 # table entry) but a sibling unannotated decl still registers.
 test('ncc_auto_gc_roots_nomap_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_auto_gc_roots_nomap_attribute.c',
           '(void *) & legacy_singleton']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1346,7 +1364,7 @@ test('ncc_auto_gc_roots_nomap_skipped', test_runner,
 )
 
 test('ncc_auto_gc_roots_nomap_sibling_registered', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_nomap_attribute.c',
           '(void *) & registered_root']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1357,7 +1375,7 @@ test('ncc_auto_gc_roots_nomap_sibling_registered', test_runner,
 # WP-001 Phase 5: trailing-position `[[n00b::nomap]]` (after the
 # declarator, before the `;`) also skips the decl. Spec § 3.1.
 test('ncc_auto_gc_roots_nomap_trailing_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_auto_gc_roots_nomap_attribute.c',
           '(void *) & trailing_nomap']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1368,7 +1386,7 @@ test('ncc_auto_gc_roots_nomap_trailing_skipped', test_runner,
 # WP-001 Phase 5: the `[[n00b::nomap]]` attribute is STRIPPED from
 # the post-transform emit so clang never sees an unknown attribute.
 test('ncc_auto_gc_roots_nomap_attribute_stripped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_auto_gc_roots_nomap_attribute.c',
           'n00b :: nomap']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1382,7 +1400,7 @@ test('ncc_auto_gc_roots_nomap_attribute_stripped', test_runner,
 # this dispatch) because none of the existing modes covers
 # "exit 0 + stderr substring + stdout omits substring".
 test('ncc_nullable_warn', test_runner,
-  args : [ncc_exe, 'preprocess_stderr_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_stderr_contains',
           test_dir / 'test_nullable_warn.c',
           'possible null dereference of nullable \'p\'',
           '?']
@@ -1392,7 +1410,7 @@ test('ncc_nullable_warn', test_runner,
 )
 
 test('ncc_nullable_interproc', test_runner,
-  args : [ncc_exe, 'preprocess_stderr_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_stderr_contains',
           test_dir / 'test_nullable_interproc.c',
           'to non-nullable parameter 1 of \'need\'',
           '?']
@@ -1402,7 +1420,7 @@ test('ncc_nullable_interproc', test_runner,
 )
 
 test('ncc_nullable_paren', test_runner,
-  args : [ncc_exe, 'preprocess_stderr_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_stderr_contains',
           test_dir / 'test_nullable_paren.c',
           'possible null dereference of nullable \'p\'',
           '?']
@@ -1412,7 +1430,7 @@ test('ncc_nullable_paren', test_runner,
 )
 
 test('ncc_nullable_nullmacro', test_runner,
-  args : [ncc_exe, 'preprocess_stderr_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_stderr_contains',
           test_dir / 'test_nullable_nullmacro.c',
           'possible null dereference of nullable \'p\'',
           '?']
@@ -1422,7 +1440,7 @@ test('ncc_nullable_nullmacro', test_runner,
 )
 
 test('ncc_nullable_bind', test_runner,
-  args : [ncc_exe, 'preprocess_stderr_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_stderr_contains',
           test_dir / 'test_nullable_bind.c',
           'nullable result of \'mk()\' assigned to non-nullable',
           '?']
@@ -1432,7 +1450,7 @@ test('ncc_nullable_bind', test_runner,
 )
 
 test('ncc_nullable_guards', test_runner,
-  args : [ncc_exe, 'preprocess_stderr_omits',
+  args : test_runner_args + [ncc_exe, 'preprocess_stderr_omits',
           test_dir / 'test_nullable_guards.c',
           'null dereference']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -1460,7 +1478,7 @@ test('ncc_nodiscard_ok', test_runner,
 )
 
 test('ncc_auto_gc_roots_incomplete_struct_warn', test_runner,
-  args : [ncc_exe, 'preprocess_stderr_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_stderr_contains',
           test_dir / 'err_auto_gc_roots_incomplete_struct.c',
           'forward_obj',
           '(void *) & forward_obj']
@@ -1474,7 +1492,7 @@ test('ncc_auto_gc_roots_incomplete_struct_warn', test_runner,
 # so a static `n00b_gc_root_t[]` table cannot embed `&var`. The
 # transform must skip these decls (mirrors the `extern` skip).
 test('ncc_auto_gc_roots_thread_local_c23_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_auto_gc_roots_thread_local_skipped.c',
           '(void *) & tls_singleton_c23']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1483,7 +1501,7 @@ test('ncc_auto_gc_roots_thread_local_c23_skipped', test_runner,
 )
 
 test('ncc_auto_gc_roots_thread_local_c11_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_auto_gc_roots_thread_local_skipped.c',
           '(void *) & tls_singleton_c11']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1494,7 +1512,7 @@ test('ncc_auto_gc_roots_thread_local_c11_skipped', test_runner,
 # Anchor: ensure the plain decl in the same file IS registered so
 # the assertions above pin the skip rule, not the zero-decls path.
 test('ncc_auto_gc_roots_thread_local_plain_registered', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_thread_local_skipped.c',
           '(void *) & plain_root']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1508,7 +1526,7 @@ test('ncc_auto_gc_roots_thread_local_plain_registered', test_runner,
 # never descend into the wrapped type's fields. `_Atomic(scalar)`
 # (non-pointer payload) must be skipped entirely.
 test('ncc_auto_gc_roots_atomic_pointer_registered', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_atomic_pointer_scalar.c',
           '(void *) & atomic_ptr']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1517,7 +1535,7 @@ test('ncc_auto_gc_roots_atomic_pointer_registered', test_runner,
 )
 
 test('ncc_auto_gc_roots_atomic_pointer_num_words', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_atomic_pointer_scalar.c',
           '.num_words = 1']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1526,7 +1544,7 @@ test('ncc_auto_gc_roots_atomic_pointer_num_words', test_runner,
 )
 
 test('ncc_auto_gc_roots_atomic_scalar_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_auto_gc_roots_atomic_pointer_scalar.c',
           '(void *) & atomic_scalar']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
@@ -1535,7 +1553,7 @@ test('ncc_auto_gc_roots_atomic_scalar_skipped', test_runner,
 )
 
 test('ncc_gc_stack_maps_flag_accepted', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_stack_maps_flag.c', 'n00b_gc_stack_push']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
@@ -1543,14 +1561,14 @@ test('ncc_gc_stack_maps_flag_accepted', test_runner,
 )
 
 test('ncc_gc_stack_maps_root_discovery', test_runner,
-  args : [ncc_exe, 'preprocess', test_dir / 'test_gc_stack_maps_roots.c']
+  args : test_runner_args + [ncc_exe, 'preprocess', test_dir / 'test_gc_stack_maps_roots.c']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
   depends : ncc_exe,
 )
 
 test('ncc_gc_stack_maps_pointer_array_words', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_stack_maps_roots.c', '.num_words = 3']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
@@ -1558,7 +1576,7 @@ test('ncc_gc_stack_maps_pointer_array_words', test_runner,
 )
 
 test('ncc_gc_stack_maps_aggregate_field_roots', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_stack_maps_roots.c', '& box.nested.inner']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
@@ -1566,7 +1584,7 @@ test('ncc_gc_stack_maps_aggregate_field_roots', test_runner,
 )
 
 test('ncc_gc_stack_maps_aggregate_not_word_range', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_stack_maps_roots.c', 'sizeof (box)']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
@@ -1574,7 +1592,7 @@ test('ncc_gc_stack_maps_aggregate_not_word_range', test_runner,
 )
 
 test('ncc_gc_stack_maps_aggregate_array_field_roots', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_stack_maps_roots.c', 'filters [0].ctx']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
@@ -1582,7 +1600,7 @@ test('ncc_gc_stack_maps_aggregate_array_field_roots', test_runner,
 )
 
 test('ncc_gc_stack_maps_aggregate_array_not_pointer_array', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_stack_maps_roots.c', 'sizeof (filters)']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
@@ -1590,7 +1608,7 @@ test('ncc_gc_stack_maps_aggregate_array_not_pointer_array', test_runner,
 )
 
 test('ncc_gc_stack_maps_flexible_member_field_root', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_stack_maps_roots.c', '& flex.known']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
@@ -1598,7 +1616,7 @@ test('ncc_gc_stack_maps_flexible_member_field_root', test_runner,
 )
 
 test('ncc_gc_stack_maps_flexible_member_not_sized', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_stack_maps_roots.c', 'flex.opaque']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
@@ -1606,7 +1624,7 @@ test('ncc_gc_stack_maps_flexible_member_not_sized', test_runner,
 )
 
 test('ncc_gc_stack_maps_atomic_pointer_field', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_stack_maps_roots.c', '& holder.store']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
@@ -1614,7 +1632,7 @@ test('ncc_gc_stack_maps_atomic_pointer_field', test_runner,
 )
 
 test('ncc_gc_stack_maps_atomic_not_pointee_fields', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_stack_maps_roots.c', 'holder.store.next']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
@@ -1622,7 +1640,7 @@ test('ncc_gc_stack_maps_atomic_not_pointee_fields', test_runner,
 )
 
 test('ncc_gc_stack_maps_atomic_aggregate_offset', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_stack_maps_roots.c', '__builtin_offsetof']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
@@ -1630,7 +1648,7 @@ test('ncc_gc_stack_maps_atomic_aggregate_offset', test_runner,
 )
 
 test('ncc_gc_stack_maps_atomic_aggregate_not_member_access', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_stack_maps_roots.c', 'atomic_store.next']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
@@ -1638,7 +1656,7 @@ test('ncc_gc_stack_maps_atomic_aggregate_not_member_access', test_runner,
 )
 
 test('ncc_gc_stack_maps_cleanup_attr', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_stack_maps_roots.c',
           'cleanup (n00b_gc_stack_pop)']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
@@ -1647,7 +1665,7 @@ test('ncc_gc_stack_maps_cleanup_attr', test_runner,
 )
 
 test('ncc_gc_stack_maps_scalar_array_not_root', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_stack_maps_scalar_array.c', '& values']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
@@ -1655,7 +1673,7 @@ test('ncc_gc_stack_maps_scalar_array_not_root', test_runner,
 )
 
 test('ncc_gc_stack_maps_empty_body_param', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_stack_maps_empty_body.c', 'n00b_gc_stack_push']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
@@ -1663,7 +1681,7 @@ test('ncc_gc_stack_maps_empty_body_param', test_runner,
 )
 
 test('ncc_gc_stack_maps_function_pointer_name', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_stack_maps_function_pointer.c', '& fn']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
@@ -1671,7 +1689,7 @@ test('ncc_gc_stack_maps_function_pointer_name', test_runner,
 )
 
 test('ncc_gc_stack_maps_qualified_pointer_name', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_stack_maps_qualified_pointer.c', '& state']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
@@ -1679,7 +1697,7 @@ test('ncc_gc_stack_maps_qualified_pointer_name', test_runner,
 )
 
 test('ncc_gc_stack_maps_array_sizeof_bounds', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_stack_maps_array_sizeof.c',
           'sizeof (vecs) / sizeof (void *)']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
@@ -1692,7 +1710,7 @@ test('ncc_gc_stack_maps_array_sizeof_bounds', test_runner,
 # both that the runtime-sized num_words expression appears and that
 # the address-of-element-zero is recorded as a root.
 test('ncc_gc_stack_maps_vla_pointer_aggregate_num_words', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_stack_maps_vla_pointer_aggregate.c',
           'sizeof (fields) / (sizeof (void *))']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
@@ -1701,7 +1719,7 @@ test('ncc_gc_stack_maps_vla_pointer_aggregate_num_words', test_runner,
 )
 
 test('ncc_gc_stack_maps_vla_pointer_aggregate_address', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_stack_maps_vla_pointer_aggregate.c',
           '& fields [0]']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
@@ -1712,7 +1730,7 @@ test('ncc_gc_stack_maps_vla_pointer_aggregate_address', test_runner,
 # D-033 negative case: VLA of a pointerless aggregate must NOT
 # emit any scan address for the VLA -- there are no roots to track.
 test('ncc_gc_stack_maps_vla_scalar_aggregate_no_root', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_stack_maps_vla_scalar_aggregate.c',
           '& pairs [0]']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
@@ -1729,7 +1747,7 @@ test('ncc_gc_stack_maps_vla_scalar_aggregate_no_root', test_runner,
 # warning ever regresses, this test fails.
 test('ncc_gc_stack_maps_vla_pointer_aggregate_no_sizeof_array_div',
   test_runner,
-  args : [ncc_exe, 'compile_run',
+  args : test_runner_args + [ncc_exe, 'compile_run',
           test_dir / 'test_gc_stack_maps_vla_pointer_aggregate_main.c']
          + ncc_test_flags
          + ['--ncc-gc-stack-maps',
@@ -1739,7 +1757,7 @@ test('ncc_gc_stack_maps_vla_pointer_aggregate_no_sizeof_array_div',
 )
 
 test('ncc_gc_stack_maps_computed_goto_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_stack_maps_computed_goto.c',
           'n00b_gc_stack_push']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
@@ -1748,7 +1766,7 @@ test('ncc_gc_stack_maps_computed_goto_skipped', test_runner,
 )
 
 test('ncc_gc_stack_maps_relaxed_for_init_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'err_gc_stack_maps_for_init.c',
           '& cursor']
          + ncc_test_flags + ['--ncc-gc-stack-maps-relaxed'],
@@ -1757,7 +1775,7 @@ test('ncc_gc_stack_maps_relaxed_for_init_skipped', test_runner,
 )
 
 test('ncc_gc_stack_maps_system_header_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_stack_maps_system_header.c',
           '.function_name = "__sputc"']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
@@ -1766,7 +1784,7 @@ test('ncc_gc_stack_maps_system_header_skipped', test_runner,
 )
 
 test('ncc_gc_stack_maps_system_header_user_function_kept', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_stack_maps_system_header.c',
           '.function_name = "gc_stack_maps_system_header_fixture"']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
@@ -1775,7 +1793,7 @@ test('ncc_gc_stack_maps_system_header_user_function_kept', test_runner,
 )
 
 test('ncc_gc_stack_maps_homebrew_header_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_stack_maps_homebrew_header.c',
           '.function_name = "ncc_fake_homebrew_inline"']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
@@ -1784,7 +1802,7 @@ test('ncc_gc_stack_maps_homebrew_header_skipped', test_runner,
 )
 
 test('ncc_gc_stack_maps_thread_runtime_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_stack_maps_thread_runtime_skip.c',
           'n00b_gc_stack_push']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
@@ -1793,7 +1811,7 @@ test('ncc_gc_stack_maps_thread_runtime_skipped', test_runner,
 )
 
 test('ncc_gc_stack_maps_setjmp_diagnostic', test_runner,
-  args : [ncc_exe, 'expect_error_contains',
+  args : test_runner_args + [ncc_exe, 'expect_error_contains',
           test_dir / 'err_gc_stack_maps_setjmp.c',
           'unsafe non-local exit call']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
@@ -1802,7 +1820,7 @@ test('ncc_gc_stack_maps_setjmp_diagnostic', test_runner,
 )
 
 test('ncc_gc_stack_maps_setjmp_spoof_diagnostic', test_runner,
-  args : [ncc_exe, 'expect_error_contains',
+  args : test_runner_args + [ncc_exe, 'expect_error_contains',
           test_dir / 'err_gc_stack_maps_setjmp_spoof.c',
           'unsafe non-local exit call']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
@@ -1811,7 +1829,7 @@ test('ncc_gc_stack_maps_setjmp_spoof_diagnostic', test_runner,
 )
 
 test('ncc_gc_stack_maps_longjmp_diagnostic', test_runner,
-  args : [ncc_exe, 'expect_error_contains',
+  args : test_runner_args + [ncc_exe, 'expect_error_contains',
           test_dir / 'err_gc_stack_maps_longjmp.c',
           'unsafe non-local exit call']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
@@ -1820,7 +1838,7 @@ test('ncc_gc_stack_maps_longjmp_diagnostic', test_runner,
 )
 
 test('ncc_gc_stack_maps_stw_macro_allowed', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_stack_maps_stw_macro.c',
           'n00b_gc_stack_push']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
@@ -1829,7 +1847,7 @@ test('ncc_gc_stack_maps_stw_macro_allowed', test_runner,
 )
 
 test('ncc_gc_stack_maps_nonlocal_api_allowed', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_stack_maps_nonlocal_api.c',
           'n00b_gc_stack_push']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
@@ -1838,7 +1856,7 @@ test('ncc_gc_stack_maps_nonlocal_api_allowed', test_runner,
 )
 
 test('ncc_gc_stack_maps_nonlocal_runtime_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_stack_maps_nonlocal_runtime_skip.c',
           'n00b_gc_stack_push']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
@@ -1847,7 +1865,7 @@ test('ncc_gc_stack_maps_nonlocal_runtime_skipped', test_runner,
 )
 
 test('ncc_gc_stack_maps_collect_runtime_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_stack_maps_collect_skip.c',
           'n00b_gc_stack_push']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
@@ -1856,14 +1874,14 @@ test('ncc_gc_stack_maps_collect_runtime_skipped', test_runner,
 )
 
 test('ncc_gc_stack_maps_runtime_compile', test_runner,
-  args : [ncc_exe, 'compile_run', test_dir / 'test_gc_stack_maps_runtime.c']
+  args : test_runner_args + [ncc_exe, 'compile_run', test_dir / 'test_gc_stack_maps_runtime.c']
          + ncc_test_flags + ['--ncc-gc-stack-maps'],
   suite : 'ncc',
   depends : ncc_exe,
 )
 
 test('ncc_gc_stack_maps_control_flow', test_runner,
-  args : [ncc_exe, 'compile_run',
+  args : test_runner_args + [ncc_exe, 'compile_run',
           test_dir / 'test_gc_stack_maps_control_flow.c']
          + ncc_test_flags + ['--ncc-gc-stack-maps', '--ncc-no-auto-gc-roots'],
   suite : 'ncc',
@@ -1871,7 +1889,7 @@ test('ncc_gc_stack_maps_control_flow', test_runner,
 )
 
 test('ncc_force_include_not_replayed', test_runner,
-  args : [ncc_exe, 'compile_run', test_dir / 'test_force_include_once.c']
+  args : test_runner_args + [ncc_exe, 'compile_run', test_dir / 'test_force_include_once.c']
          + ncc_test_flags + ['-include', test_dir / 'force_include_once.h',
                               '--ncc-no-gc-stack-maps'],
   suite : 'ncc',
@@ -1879,28 +1897,28 @@ test('ncc_force_include_not_replayed', test_runner,
 )
 
 test('ncc_verbose_binary_output', test_runner,
-  args : [ncc_exe, 'verbose_binary_output', test_dir / 'test_bang.c'],
+  args : test_runner_args + [ncc_exe, 'verbose_binary_output', test_dir / 'test_bang.c'],
   env : {'NCC_COMPILER' : test_fake_binary_compiler.full_path()},
   suite : 'ncc',
   depends : [ncc_exe, test_fake_binary_compiler],
 )
 
 test('ncc_cc_fallback_binary_output', test_runner,
-  args : [ncc_exe, 'cc_fallback_binary_output', test_dir / 'test_bang.c'],
+  args : test_runner_args + [ncc_exe, 'cc_fallback_binary_output', test_dir / 'test_bang.c'],
   env : {'NCC_TEST_CC' : test_fake_binary_compiler.full_path()},
   suite : 'ncc',
   depends : [ncc_exe, test_fake_binary_compiler],
 )
 
 test('ncc_cc_self_guard', test_runner,
-  args : [ncc_exe, 'cc_self_guard', test_dir / 'test_bang.c']
+  args : test_runner_args + [ncc_exe, 'cc_self_guard', test_dir / 'test_bang.c']
          + ncc_test_flags,
   suite : 'ncc',
   depends : ncc_exe,
 )
 
 test('ncc_verbose_high_output', test_runner,
-  args : [ncc_exe, 'verbose_high_output', test_dir / 'test_bang.c']
+  args : test_runner_args + [ncc_exe, 'verbose_high_output', test_dir / 'test_bang.c']
          + ncc_test_flags,
   env : {'NCC_COMPILER' : test_fake_verbose_compiler.full_path()},
   suite : 'ncc',
@@ -1909,7 +1927,7 @@ test('ncc_verbose_high_output', test_runner,
 )
 
 test('ncc_compiler_stdin_close', test_runner,
-  args : [ncc_exe, 'compiler_stdin_close', test_dir / 'test_bang.c']
+  args : test_runner_args + [ncc_exe, 'compiler_stdin_close', test_dir / 'test_bang.c']
          + ncc_test_flags,
   env : {'NCC_COMPILER' : test_fake_stdin_close_compiler.full_path()},
   suite : 'ncc',
@@ -1918,48 +1936,48 @@ test('ncc_compiler_stdin_close', test_runner,
 )
 
 test('ncc_depfile', test_runner,
-  args : [ncc_exe, 'depfile', test_dir / 'test_depfile.c'] + ncc_test_flags,
+  args : test_runner_args + [ncc_exe, 'depfile', test_dir / 'test_depfile.c'] + ncc_test_flags,
   suite : 'ncc',
   depends : ncc_exe,
 )
 
 test('ncc_depfile_md', test_runner,
-  args : [ncc_exe, 'depfile_md', test_dir / 'test_depfile.c']
+  args : test_runner_args + [ncc_exe, 'depfile_md', test_dir / 'test_depfile.c']
          + ncc_test_flags,
   suite : 'ncc',
   depends : ncc_exe,
 )
 
 test('ncc_depfile_default', test_runner,
-  args : [ncc_exe, 'depfile_default', test_dir / 'test_depfile.c']
+  args : test_runner_args + [ncc_exe, 'depfile_default', test_dir / 'test_depfile.c']
          + ncc_test_flags,
   suite : 'ncc',
   depends : ncc_exe,
 )
 
 test('ncc_depfile_mt', test_runner,
-  args : [ncc_exe, 'depfile_mt', test_dir / 'test_depfile.c']
+  args : test_runner_args + [ncc_exe, 'depfile_mt', test_dir / 'test_depfile.c']
          + ncc_test_flags,
   suite : 'ncc',
   depends : ncc_exe,
 )
 
 test('ncc_depfile_mq', test_runner,
-  args : [ncc_exe, 'depfile_mq', test_dir / 'test_depfile.c']
+  args : test_runner_args + [ncc_exe, 'depfile_mq', test_dir / 'test_depfile.c']
          + ncc_test_flags,
   suite : 'ncc',
   depends : ncc_exe,
 )
 
 test('ncc_depfile_error', test_runner,
-  args : [ncc_exe, 'depfile_expect_error', test_dir / 'test_depfile.c']
+  args : test_runner_args + [ncc_exe, 'depfile_expect_error', test_dir / 'test_depfile.c']
          + ncc_test_flags,
   suite : 'ncc',
   depends : ncc_exe,
 )
 
 test('ncc_constexpr_runtime_error', test_runner,
-  args : [ncc_exe, 'constexpr_runtime_error',
+  args : test_runner_args + [ncc_exe, 'constexpr_runtime_error',
           test_dir / 'err_constexpr_runtime_fail.c'] + ncc_test_flags,
   suite : 'ncc',
   depends : ncc_exe,
@@ -1987,7 +2005,7 @@ ncc_error_tests = {
 
 foreach name, src : ncc_error_tests
   test('ncc_' + name, test_runner,
-    args : [ncc_exe, 'expect_error', src],
+    args : test_runner_args + [ncc_exe, 'expect_error', src],
     suite : 'ncc',
     depends : ncc_exe,
   )
@@ -2256,7 +2274,7 @@ foreach name, params : ncc_error_contains_tests
     extra_args = [params[2]]
   endif
   test('ncc_' + name, test_runner,
-    args : [ncc_exe, 'expect_error_contains', params[0], params[1]]
+    args : test_runner_args + [ncc_exe, 'expect_error_contains', params[0], params[1]]
            + ncc_test_flags + extra_args,
     suite : 'ncc',
     depends : [ncc_exe, static_image_helper],
