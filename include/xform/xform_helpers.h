@@ -19,6 +19,17 @@ const char *ncc_xform_leaf_text(ncc_parse_tree_t *node);
 // Check if a leaf token's text matches a C string.
 bool ncc_xform_leaf_text_eq(ncc_parse_tree_t *node, const char *text);
 
+// Does any descendant <attribute_specifier_sequence> of `node` carry a
+// `[[n00b::<name>]]` attribute? Used by the GC stack-map ([[n00b::nogc]]) and
+// GC typemap ([[n00b::noscan]]) transforms.
+bool ncc_xform_subtree_carries_n00b_named_attr(ncc_parse_tree_t *node,
+                                               const char       *name);
+
+// Recursively remove every <attribute_specifier> carrying `[[n00b::<name>]]`
+// from `parent` so the attribute never reaches the C emitter.
+void ncc_xform_strip_n00b_named_attribute_specifiers(ncc_parse_tree_t *parent,
+                                                     const char       *name);
+
 // Collect type atoms from typeid/typestr/typehash argument structure.
 // Walks <typeid_atom> and <typeid_continuation> children.
 // Returns an ncc_string_t with the combined canonical type string.

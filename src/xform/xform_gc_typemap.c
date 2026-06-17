@@ -718,6 +718,32 @@ emit_pointer(const char *elem_type, const char *path,
     ncc_free(as);
 }
 
+// Does this member_declaration carry a *prefix* `[[n00b::noscan]]`
+// attribute_specifier_sequence — i.e. one that appears before the type and
+// therefore applies to every declarator in the declaration? (A C23 `[[...]]`
+// may sit in the prefix position OR trail an individual declarator; the
+// trailing case is detected per-declarator on the member_declarator node.)
+static bool
+member_decl_has_prefix_noscan(ncc_parse_tree_t *member)
+{
+    if (!member || ncc_tree_is_leaf(member)) {
+        return false;
+    }
+    // The prefix attribute_specifier_sequence is a (group-unwrapped) direct
+    // child of the member_declaration, per the grammar:
+    //   <member_declaration> ::= <attribute_specifier_sequence>?
+    //                            <specifier_qualifier_list>
+    //                            <member_declarator_list>? ";"
+    // ncc_xform_find_child_nt only descends into $$group_* wrappers, so it will
+    // not reach a *trailing* attribute (which lives deeper, inside the
+    // member_declarator_list subtree). That keeps a `[[n00b::noscan]]` on one
+    // declarator from leaking onto a sibling in the same declaration.
+    ncc_parse_tree_t *prefix_seq = ncc_xform_find_child_nt(
+        member, "attribute_specifier_sequence");
+    return prefix_seq
+        && ncc_xform_subtree_carries_n00b_named_attr(prefix_seq, "noscan");
+}
+
 // Walk one member_declaration of a STRUCT.
 static void
 walk_struct_member(ncc_xform_ctx_t *ctx, const char *elem_type,
@@ -731,6 +757,11 @@ walk_struct_member(ncc_xform_ctx_t *ctx, const char *elem_type,
     if (!member_specs) {
         return; // nothing typed here (e.g. a stray ';')
     }
+
+    // A prefix `[[n00b::noscan]]` (before the type) applies to every declarator
+    // in this member_declaration; a trailing one applies only to its own
+    // declarator and is tested per-declarator below.
+    bool prefix_noscan = member_decl_has_prefix_noscan(member);
 
     ncc_parse_tree_t *member_list = ncc_xform_find_child_nt(
         member, "member_declarator_list");
@@ -777,8 +808,15 @@ walk_struct_member(ncc_xform_ctx_t *ctx, const char *elem_type,
             char *field = ncc_layout_implicit_member_field_name(member,
                                                                 member_specs);
             if (field) {
-                if (!member_is_runtime_infra(runtime_scan_shape, field,
-                                             member_specs)) {
+                // No member_declarator_list wrapper here, so a trailing
+                // `[[n00b::noscan]]` (if any) lives inside `member` itself;
+                // either prefix or trailing form excludes this pointer.
+                bool noscan = prefix_noscan
+                           || ncc_xform_subtree_carries_n00b_named_attr(
+                                  member, "noscan");
+                if (!noscan
+                    && !member_is_runtime_infra(runtime_scan_shape, field,
+                                                member_specs)) {
                     char *path = path_join(base, field);
                     emit_pointer(elem_type, path, offs, asserts, count);
                     ncc_free(path);
@@ -807,6 +845,15 @@ walk_struct_member(ncc_xform_ctx_t *ctx, const char *elem_type,
             break;
         }
         if (member_is_runtime_infra(runtime_scan_shape, name, member_specs)) {
+            ncc_free(name);
+            continue;
+        }
+        // [[n00b::noscan]]: a prefix attribute on the whole declaration, or a
+        // trailing attribute on this specific member_declarator, excludes the
+        // field from the GC typemap (the GC must never scan/relocate it).
+        if (prefix_noscan
+            || ncc_xform_subtree_carries_n00b_named_attr(decls.data[i],
+                                                         "noscan")) {
             ncc_free(name);
             continue;
         }

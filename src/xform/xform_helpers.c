@@ -4,6 +4,7 @@
 #include "xform/xform_template.h"
 #include "xform/xform_data.h"
 #include "parse/type_infer.h"
+#include "xform/xform_type_layout.h"
 #include "lib/alloc.h"
 #include "lib/buffer.h"
 #include "lib/string.h"
@@ -535,6 +536,125 @@ ncc_string_t ncc_xform_node_to_text(ncc_parse_tree_t *node) {
   ncc_free(cb->data);
   ncc_free(cb);
   return result;
+}
+
+// ============================================================================
+// [[n00b::<name>]] attribute detection / stripping
+//
+// Shared between the GC stack-map transform ([[n00b::nogc]]) and the GC
+// typemap transform ([[n00b::noscan]]). The two public entry points are
+// declared in the header; the two inner helpers are static here.
+// ============================================================================
+
+// Does a single <attribute> node spell `[[n00b::<name>]]`?
+static bool ncc_xform_attribute_is_n00b_named(ncc_parse_tree_t *attr_node,
+                                              const char       *name) {
+  if (!attr_node || !name || ncc_tree_is_leaf(attr_node)) {
+    return false;
+  }
+
+  ncc_parse_tree_t *prefixed =
+      ncc_layout_first_descendant_nt(attr_node, "attribute_prefixed_token");
+  if (!prefixed) {
+    return false;
+  }
+
+  bool   saw_n00b = false;
+  bool   saw_name = false;
+  size_t nc       = ncc_tree_num_children(prefixed);
+  for (size_t i = 0; i < nc; i++) {
+    ncc_parse_tree_t *c = ncc_tree_child(prefixed, i);
+    if (!c) {
+      continue;
+    }
+
+    ncc_parse_tree_t *cur = c;
+    while (cur && !ncc_tree_is_leaf(cur) && ncc_tree_num_children(cur) > 0) {
+      ncc_parse_tree_t *next = ncc_tree_child(cur, 0);
+      if (!next) {
+        break;
+      }
+      cur = next;
+    }
+    if (!cur || !ncc_tree_is_leaf(cur)) {
+      continue;
+    }
+
+    const char *text = ncc_xform_leaf_text(cur);
+    if (!text) {
+      continue;
+    }
+    if (!saw_n00b && strcmp(text, "n00b") == 0) {
+      saw_n00b = true;
+      continue;
+    }
+    if (saw_n00b && !saw_name && strcmp(text, name) == 0) {
+      saw_name = true;
+    }
+  }
+
+  return saw_n00b && saw_name;
+}
+
+// Does an <attribute_specifier_sequence> contain `[[n00b::<name>]]`?
+static bool ncc_xform_attribute_seq_contains_n00b_named(
+    ncc_parse_tree_t *attr_seq, const char *name) {
+  if (!attr_seq || !name || ncc_tree_is_leaf(attr_seq)) {
+    return false;
+  }
+
+  ncc_layout_parse_tree_list_t attrs = {0};
+  ncc_layout_collect_nt_children(attr_seq, "attribute", &attrs);
+  bool found = false;
+  for (size_t i = 0; i < attrs.len; i++) {
+    if (ncc_xform_attribute_is_n00b_named(attrs.data[i], name)) {
+      found = true;
+      break;
+    }
+  }
+  ncc_free(attrs.data);
+  return found;
+}
+
+bool ncc_xform_subtree_carries_n00b_named_attr(ncc_parse_tree_t *node,
+                                               const char       *name) {
+  if (!node || !name || ncc_tree_is_leaf(node)) {
+    return false;
+  }
+
+  if (ncc_xform_nt_name_is(node, "attribute_specifier_sequence")) {
+    return ncc_xform_attribute_seq_contains_n00b_named(node, name);
+  }
+
+  size_t nc = ncc_tree_num_children(node);
+  for (size_t i = 0; i < nc; i++) {
+    if (ncc_xform_subtree_carries_n00b_named_attr(ncc_tree_child(node, i),
+                                                  name)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void ncc_xform_strip_n00b_named_attribute_specifiers(ncc_parse_tree_t *parent,
+                                                     const char       *name) {
+  if (!parent || !name || ncc_tree_is_leaf(parent)) {
+    return;
+  }
+
+  size_t i = 0;
+  while (i < ncc_tree_num_children(parent)) {
+    ncc_parse_tree_t *child = ncc_tree_child(parent, i);
+    if (child && !ncc_tree_is_leaf(child)
+        && ncc_xform_nt_name_is(child, "attribute_specifier")
+        && ncc_xform_attribute_seq_contains_n00b_named(child, name)) {
+      ncc_xform_remove_child(parent, i);
+      continue;
+    }
+
+    ncc_xform_strip_n00b_named_attribute_specifiers(child, name);
+    i++;
+  }
 }
 
 // ============================================================================
