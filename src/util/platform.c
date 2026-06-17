@@ -118,7 +118,7 @@ ncc_process_result_free(ncc_process_result_t *out)
     out->exit_code   = 0;
     out->term_kind   = NCC_PROCESS_TERM_UNKNOWN;
     out->signal_number = 0;
-    out->exception_code = 0;
+    out->windows_exception_code = 0;
 }
 
 static void
@@ -135,7 +135,7 @@ process_result_init(ncc_process_result_t *out)
     out->stderr_len  = 0;
     out->term_kind   = NCC_PROCESS_TERM_LAUNCH;
     out->signal_number = 0;
-    out->exception_code = 0;
+    out->windows_exception_code = 0;
 }
 
 static bool
@@ -1429,7 +1429,7 @@ ncc_process_run(const ncc_process_spec_t *spec, ncc_process_result_t *out)
         out->exit_code = (int)exit_code;
         if (windows_exit_code_is_exception(exit_code)) {
             out->term_kind = NCC_PROCESS_TERM_EXCEPTION;
-            out->exception_code = (unsigned long)exit_code;
+            out->windows_exception_code = (unsigned long)exit_code;
         }
         else {
             out->term_kind = NCC_PROCESS_TERM_EXITED;

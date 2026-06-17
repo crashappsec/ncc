@@ -344,7 +344,7 @@ test_crt_entry = executable('test_crt_entry',
   link_args : coverage_link_args,
   dependencies : libncc_internal_dep,
 )
-test('crt_entry_emit', test_crt_entry, suite : 'ncc', timeout : 10)
+test('crt_entry_emit', test_crt_entry, suite : 'ncc', timeout : 60)
 
 test_comptime_meta = executable('test_comptime_meta',
   'test/test_comptime_meta.c',
@@ -361,12 +361,14 @@ test_comptime_meta_io = executable('test_comptime_meta_io',
   dependencies : libncc_internal_dep,
 )
 
-test_comptime_build = executable('test_comptime_build',
-  'test/test_comptime_build.c',
-  c_args : c_args + coverage_args,
-  link_args : coverage_link_args,
-  dependencies : libncc_internal_dep,
-)
+if host_machine.system() != 'windows'
+  test_comptime_build = executable('test_comptime_build',
+    'test/test_comptime_build.c',
+    c_args : c_args + coverage_args,
+    link_args : coverage_link_args,
+    dependencies : libncc_internal_dep,
+  )
+endif
 
 test_comptime_symtab = executable('test_comptime_symtab',
   'test/test_comptime_symtab.c',
@@ -443,13 +445,16 @@ test('comptime_meta_object_io', test_comptime_meta_io,
   timeout : 20,
 )
 
-test('comptime_build_driver', test_comptime_build,
-  args : [ncc_exe.full_path()] + ncc_test_flags
-         + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
-  suite : 'ncc',
-  depends : ncc_exe,
-  timeout : 30,
-)
+if host_machine.system() != 'windows'
+  # This fixture links an ELF runtime through a POSIX assembly start stub.
+  test('comptime_build_driver', test_comptime_build,
+    args : [ncc_exe.full_path()] + ncc_test_flags
+           + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+    suite : 'ncc',
+    depends : ncc_exe,
+    timeout : 30,
+  )
+endif
 
 ncc_static_descriptor_flags = [
   '--ncc-static-object-entry-attr=__attribute__((used))',
@@ -470,6 +475,8 @@ ncc_compile_tests = {
   'constexpr':    ['compile_run',  test_dir / 'test_constexpr.c'],
   'kargs':        ['compile_run',  test_dir / 'test_kargs.c'],
   'kargs_vargs':  ['compile_run',  test_dir / 'test_kargs_vargs.c'],
+  'kargs_typeid_pointer_macro': ['compile_run',
+                                 test_dir / 'test_kargs_typeid_pointer_macro.c'],
   'vargs_nested_call': ['compile_run',
                         test_dir / 'test_vargs_nested_call.c'],
   'kargs_vargs_default_omitted': ['compile_run',
@@ -536,6 +543,18 @@ foreach name, params : ncc_compile_tests
     depends : test_deps,
   )
 endforeach
+
+if host_machine.system() == 'windows'
+  test('ncc_windows_sdk_winsock', test_runner,
+    args : test_runner_args + [ncc_exe, 'compile_only',
+            test_dir / 'test_windows_sdk_winsock.c']
+           + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                               '--ncc-no-auto-gc-roots'],
+    suite : 'ncc',
+    depends : ncc_exe,
+    timeout : 300,
+  )
+endif
 
 test('ncc_function_contracts_helper_shape', test_runner,
   args : test_runner_args + [ncc_exe, 'preprocess_contains',

@@ -1,12 +1,12 @@
 #include "parse/crt_entry.h"
+#include "lib/alloc.h"
+#include "util/platform.h"
 
 #include <assert.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
 static void
 assert_contains(const char *haystack, const char *needle)
@@ -87,25 +87,24 @@ compile_generated_source(const char *source)
         cc = "clang";
     }
 
-    char dir_template[] = "/tmp/ncc_crt_entry_test_XXXXXX";
-    char *dir           = mkdtemp(dir_template);
-    if (!dir) {
-        perror("mkdtemp");
+    ncc_temp_workspace_t tmp = {0};
+    char *tmp_err = nullptr;
+    if (!ncc_temp_workspace_create(&tmp, "ncc_crt_entry_test_", &tmp_err)) {
+        fprintf(stderr, "temporary workspace failed: %s\n",
+                tmp_err ? tmp_err : "unknown error");
+        ncc_free(tmp_err);
         abort();
     }
 
-    char src_path[512];
-    char header_path[512];
-    char obj_path[512];
-
-    snprintf(src_path, sizeof(src_path), "%s/entry.c", dir);
-    snprintf(header_path, sizeof(header_path), "%s/n00b_crt.h", dir);
-    snprintf(obj_path, sizeof(obj_path), "%s/entry.o", dir);
+    const char *dir = ncc_temp_workspace_path(&tmp);
+    char *src_path = ncc_temp_workspace_join(&tmp, "entry.c");
+    char *header_path = ncc_temp_workspace_join(&tmp, "n00b_crt.h");
+    char *obj_path = ncc_temp_workspace_join(&tmp, "entry.o");
+    assert(src_path && header_path && obj_path);
 
     FILE *h = fopen(header_path, "w");
     if (!h) {
         perror("fopen header");
-        rmdir(dir);
         abort();
     }
 
@@ -117,16 +116,12 @@ compile_generated_source(const char *source)
 
     if (fclose(h) != 0) {
         perror("fclose header");
-        unlink(header_path);
-        rmdir(dir);
         abort();
     }
 
     FILE *f = fopen(src_path, "w");
     if (!f) {
         perror("fopen source");
-        unlink(header_path);
-        rmdir(dir);
         abort();
     }
 
@@ -139,37 +134,34 @@ compile_generated_source(const char *source)
 
     if (fclose(f) != 0) {
         perror("fclose");
-        unlink(src_path);
-        unlink(header_path);
-        rmdir(dir);
         abort();
     }
 
-    char cmd[4096];
-    int  n = snprintf(cmd, sizeof(cmd),
-                      "%s -std=gnu23 -Wall -Wextra -Werror "
-                      "-I %s -c %s -o %s",
-                      cc, dir, src_path, obj_path);
-    if (n < 0 || (size_t)n >= sizeof(cmd)) {
-        fprintf(stderr, "compile command too long\n");
-        unlink(src_path);
-        unlink(header_path);
-        rmdir(dir);
-        abort();
+    const char *args[] = {
+        cc, "-std=gnu23", "-Wall", "-Wextra", "-Werror",
+        "-I", dir, "-c", src_path, "-o", obj_path, nullptr,
+    };
+    ncc_process_spec_t spec = {
+        .program = cc,
+        .argv = args,
+        .capture_stderr = true,
+    };
+    ncc_process_result_t result = {0};
+    bool launched = ncc_process_run(&spec, &result);
+    bool ok = launched && result.term_kind == NCC_PROCESS_TERM_EXITED
+              && result.exit_code == 0;
+    if (!ok) {
+        fprintf(stderr, "generated CRT entry compile failed%s%s\n",
+                result.stderr_data ? ": " : "",
+                result.stderr_data ? result.stderr_data : "");
     }
+    ncc_process_result_free(&result);
+    ncc_free(src_path);
+    ncc_free(header_path);
+    ncc_free(obj_path);
+    ncc_temp_workspace_cleanup(&tmp);
 
-    int status = system(cmd);
-    unlink(src_path);
-    unlink(header_path);
-    unlink(obj_path);
-    rmdir(dir);
-
-    if (status == -1) {
-        perror("system");
-        abort();
-    }
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        fprintf(stderr, "generated CRT entry compile failed: %s\n", cmd);
+    if (!ok) {
         abort();
     }
 }

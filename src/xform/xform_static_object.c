@@ -741,7 +741,7 @@ ncc_static_object_slots_init(ncc_static_object_slots_t *out,
                       ncc_static_identity_kind_numeric(identity_kind_expr),
                       namespace_lit, object_key_lit);
     ncc_buffer_t *expr = ncc_buffer_empty();
-    ncc_buffer_printf(expr, "&%s", names->identity_name);
+    ncc_buffer_printf(expr, "(const void *)&%s", names->identity_name);
 
     *out = (ncc_static_object_slots_t){
         .typehash   = typehash,
