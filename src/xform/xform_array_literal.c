@@ -2595,6 +2595,13 @@ literal_helper_error(ncc_parse_tree_t *site, const char *literal_kind,
     array_errorf(site, "%s", text);
 }
 
+static bool
+literal_helper_trace_enabled(void)
+{
+    const char *value = getenv("NCC_STATIC_INIT_TRACE");
+    return value && *value && strcmp(value, "0") != 0;
+}
+
 static void
 run_literal_static_init_helper(ncc_parse_tree_t *site, const char *helper,
                                const char *literal_kind,
@@ -2615,6 +2622,18 @@ run_literal_static_init_helper(ncc_parse_tree_t *site, const char *helper,
     };
     ncc_process_result_t proc = {0};
 
+    if (literal_helper_trace_enabled()) {
+        fprintf(stderr,
+                "ncc: static-init helper trace: kind=%s type=%s helper=%s "
+                "request_bytes=%zu\n",
+                literal_kind ? literal_kind : "<unknown>",
+                type_name ? type_name : "<unknown>",
+                helper ? helper : "<null>", strlen(request));
+        fprintf(stderr, "ncc: static-init helper request begin\n%s", request);
+        fprintf(stderr, "ncc: static-init helper request end\n");
+        fflush(stderr);
+    }
+
     if (!ncc_process_run(&spec, &proc)) {
         literal_helper_error(site, literal_kind, type_name,
                              "could not be launched", proc.stderr_data,
@@ -2622,7 +2641,10 @@ run_literal_static_init_helper(ncc_parse_tree_t *site, const char *helper,
     }
 
     if (proc.exit_code != 0) {
-        literal_helper_error(site, literal_kind, type_name, "failed",
+        char exit_msg[64];
+        snprintf(exit_msg, sizeof(exit_msg), "failed (exit %d)",
+                 proc.exit_code);
+        literal_helper_error(site, literal_kind, type_name, exit_msg,
                              proc.stderr_data, proc.stderr_len);
     }
 

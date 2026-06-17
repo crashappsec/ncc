@@ -1547,13 +1547,13 @@ static ncc_parse_tree_t *xform_decl(ncc_xform_ctx_t *ctx,
 // Extract the callee name from a function call postfix_expression.
 // The callee is child[0] (which may be a nested postfix_expression or
 // primary_expression containing an identifier).
-static const char *extract_callee_name(ncc_parse_tree_t *call_node) {
+static ncc_string_t extract_resolved_callee_name(ncc_parse_tree_t *call_node) {
   size_t nc = ncc_tree_num_children(call_node);
   if (nc < 2) {
-    return nullptr;
+    return (ncc_string_t){0};
   }
   ncc_parse_tree_t *callee = ncc_tree_child(call_node, 0);
-  return extract_func_name(callee);
+  return extract_resolved_func_name(callee);
 }
 
 // Check if an argument_expression_list has any keyword_argument children.
@@ -1877,7 +1877,8 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
     return nullptr;
   }
 
-  const char *callee = extract_callee_name(node);
+  ncc_string_t callee_name = extract_resolved_callee_name(node);
+  const char *callee = callee_name.data;
   if (!callee) {
     return nullptr;
   }
@@ -1886,7 +1887,9 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
   if (strcmp(callee, "kw_func") == 0) {
     ncc_parse_tree_t *arg_list =
         ncc_xform_find_child_nt(node, "argument_expression_list");
-    return xform_kw_func(ctx, arg_list);
+    ncc_parse_tree_t *replacement = xform_kw_func(ctx, arg_list);
+    ncc_free(callee_name.data);
+    return replacement;
   }
 
   meta_table_t *table = get_meta_table(ctx);
@@ -1899,6 +1902,7 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
   bool has_kw_args = has_keyword_args(arg_list);
 
   if (!meta && !has_kw_args) {
+    ncc_free(callee_name.data);
     return nullptr;
   }
 
@@ -1974,6 +1978,7 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
         ncc_free(args[i].name);
       }
       ncc_free(args);
+      ncc_free(callee_name.data);
       return nullptr;
     }
   }
@@ -2254,6 +2259,7 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
   }
   ncc_free(args);
   ncc_free(kw_func_kargs_text.data);
+  ncc_free(callee_name.data);
 
   if (replacement) {
     ctx->nodes_replaced++;
