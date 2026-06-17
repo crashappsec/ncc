@@ -23,7 +23,7 @@ typedef struct {
     int                     exit_code;
     ncc_process_term_kind_t term_kind;
     int                     signal_number;
-    unsigned long           exception_code;
+    unsigned long           windows_exception_code;
     char                   *stdout_data;
     size_t                  stdout_len;
     char                   *stderr_data;

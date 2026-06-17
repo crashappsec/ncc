@@ -788,7 +788,7 @@ run_comptime_executable(const char *program, const char *const *argv,
         rc = proc.signal_number;
     }
     else if (st == NCC_CT_RUN_EXCEPTION) {
-        rc = (int)proc.exception_code;
+        rc = (int)proc.windows_exception_code;
     }
     ncc_process_result_free(&proc);
     if (!argv) {
