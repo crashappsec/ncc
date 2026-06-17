@@ -150,6 +150,11 @@ if coverage_enabled
   coverage_link_args = ['-fprofile-instr-generate']
 endif
 
+windows_stack_link_args = []
+if host_machine.system() == 'windows'
+  windows_stack_link_args = cc.get_supported_link_arguments('-Wl,/STACK:16777216')
+endif
+
 inc = include_directories('include')
 
 # ── Library sources ──────────────────────────────────────────────────────────
@@ -258,7 +263,7 @@ libncc_internal_dep = declare_dependency(
 ncc_exe = executable('ncc',
   'src/ncc.c',
   c_args : c_args + coverage_args + ['--embed-dir=' + meson.current_source_dir()],
-  link_args : coverage_link_args,
+  link_args : coverage_link_args + windows_stack_link_args,
   dependencies : libncc_internal_dep,
   install : true,
 )
