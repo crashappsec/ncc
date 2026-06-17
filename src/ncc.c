@@ -42,6 +42,7 @@
 #include "parse/c_tokenizer.h"
 #include "parse/emit.h"
 #include "xform/xform_gc_typemap.h"
+#include "xform/xform_helpers.h"
 #include "parse/tree_dump.h"
 #include "xform/transform.h"
 #include "xform/xform_template.h"
@@ -2303,6 +2304,12 @@ compile_file(ncc_opts_t *opts)
     // transform dicts (gc_aggregate_types) are freed below; appended to the
     // pretty-printed output further down.
     char *gc_typemap_text = ncc_gc_typemap_emit(&xctx);
+
+    // The `[[n00b::noscan]]` per-field attribute is consumed above (it tells
+    // ncc_gc_typemap_emit to omit a field from the GC typemap). Strip it from
+    // the whole tree now — AFTER the typemap detection has read it, BEFORE the
+    // tree is pretty-printed — so clang never sees this ncc-only attribute.
+    ncc_xform_strip_n00b_named_attribute_specifiers(tree, "noscan");
 
 #ifdef NCC_MEM_DEBUG
     ncc_mem_report("after transform");

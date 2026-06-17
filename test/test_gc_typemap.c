@@ -60,6 +60,21 @@ typedef union gcmap_union_mixed_t {
     gcmap_payload_t *payload;
 } gcmap_union_mixed_t;
 
+// [[n00b::noscan]] in the TRAILING declarator position: `noscan_ptr` must be
+// omitted from the typemap; its sibling `payload` (same struct) must remain.
+typedef struct gcmap_noscan_trailing_t {
+    gcmap_payload_t  *payload;
+    gcmap_payload_t  *noscan_ptr [[n00b::noscan]];
+} gcmap_noscan_trailing_t;
+
+// [[n00b::noscan]] in the PREFIX position (before the type): excludes the
+// declared field. `kept` (a separate, un-attributed member_declaration) must
+// remain in the typemap.
+typedef struct gcmap_noscan_prefix_t {
+    gcmap_payload_t          *kept;
+    [[n00b::noscan]] gcmap_payload_t *noscan_ptr;
+} gcmap_noscan_prefix_t;
+
 static uint64_t h_direct = typehash(gcmap_direct_fn_t *);
 static uint64_t h_typedef = typehash(gcmap_typedef_fn_t *);
 static uint64_t h_user    = typehash(gcmap_user_scan_field_t *);
@@ -67,11 +82,13 @@ static uint64_t h_runtime = typehash(gcmap_runtime_shape_t *);
 static uint64_t h_near    = typehash(gcmap_runtime_near_miss_t *);
 static uint64_t h_array   = typehash(gcmap_pointer_array_t *);
 static uint64_t h_union   = typehash(gcmap_union_mixed_t *);
+static uint64_t h_nstrail = typehash(gcmap_noscan_trailing_t *);
+static uint64_t h_nspref  = typehash(gcmap_noscan_prefix_t *);
 
 int
 main(void)
 {
     return (int)((h_direct ^ h_typedef ^ h_user ^ h_runtime ^ h_near
-                  ^ h_array ^ h_union)
+                  ^ h_array ^ h_union ^ h_nstrail ^ h_nspref)
                  == 0);
 }

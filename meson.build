@@ -807,6 +807,51 @@ test('ncc_gc_typemap_runtime_near_miss_scan_user_scanned', test_runner,
   depends : ncc_exe,
 )
 
+test('ncc_gc_typemap_noscan_trailing_field_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__builtin_offsetof(gcmap_noscan_trailing_t,noscan_ptr)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_noscan_trailing_sibling_scanned', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__builtin_offsetof(gcmap_noscan_trailing_t,payload)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_noscan_prefix_field_skipped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__builtin_offsetof(gcmap_noscan_prefix_t,noscan_ptr)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_noscan_prefix_sibling_scanned', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__builtin_offsetof(gcmap_noscan_prefix_t,kept)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_noscan_attribute_stripped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_typemap.c',
+          'n00b::noscan']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 test('ncc_gc_typemap_static_assert_c23', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap.c',
