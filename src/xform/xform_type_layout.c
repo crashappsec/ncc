@@ -963,14 +963,29 @@ ncc_parse_tree_t *
 ncc_layout_aggregate_spec_from_specs(ncc_xform_ctx_t *ctx,
                                      ncc_parse_tree_t *specs)
 {
-    if (ncc_layout_pointer_depth_for_specs(ctx, specs) > 0) {
+    // An `_Atomic(T *)` member is a POINTER (the `*` is in the atomic wrapper,
+    // outside any aggregate body), not a by-value aggregate — even though its
+    // specs contain T's struct specifier. Reject it here so the caller emits a
+    // pointer rather than recursing and emitting offsetof through the pointer.
+    if (atomic_type_specifier_is_pointer(specs)) {
         return nullptr;
     }
 
+    // An INLINE struct/union/_generic_struct specifier is a by-value aggregate;
+    // resolve it directly. This must come BEFORE the pointer test:
+    // pointer_depth_for_specs sees pointer MEMBERS in the inline body (e.g. the
+    // `T *data` of an inline n00b_list_t) and would wrongly report depth > 0,
+    // dropping the aggregate. A member that is genuinely a pointer carries its
+    // `*` in the declarator (handled by the caller), not in these specifiers,
+    // and a pointer typedef has no inline specifier (the typedef path below).
     ncc_parse_tree_t *su = ncc_layout_first_descendant_nt(
         specs, "struct_or_union_specifier");
     if (su) {
         return ncc_layout_resolve_aggregate_specifier(ctx, su);
+    }
+
+    if (ncc_layout_pointer_depth_for_specs(ctx, specs) > 0) {
+        return nullptr;
     }
 
     char *td_name = ncc_layout_first_typedef_name_text(specs);

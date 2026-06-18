@@ -69,24 +69,24 @@ ncc_symtab_free(ncc_symtab_t *st)
         return;
     }
 
+    // Scopes are retained (pop no longer frees), so free every scope and its
+    // entries via the retained list. Each entry belongs to exactly one scope's
+    // chain, so this frees each exactly once.
+    ncc_scope_t *scope = st->all_scopes;
+    while (scope) {
+        ncc_scope_t     *next_scope = scope->all_next;
+        ncc_sym_entry_t *entry      = scope->first_in_scope;
+        while (entry) {
+            ncc_sym_entry_t *next = entry->next_in_scope;
+            ncc_free(entry);
+            entry = next;
+        }
+        ncc_free(scope);
+        scope = next_scope;
+    }
+
     for (int32_t i = 0; i < st->ns_count; i++) {
         ncc_namespace_t *ns = &st->namespaces[i];
-
-        while (ns->current) {
-            ncc_scope_t *scope = ns->current;
-            ns->current         = scope->parent;
-
-            // Free entries in this scope.
-            ncc_sym_entry_t *entry = scope->first_in_scope;
-            while (entry) {
-                ncc_sym_entry_t *next = entry->next_in_scope;
-                ncc_free(entry);
-                entry = next;
-            }
-
-            ncc_free(scope);
-        }
-
         if (ns->symbols) {
             ncc_dict_free((ncc_dict_t *)ns->symbols);
             ncc_free(ns->symbols);
@@ -161,6 +161,12 @@ ncc_symtab_push_scope(ncc_symtab_t *st, ncc_string_t ns_name,
     scope->name   = scope_name;
     scope->depth  = ns->depth;
 
+    // Retain every pushed scope for the symtab's lifetime so the lexical scope
+    // tree survives population (pop no longer frees) and location-based scoped
+    // lookup can resolve locals/params after the walk.
+    scope->all_next = st->all_scopes;
+    st->all_scopes  = scope;
+
     ns->current = scope;
     ns->depth++;
 }
@@ -177,25 +183,24 @@ ncc_symtab_pop_scope(ncc_symtab_t *st, ncc_string_t ns_name)
     ncc_scope_t        *scope = ns->current;
     ncc_dict_t *ht    = (ncc_dict_t *)ns->symbols;
 
+    // Restore the hash table to the enclosing scope's view (so lookups during
+    // the rest of the walk stay correct), but DO NOT free the scope or its
+    // entries — they are retained (via all_scopes / first_in_scope chains) for
+    // post-walk scoped lookup and freed only in ncc_symtab_free.
     ncc_sym_entry_t *entry = scope->first_in_scope;
 
     while (entry) {
-        ncc_sym_entry_t *next = entry->next_in_scope;
-
         if (entry->shadowed) {
             ht_put(ht, entry->name, entry->shadowed);
         }
         else {
             ht_remove(ht, entry->name);
         }
-
-        ncc_free(entry);
-        entry = next;
+        entry = entry->next_in_scope;
     }
 
     ns->current = scope->parent;
     ns->depth--;
-    ncc_free(scope);
 }
 
 // ============================================================================
@@ -253,6 +258,48 @@ ncc_symtab_lookup(ncc_symtab_t *st, ncc_string_t ns_name,
     }
 
     return nullptr;
+}
+
+void
+ncc_symtab_set_scope_node(ncc_symtab_t *st, ncc_string_t ns_name,
+                          ncc_parse_tree_t *node)
+{
+    ncc_namespace_t *ns = ncc_symtab_ns(st, ns_name);
+    if (ns && ns->current) {
+        ns->current->node = node;
+    }
+}
+
+ncc_scope_t *
+ncc_symtab_scope_for_node(ncc_symtab_t *st, ncc_parse_tree_t *node)
+{
+    if (!st || !node) {
+        return nullptr;
+    }
+    for (ncc_scope_t *s = st->all_scopes; s; s = s->all_next) {
+        if (s->node == node) {
+            return s;
+        }
+    }
+    return nullptr;
+}
+
+ncc_sym_entry_t *
+ncc_symtab_lookup_scoped(ncc_symtab_t *st, ncc_scope_t *scope,
+                         ncc_string_t ns_name, ncc_string_t name)
+{
+    // Walk the lexical scope chain (innermost first). Globals live in the
+    // retained file-scope scope at the top of the chain, so this covers locals,
+    // parameters, and globals with correct shadowing.
+    for (ncc_scope_t *s = scope; s; s = s->parent) {
+        for (ncc_sym_entry_t *e = s->first_in_scope; e; e = e->next_in_scope) {
+            if (ncc_string_eq(e->name, name)) {
+                return e;
+            }
+        }
+    }
+    // No enclosing scope (or not found): fall back to a plain global lookup.
+    return ncc_symtab_lookup(st, ns_name, name);
 }
 
 bool

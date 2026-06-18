@@ -63,6 +63,14 @@ struct ncc_scope_t {
     int32_t           depth;
     ncc_sym_entry_t *first_in_scope;
     ncc_string_t     adt_kind;
+    // The parse node that created this scope (function_definition /
+    // compound_statement), or nullptr. Used to map an expression back to its
+    // lexical scope for scoped lookup. Set via ncc_symtab_set_scope_node.
+    ncc_parse_tree_t *node;
+    // Retained-scope chain: every scope ever pushed is linked here so the full
+    // scope tree survives until the symtab is freed (scopes are no longer freed
+    // on pop), enabling location-based lexical lookup after population.
+    ncc_scope_t     *all_next;
 };
 
 // ============================================================================
@@ -84,6 +92,8 @@ struct ncc_symtab_t {
     ncc_namespace_t *namespaces;
     int32_t           ns_count;
     int32_t           ns_cap;
+    // Head of the retained-scope list (every pushed scope, all namespaces).
+    ncc_scope_t     *all_scopes;
 };
 
 // ============================================================================
@@ -117,6 +127,23 @@ ncc_sym_entry_t *ncc_symtab_add(ncc_symtab_t *st, ncc_string_t ns_name,
 
 ncc_sym_entry_t *ncc_symtab_lookup(ncc_symtab_t *st, ncc_string_t ns_name,
                                        ncc_string_t name);
+
+// Tag the current scope of namespace @p ns_name with the parse node that
+// created it (function_definition / compound_statement).
+void ncc_symtab_set_scope_node(ncc_symtab_t *st, ncc_string_t ns_name,
+                               ncc_parse_tree_t *node);
+
+// The retained scope created by parse node @p node (or nullptr). Scopes are
+// kept after population, so this works post-walk.
+ncc_scope_t *ncc_symtab_scope_for_node(ncc_symtab_t *st,
+                                       ncc_parse_tree_t *node);
+
+// Lexical lookup starting from @p scope, walking up the parent-scope chain;
+// falls back to a global (file-scope) lookup in namespace @p ns_name. A null
+// @p scope is a plain global lookup.
+ncc_sym_entry_t *ncc_symtab_lookup_scoped(ncc_symtab_t *st, ncc_scope_t *scope,
+                                          ncc_string_t ns_name,
+                                          ncc_string_t name);
 
 bool ncc_symtab_is_typedef(ncc_symtab_t *st, ncc_string_t name);
 

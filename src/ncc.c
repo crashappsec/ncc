@@ -39,6 +39,7 @@
 #include "parse/symbol_populate.h"
 #include "parse/type_infer.h"
 #include "parse/nullability.h"
+#include "parse/nodiscard.h"
 #include "parse/c_tokenizer.h"
 #include "parse/emit.h"
 #include "xform/xform_gc_typemap.h"
@@ -1983,7 +1984,14 @@ compile_file(ncc_opts_t *opts)
     // array-of-`lp` type) is resolved at the parse layer rather than patched up
     // by downstream xforms. The provisional symtab's typedef classification is
     // reliable because it derives from unambiguous declarations.
-    {
+    //
+    // Iterate to a fixed point (bounded): the first pass resolves ambiguities
+    // visible from unambiguous declarations (typedefs), which can in turn make
+    // a previously mis-parsed definition (e.g. `int f(int v){…}` where `f`
+    // matched the function-specifier soft keyword) parse correctly — so the
+    // next pass's symbol table knows `f` is a value and can fix its call sites
+    // (`f(x);` mis-read as a declaration). Two passes suffice in practice.
+    for (int pass = 0; pass < 2; pass++) {
         ncc_symtab_t *prov_symtab = ncc_populate_symbols(g, tree);
 
         ncc_pwz_set_disambiguator(parser, ncc_disambig_eval, prov_symtab);
@@ -2274,6 +2282,12 @@ compile_file(ncc_opts_t *opts)
                             ncc_hash_cstring, ncc_dict_cstr_eq);
     ncc_dict_init(&xdata.gc_function_pointer_typedefs,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
+    // Parent pointers let expression typing map an expression back to its
+    // lexical scope (scope_for_expr walks up to the enclosing scope node).
+    // Set before any ncc_type_of_expr use (nodiscard below, typehash/typeid/
+    // typestr xforms later); xform mutations keep them current via set_child.
+    ncc_xform_set_parent_pointers(tree);
+
     // Build the scoped symbol table for the type model. Runs after the typedef
     // reclassification walk so declarator names are settled.
     xdata.symtab = ncc_populate_symbols(g, tree);
@@ -2281,6 +2295,12 @@ compile_file(ncc_opts_t *opts)
     // Flow-sensitive null-state analysis: must run before transforms strip the
     // `?` nullable markers from the tree.
     ncc_nullability_check(g, tree, xdata.symtab);
+
+    // Must-check results: warn on a discarded result-protocol return value.
+    // Runs on the fully-structured pre-transform tree (like nullability);
+    // `_try`, which consumes a result, is still spelled `_try E` here and is
+    // skipped by the discard check.
+    ncc_nodiscard_check(g, tree, xdata.symtab);
 
     xctx.user_data = &xdata;
     ncc_verbose("applying transforms");
