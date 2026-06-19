@@ -443,6 +443,8 @@ ncc_compile_tests = {
                                test_dir / 'test_function_contracts_parse.c'],
   'function_contract_keyword_collision': ['compile_run',
                                           test_dir / 'test_function_contract_keyword_collision.c'],
+  'windows_sdk_extension_cast': ['compile_run',
+                                 test_dir / 'test_windows_sdk_extension_cast.c'],
   'rstr':         ['compile_run',  test_dir / 'test_rstr.c'],
   'vargs':        ['compile_run',  test_dir / 'test_vargs.c'],
   'once':         ['compile_run',  test_dir / 'test_once.c'],

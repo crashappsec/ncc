@@ -523,11 +523,37 @@ scan_c_number(ncc_scanner_t *s)
     }
 
 suffix:
-    // Consume C number suffix: u/U/l/L/f/F/i (imaginary) and C23 wb/WB.
+    // Consume C number suffix: u/U/l/L/f/F/i (imaginary), C23 wb/WB,
+    // and Clang's _FloatN suffixes used by system intrinsic headers.
     for (;;) {
         uint8_t ch = ncc_scan_peek_byte(s, 0);
-        if (ch == 'u' || ch == 'U' || ch == 'l' || ch == 'L'
-            || ch == 'f' || ch == 'F' || ch == 'i') {
+        if ((ch == 'b' || ch == 'B')
+            && (ncc_scan_peek_byte(s, 1) == 'f'
+                || ncc_scan_peek_byte(s, 1) == 'F')
+            && ncc_scan_peek_byte(s, 2) == '1'
+            && ncc_scan_peek_byte(s, 3) == '6') {
+            is_float = true;
+            ncc_scan_advance_n(s, 4);
+        }
+        else if ((ch == 'f' || ch == 'F')
+                 && ncc_scan_peek_byte(s, 1) == '1'
+                 && ncc_scan_peek_byte(s, 2) == '2'
+                 && ncc_scan_peek_byte(s, 3) == '8') {
+            is_float = true;
+            ncc_scan_advance_n(s, 4);
+        }
+        else if ((ch == 'f' || ch == 'F')
+                 && ((ncc_scan_peek_byte(s, 1) == '1'
+                      && ncc_scan_peek_byte(s, 2) == '6')
+                     || (ncc_scan_peek_byte(s, 1) == '3'
+                         && ncc_scan_peek_byte(s, 2) == '2')
+                     || (ncc_scan_peek_byte(s, 1) == '6'
+                         && ncc_scan_peek_byte(s, 2) == '4'))) {
+            is_float = true;
+            ncc_scan_advance_n(s, 3);
+        }
+        else if (ch == 'u' || ch == 'U' || ch == 'l' || ch == 'L'
+                 || ch == 'f' || ch == 'F' || ch == 'i') {
             ncc_scan_advance(s);
         }
         else if ((ch == 'w' || ch == 'W')
