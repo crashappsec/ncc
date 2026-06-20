@@ -926,6 +926,9 @@ run_parse(ncc_pwz_parser_t *p)
         size_t wl_len = ncc_list_len(p->worklist);
 
         if (wl_len == 0) {
+            // No surviving derivation could consume the token at `pos`; that
+            // token is where the parse got stuck.
+            p->error_pos = pos;
             return false;
         }
 
@@ -949,7 +952,13 @@ run_parse(ncc_pwz_parser_t *p)
 
         if (!have_next) {
             // No more tokens — this was the last position.
-            return ncc_list_len(p->tops) > 0;
+            if (ncc_list_len(p->tops) > 0) {
+                return true;
+            }
+            // Input ended before any derivation reached an accept state:
+            // unexpected end of input. Report at the EOF position.
+            p->error_pos = complete_pos;
+            return false;
         }
     }
 }
@@ -1436,6 +1445,7 @@ ncc_pwz_reset(ncc_pwz_parser_t *p)
     p->stream       = nullptr;
     p->result_tree  = nullptr;
     p->result_trees = (ncc_parse_tree_array_t){0};
+    p->error_pos    = -1;
 }
 
 bool
@@ -1464,6 +1474,12 @@ ncc_parse_tree_t *
 ncc_pwz_get_tree(ncc_pwz_parser_t *p)
 {
     return p->result_tree;
+}
+
+int32_t
+ncc_pwz_error_pos(ncc_pwz_parser_t *p)
+{
+    return p ? p->error_pos : -1;
 }
 
 void

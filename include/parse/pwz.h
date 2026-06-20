@@ -118,6 +118,19 @@ bool ncc_pwz_parse(ncc_pwz_parser_t   *p,
 ncc_parse_tree_t *ncc_pwz_get_tree(ncc_pwz_parser_t *p);
 
 /**
+ * @brief Index of the token at which the last failed parse got stuck.
+ *
+ * After ncc_pwz_parse() returns false, this is the position of the furthest
+ * token that no surviving derivation could consume (i.e. the offending token),
+ * or a value >= the token count to indicate unexpected end of input. Returns
+ * -1 if the last parse succeeded or has not run.
+ *
+ * @param p  PWZ parser to query.
+ * @return Error token index, or -1.
+ */
+int32_t ncc_pwz_error_pos(ncc_pwz_parser_t *p);
+
+/**
  * @brief Install (or clear) the type-aware disambiguation oracle.
  *
  * With an oracle set, the next extraction (see ncc_pwz_reextract) scores
