@@ -1480,9 +1480,9 @@ run_preprocessor(const ncc_opts_t *opts, size_t *out_len)
     char  *wrapped_pp     = wrap_system_headers(buf, len, &wrapped_pp_len);
     ncc_free(buf);
 
-    // A project macro can expand to r"..." / b"..." only after CPP has run.
-    // The raw-source prescan above cannot see that spelling, so run the same
-    // lexer-aware rewrite once more before tokenization.
+    // A project macro can expand to r"..." / b"..." only after CPP has run,
+    // and user headers are only visible in the preprocessed stream. Run the
+    // same lexer-aware rewrite once more before tokenization.
     wrapped_pp = ncc_literal_prescan(wrapped_pp, wrapped_pp_len,
                                      &wrapped_pp_len);
 

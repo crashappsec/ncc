@@ -328,8 +328,8 @@ offset_assert(const char *elem_type, const char *path)
 // makes it precisely scannable: the `value` word is a heap pointer iff the
 // selector equals the typehash of one of the POINTER alternatives. ncc records
 // those typehashes (recomputed exactly as `typehash(T)` does, so they match the
-// runtime selector byte-for-byte) and emits a variant descriptor the collector
-// resolves per element at scan time.
+// runtime selector byte-for-byte) and emits variant arms the collector resolves
+// per element at scan time.
 // ---------------------------------------------------------------------------
 
 // Accumulates the emitted variant descriptors for one element type.
@@ -509,14 +509,6 @@ classify_variant_alt(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *member,
     ncc_free(base);
     ncc_free(ncc_buffer_take(tb));
     return ALT_PTR;
-}
-
-static int
-cmp_u64(const void *a, const void *b)
-{
-    uint64_t x = *(const uint64_t *)a;
-    uint64_t y = *(const uint64_t *)b;
-    return (x > y) - (x < y);
 }
 
 // If `spec` is an n00b_variant_t struct, return its resolved value-union
