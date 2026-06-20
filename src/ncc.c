@@ -1177,38 +1177,58 @@ ncc_literal_prescan(char *src, size_t len, size_t *out_len)
             if ((src[i] == 'r' || src[i] == 'b')
                 && i + 1 < len && src[i + 1] == '"') {
                 if (i == 0 || !is_id_char(src[i - 1])) {
-                    const char *callee = src[i] == 'r'
-                                       ? "__ncc_rstr("
-                                       : "__ncc_buflit(";
-                    // Flush everything before the 'r'.
+                    char        prefix_ch = src[i]; // 'r' or 'b'
+                    const char *callee    = prefix_ch == 'r'
+                                              ? "__ncc_rstr("
+                                              : "__ncc_buflit(";
+                    // Flush everything before the prefix char.
                     if (i > flush_from) {
                         ncc_buffer_append(buf, src + flush_from, i - flush_from);
                     }
                     // Emit the internal call instead of the prefix.
                     ncc_buffer_append(buf, callee, strlen(callee));
-                    i++; // skip the prefix, keep the '"'
+                    i++; // skip the prefix char, leaving i at the opening '"'
 
-                    // Scan forward to find the end of the string.
-                    size_t str_start = i;
-                    i++; // skip opening "
+                    // Collect one or more adjacent string literals as the
+                    // single call argument. A continuation literal may be
+                    // plain ("...") or carry the SAME prefix (r"..." after
+                    // r"...", b"..." after b"..."); the continuation prefix is
+                    // stripped so that
+                    //     r"foo" r"bar"   parses exactly like   r"foobar"
+                    // through ordinary adjacent-string concatenation inside the
+                    // synthesized call. A differing prefix is left untouched so
+                    // a nonsensical mix (e.g. r"..." b"...") surfaces as an
+                    // error rather than silently merging.
+                    bool first_seg = true;
 
-                    while (i < len) {
-                        if (src[i] == '\\' && i + 1 < len) {
-                            i += 2;
-                        }
-                        else if (src[i] == '"') {
-                            i++;
-                            break;
-                        }
-                        else {
-                            i++;
-                        }
-                    }
+                    for (;;) {
+                        // i is at the opening '"' of a segment.
+                        size_t seg_start = i;
+                        i++; // skip opening "
 
-                    // Check for adjacent string concatenation.
-                    while (i < len) {
+                        while (i < len) {
+                            if (src[i] == '\\' && i + 1 < len) {
+                                i += 2;
+                            }
+                            else if (src[i] == '"') {
+                                i++;
+                                break;
+                            }
+                            else {
+                                i++;
+                            }
+                        }
+
+                        // Separate segments with a space so adjacent C string
+                        // literals concatenate (and never glue into one token).
+                        if (!first_seg) {
+                            ncc_buffer_append(buf, " ", 1);
+                        }
+                        ncc_buffer_append(buf, src + seg_start, i - seg_start);
+                        first_seg = false;
+
+                        // Look past whitespace for an adjacent literal.
                         size_t ws = i;
-
                         while (ws < len
                                && (src[ws] == ' ' || src[ws] == '\t'
                                    || src[ws] == '\n' || src[ws] == '\r')) {
@@ -1216,28 +1236,19 @@ ncc_literal_prescan(char *src, size_t len, size_t *out_len)
                         }
 
                         if (ws < len && src[ws] == '"') {
-                            i = ws + 1;
+                            i = ws; // plain continuation
+                            continue;
+                        }
 
-                            while (i < len) {
-                                if (src[i] == '\\' && i + 1 < len) {
-                                    i += 2;
-                                }
-                                else if (src[i] == '"') {
-                                    i++;
-                                    break;
-                                }
-                                else {
-                                    i++;
-                                }
-                            }
+                        if (ws + 1 < len && src[ws] == prefix_ch
+                            && src[ws + 1] == '"') {
+                            i = ws + 1; // same-prefix continuation; strip prefix
+                            continue;
                         }
-                        else {
-                            break;
-                        }
+
+                        break;
                     }
 
-                    // Emit the string content and closing ).
-                    ncc_buffer_append(buf, src + str_start, i - str_start);
                     ncc_buffer_append(buf, ")", 1);
                     flush_from = i;
                     continue;
