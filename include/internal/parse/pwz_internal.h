@@ -169,6 +169,11 @@ struct ncc_pwz_parser_t {
     pwz_mem_t                   *mem_bottom;
     pwz_exp_t                   *exp_bottom;
 
+    // Position of the token at which the last failed parse got stuck (the
+    // furthest token no surviving derivation could consume). -1 if the last
+    // parse succeeded or has not run. See ncc_pwz_error_pos().
+    int32_t                     error_pos;
+
     // TS-5 type-aware disambiguation oracle (nullptr => default last-alt policy).
     ncc_pwz_disambig_fn         disambig_cb;
     void                       *disambig_ud;

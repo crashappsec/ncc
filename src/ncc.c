@@ -225,6 +225,92 @@ maybe_print_array_literal_parse_hint(ncc_token_stream_t *ts)
     }
 }
 
+// Print "file:line:col" for a token, falling back to the input file name when
+// the token carries no #line-derived source path.
+static void
+print_token_location(FILE *out, ncc_token_info_t *tok, const char *fallback_file)
+{
+    const char *file = fallback_file ? fallback_file : "<input>";
+
+    if (tok && ncc_option_is_set(tok->file)) {
+        ncc_string_t f = ncc_option_get(tok->file);
+        if (f.data) {
+            file = (const char *)f.data;
+        }
+    }
+
+    fprintf(out, "%s:%u:%u", file, tok ? tok->line : 0, tok ? tok->column : 0);
+}
+
+// Print a single token in the context window: "  > [idx] file:line:col text"
+// (the '>' marker flags the offending token).
+static void
+print_context_token(FILE *out, ncc_token_info_t *tok, int32_t idx,
+                    bool is_culprit, const char *fallback_file)
+{
+    fprintf(out, "  %s [%d] ", is_culprit ? ">" : " ", idx);
+    print_token_location(out, tok, fallback_file);
+
+    if (tok && ncc_option_is_set(tok->value)) {
+        ncc_string_t v = ncc_option_get(tok->value);
+        if (v.data) {
+            fprintf(out, "  %.*s",
+                    v.u8_bytes > 60 ? 60 : (int)v.u8_bytes, v.data);
+        }
+    }
+
+    fprintf(out, "\n");
+}
+
+// Report a parse failure with the source location of the offending token plus a
+// small window of surrounding tokens, so the error maps back to a file:line.
+static void
+print_parse_error(ncc_token_stream_t *ts, int32_t error_pos,
+                  const char *input_file)
+{
+    int32_t ntokens = ts ? ts->token_count : 0;
+
+    if (ntokens <= 0 || error_pos < 0) {
+        fprintf(stderr, "ncc: parse failed (no tokens / location unavailable)\n");
+        return;
+    }
+
+    // error_pos may be the EOF position (== ntokens); clamp to the last real
+    // token and flag the unexpected-EOF case.
+    bool    at_eof  = error_pos >= ntokens;
+    int32_t culprit = at_eof ? ntokens - 1 : error_pos;
+    ncc_token_info_t *tok = ts->tokens[culprit];
+
+    fprintf(stderr, "ncc: ");
+    print_token_location(stderr, tok, input_file);
+
+    if (at_eof) {
+        fprintf(stderr, ": error: unexpected end of input while parsing\n");
+    } else if (tok && ncc_option_is_set(tok->value)) {
+        ncc_string_t v = ncc_option_get(tok->value);
+        fprintf(stderr, ": error: parse failed at '%.*s'\n",
+                v.u8_bytes > 60 ? 60 : (int)v.u8_bytes,
+                v.data ? (char *)v.data : "");
+    } else {
+        fprintf(stderr, ": error: parse failed here\n");
+    }
+
+    // Context window: a few tokens on either side of the culprit.
+    int32_t lo = culprit - 5;
+    int32_t hi = culprit + 3;
+    if (lo < 0) {
+        lo = 0;
+    }
+    if (hi >= ntokens) {
+        hi = ntokens - 1;
+    }
+
+    fprintf(stderr, "  context:\n");
+    for (int32_t i = lo; i <= hi; i++) {
+        print_context_token(stderr, ts->tokens[i], i, i == culprit, input_file);
+    }
+}
+
 // ============================================================================
 // Parsed command-line state
 // ============================================================================
@@ -1897,50 +1983,8 @@ compile_file(ncc_opts_t *opts)
     bool ok = ncc_pwz_parse(parser, ts);
 
     if (!ok) {
-        int32_t ntokens = ts->token_count;
-        fprintf(stderr, "ncc: parse FAILED (%d tokens produced)\n", ntokens);
+        print_parse_error(ts, ncc_pwz_error_pos(parser), opts->input_file);
         maybe_print_array_literal_parse_hint(ts);
-
-        int32_t show = 10;
-        if (ntokens > 0) {
-            fprintf(stderr, "  first %d tokens:\n",
-                    show < ntokens ? show : ntokens);
-            for (int32_t i = 0; i < ntokens && i < show; i++) {
-                ncc_token_info_t *t = ts->tokens[i];
-                if (t) {
-                    fprintf(stderr, "    [%d] tid=%d", i, t->tid);
-                    if (ncc_option_is_set(t->value)) {
-                        ncc_string_t v = ncc_option_get(t->value);
-                        if (v.data) {
-                            fprintf(stderr, " \"%.*s\"",
-                                    v.u8_bytes > 40 ? 40 : (int)v.u8_bytes,
-                                    v.data);
-                        }
-                    }
-                    fprintf(stderr, "\n");
-                }
-            }
-            if (ntokens > show * 2) {
-                fprintf(stderr, "  last %d tokens:\n", show);
-                for (int32_t i = ntokens - show; i < ntokens; i++) {
-                    ncc_token_info_t *t = ts->tokens[i];
-                    if (t) {
-                        fprintf(stderr, "    [%d] tid=%d", i, t->tid);
-                        if (ncc_option_is_set(t->value)) {
-                            ncc_string_t v = ncc_option_get(t->value);
-                            if (v.data) {
-                                fprintf(stderr, " \"%.*s\"",
-                                        v.u8_bytes > 40
-                                            ? 40
-                                            : (int)v.u8_bytes,
-                                        v.data);
-                            }
-                        }
-                        fprintf(stderr, "\n");
-                    }
-                }
-            }
-        }
 
         ncc_pwz_free(parser);
         ncc_token_stream_free(ts);

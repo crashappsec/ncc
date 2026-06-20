@@ -2032,7 +2032,7 @@ ncc_error_contains_tests = {
   ],
   'err_function_contract_declaration': [
     test_dir / 'err_function_contract_declaration.c',
-    'parse FAILED',
+    'parse failed',
   ],
   'err_function_contract_once': [
     test_dir / 'err_function_contract_once.c',
