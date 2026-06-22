@@ -272,8 +272,8 @@ strip_one_star(char *type)
 // Symbol -> type spelling
 // ============================================================================
 
-static char *
-type_of_symbol(ncc_sym_entry_t *sym)
+char *
+ncc_type_of_symbol(ncc_sym_entry_t *sym)
 {
     if (!sym || !sym->type_node) {
         return nullptr;
@@ -669,7 +669,7 @@ type_of_expr_inner(ncc_symtab_t *st, ncc_parse_tree_t *expr)
                     auto_depth--;
                     return r;
                 }
-                return type_of_symbol(sym);
+                return ncc_type_of_symbol(sym);
             }
         }
         return nullptr;

@@ -51,6 +51,13 @@ struct ncc_sym_entry_t {
     ncc_string_t        adt_kind;
     bool                 is_field;
     bool                 is_method;
+    bool                 is_comptime;
+    // WP-005: file-scope/static-storage initializer that routes through
+    // static-init baking metadata. Mutually exclusive with is_comptime.
+    bool                 is_static_init;
+    // True when baking the initializer requires host execution and can later
+    // use the cross-target degrade path instead of a host-produced image.
+    bool                 static_init_needs_host_exec;
 };
 
 // ============================================================================

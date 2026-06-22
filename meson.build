@@ -5,11 +5,10 @@ project('ncc', 'c',
 
 cc = meson.get_compiler('c')
 
-# ncc embeds its grammar assets via C23 #embed + Clang --embed-dir.  Rather than
+# ncc embeds its grammar assets via C23 #embed + Clang --embed-dir. Rather than
 # gate on a clang VERSION number (which under-counts compilers that already have
-# the feature — clang 21.1.x supports #embed with --embed-dir fine), require
-# clang and let the functional #embed compile check below be the authoritative
-# capability gate.
+# the feature), require clang and let the functional #embed compile check below
+# be the authoritative capability gate.
 if cc.get_id() != 'clang'
   error('ncc requires Clang (it embeds assets with C23 #embed and Clang --embed-dir).')
 endif
@@ -178,8 +177,15 @@ src_parse = files(
   'src/parse/symbol_populate.c',
   'src/parse/type_infer.c',
   'src/parse/c_tokenizer.c',
+  'src/parse/comptime_check.c',
+  'src/parse/comptime_guard.c',
+  'src/parse/comptime_meta.c',
+  'src/parse/comptime_image_emit.c',
+  'src/parse/static_init_degrade.c',
+  'src/parse/comptime_build.c',
   'src/parse/emit.c',
   'src/parse/commander.c',
+  'src/parse/crt_entry.c',
 )
 
 src_util = files(
@@ -209,6 +215,7 @@ src_xform = files(
   'src/xform/xform_option.c',
   'src/xform/xform_rpc.c',
   'src/xform/xform_rstr.c',
+  'src/xform/xform_static_init.c',
   'src/xform/xform_static_image.c',
   'src/xform/xform_static_object.c',
   'src/xform/xform_type_layout.c',
@@ -273,15 +280,6 @@ ncc_exe = executable('ncc',
 test_runner = find_program('test/run_test.sh')
 test_dir    = meson.current_source_dir() / 'test'
 
-static_image_helper = executable('test_static_image_helper',
-  'test/static_image_helper.c',
-  c_args : c_args + coverage_args,
-  link_args : coverage_link_args,
-)
-static_image_helper_flags = [
-  '--ncc-static-init-helper=' + static_image_helper.full_path(),
-]
-
 # Library-level tests (link against libncc directly)
 test_pwz = executable('test_pwz',
   'test/test_pwz.c',
@@ -331,28 +329,59 @@ test_process_run = executable('test_process_run',
 )
 test('process_run', test_process_run, suite : 'ncc', timeout : 10)
 
-# WP-012 Phase 4: drift-prevention regression test that compares the
-# standalone ncc stub helper (test/static_image_helper.c) against the
-# n00b production helper (src/tools/n00b-static-init-helper.c).  The
-# test runs the stub as a subprocess for every representative request
-# shape and, when the n00b helper is available, also runs the same
-# request through production and enforces a field-subset comparison.
-# See test/test_helper_drift.c for the full normalization scheme and
-# the documented tradeoff (subprocess vs golden).  Production-helper
-# absence is treated as a SKIP, not a failure, so CI builds that do
-# not have the n00b workspace mounted still exercise the stub-only
-# sanity path.
-test_helper_drift = executable('test_helper_drift',
-  'test/test_helper_drift.c',
+test_crt_entry = executable('test_crt_entry',
+  'test/test_crt_entry.c',
   c_args : c_args + coverage_args,
   link_args : coverage_link_args,
   dependencies : libncc_internal_dep,
 )
-test('helper_drift', test_helper_drift,
-  args : [static_image_helper.full_path()],
-  suite : 'ncc',
-  depends : [static_image_helper],
+test('crt_entry_emit', test_crt_entry, suite : 'ncc', timeout : 10)
+
+test_comptime_meta = executable('test_comptime_meta',
+  'test/test_comptime_meta.c',
+  c_args : c_args + coverage_args,
+  link_args : coverage_link_args,
+  dependencies : libncc_internal_dep,
 )
+test('comptime_meta_emit', test_comptime_meta, suite : 'ncc', timeout : 10)
+
+test_comptime_meta_io = executable('test_comptime_meta_io',
+  'test/test_comptime_meta_io.c',
+  c_args : c_args + coverage_args,
+  link_args : coverage_link_args,
+  dependencies : libncc_internal_dep,
+)
+
+test_comptime_build = executable('test_comptime_build',
+  'test/test_comptime_build.c',
+  c_args : c_args + coverage_args,
+  link_args : coverage_link_args,
+  dependencies : libncc_internal_dep,
+)
+
+test_comptime_symtab = executable('test_comptime_symtab',
+  'test/test_comptime_symtab.c',
+  c_args : c_args + coverage_args,
+  link_args : coverage_link_args,
+  dependencies : libncc_internal_dep,
+)
+test('comptime_symtab_flag', test_comptime_symtab, suite : 'ncc', timeout : 10)
+
+test_comptime_check = executable('test_comptime_check',
+  'test/test_comptime_check.c',
+  c_args : c_args + coverage_args,
+  link_args : coverage_link_args,
+  dependencies : libncc_internal_dep,
+)
+test('comptime_readonly_check', test_comptime_check, suite : 'ncc', timeout : 10)
+
+test_comptime_guard = executable('test_comptime_guard',
+  'test/test_comptime_guard.c',
+  c_args : c_args + coverage_args,
+  link_args : coverage_link_args,
+  dependencies : libncc_internal_dep,
+)
+test('comptime_guard_check', test_comptime_guard, suite : 'ncc', timeout : 10)
 
 test_fake_binary_compiler = executable('test_fake_binary_compiler',
   'test/fake_binary_compiler.c',
@@ -393,6 +422,26 @@ ncc_test_flags = [
   '-I' + ncc_include_dir,
 ]
 
+test('comptime_meta_object_io', test_comptime_meta_io,
+  args : [ncc_exe.full_path(),
+          test_dir / 'test_comptime_meta_main.c',
+          test_dir / 'test_comptime_meta_no_main.c',
+          test_dir / 'test_comptime_var.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 20,
+)
+
+test('comptime_build_driver', test_comptime_build,
+  args : [ncc_exe.full_path()] + ncc_test_flags
+         + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 30,
+)
+
 ncc_static_descriptor_flags = [
   '--ncc-static-object-entry-attr=__attribute__((used))',
   '--ncc-rstr-template-styled=({$0 static ncc_string_t $1={.u8_bytes=$2,.data=$3,.codepoints=$4,.styling=$5};$16 static const n00b_static_object_desc_t $8={.start=(const void*)&$1,.len=(uint64_t)sizeof($1),.tinfo=$6,.scan_kind=$12,.scan_cb=$13,.scan_user=$14,.object_id=$10,.file=__FILE__,.identity=$17,.flags=$11};static const n00b_static_object_desc_t * const $9 $15=&$8;&$1;})',
@@ -409,9 +458,6 @@ ncc_compile_tests = {
   'typehash_scoped': ['compile_run',  test_dir / 'test_typehash_scoped.c'],
   'typehash_autotag': ['compile_run',  test_dir / 'test_typehash_autotag.c'],
   'array_literal': ['compile_run',  test_dir / 'test_array_literal.c'],
-  'list_literal':  ['compile_run',  test_dir / 'test_list_literal.c'],
-  'dict_literal':  ['compile_run',  test_dir / 'test_dict_literal.c'],
-  'static_image': ['compile_run', test_dir / 'test_static_image.c'],
   'constexpr':    ['compile_run',  test_dir / 'test_constexpr.c'],
   'kargs':        ['compile_run',  test_dir / 'test_kargs.c'],
   'kargs_vargs':  ['compile_run',  test_dir / 'test_kargs_vargs.c'],
@@ -452,15 +498,19 @@ ncc_compile_tests = {
                             test_dir / 'test_rpc_client_stream.c'],
   'rpc_bidi':              ['compile_run',
                             test_dir / 'test_rpc_bidi.c'],
+  'comptime_meta_section': ['comptime_section_present',
+                            test_dir / 'test_comptime_meta_main.c'],
+  'comptime_meta_no_section': ['comptime_section_absent',
+                               test_dir / 'test_comptime_meta_no_main.c'],
+  'comptime_meta_proto_no_section': ['comptime_section_absent',
+                                     test_dir / 'test_comptime_meta_proto.c'],
+  'comptime_var_record': ['comptime_var_record_present',
+                          test_dir / 'test_comptime_var.c'],
 }
 
 foreach name, params : ncc_compile_tests
   extra_args = []
   test_deps = [ncc_exe]
-  if name == 'static_image' or name == 'list_literal' or name == 'array_literal' or name == 'dict_literal'
-    extra_args = static_image_helper_flags
-    test_deps += [static_image_helper]
-  endif
   # WP-002 Phase 1 (D-031): stack-maps default flipped to on. These
   # compile_run fixtures don't link the libn00b runtime that
   # provides n00b_gc_stack_push / _pop, so the transform would emit
@@ -480,6 +530,489 @@ test('ncc_function_contracts_helper_shape', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_function_contracts_wrapper_shape.c',
           'static int __ncc_cw_shaped_body']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_comptime_var_modifier_stripped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_comptime_var.c',
+          '[[n00b::comptime]]']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_comptime_readonly_error', test_runner,
+  args : [ncc_exe, 'expect_error_contains_no_output',
+          test_dir / 'test_comptime_readonly_error.c',
+          '6:5: comptime variable \'answer\' may only be assigned in comptime_main']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_comptime_readonly_member_error', test_runner,
+  args : [ncc_exe, 'expect_error_contains_no_output',
+          test_dir / 'test_comptime_readonly_member_error.c',
+          '9:5: comptime variable \'state\' may only be assigned in comptime_main']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_comptime_readonly_subscript_error', test_runner,
+  args : [ncc_exe, 'expect_error_contains_no_output',
+          test_dir / 'test_comptime_readonly_subscript_error.c',
+          '6:5: comptime variable \'slots\' may only be assigned in comptime_main']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_comptime_readonly_deref_error', test_runner,
+  args : [ncc_exe, 'expect_error_contains_no_output',
+          test_dir / 'test_comptime_readonly_deref_error.c',
+          '9:5: comptime variable \'root\' may only be assigned in comptime_main']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_comptime_optional_ok', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_comptime_optional_ok.c',
+          '[[n00b::optional]]']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_comptime_optional_misplaced', test_runner,
+  args : [ncc_exe, 'expect_error_contains_no_output',
+          test_dir / 'test_comptime_optional_misplaced.c',
+          '[[n00b::optional]] is only valid on a comptime_main definition']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_comptime_optional_no_main', test_runner,
+  args : [ncc_exe, 'expect_error_contains_no_output',
+          test_dir / 'test_comptime_optional_no_main.c',
+          '[[n00b::optional]] is only valid on a comptime_main definition']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_comptime_smoke', test_runner,
+  args : [ncc_exe, 'comptime_smoke', test_dir / 'test_comptime_smoke.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 20,
+)
+
+test('ncc_comptime_object_link', test_runner,
+  args : [ncc_exe, 'comptime_object_link',
+          test_dir / 'test_comptime_smoke.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 20,
+)
+
+test('ncc_comptime_mixed_link', test_runner,
+  args : [ncc_exe, 'comptime_mixed_link',
+          test_dir / 'test_comptime_smoke.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 20,
+)
+
+test('ncc_comptime_link_order', test_runner,
+  args : [ncc_exe, 'comptime_link_order',
+          test_dir / 'test_comptime_link_order.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 20,
+)
+
+test('ncc_comptime_forced_include', test_runner,
+  args : [ncc_exe, 'comptime_forced_include',
+          test_dir / 'test_comptime_smoke.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 20,
+)
+
+test('ncc_comptime_fail', test_runner,
+  args : [ncc_exe, 'comptime_fail', test_dir / 'test_comptime_fail.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 20,
+)
+
+test('ncc_comptime_atomic_exit', test_runner,
+  args : [ncc_exe, 'comptime_atomic_exit',
+          test_dir / 'test_comptime_fail.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 20,
+)
+
+test('ncc_comptime_atomic_signal', test_runner,
+  args : [ncc_exe, 'comptime_atomic_signal',
+          test_dir / 'test_comptime_atomic_signal.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 20,
+)
+
+test('ncc_comptime_no_comptime_flag', test_runner,
+  args : [ncc_exe, 'comptime_no_comptime',
+          test_dir / 'test_comptime_smoke.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 20,
+)
+
+test('ncc_comptime_optional_metadata', test_runner,
+  args : [ncc_exe, 'comptime_optional_metadata',
+          test_dir / 'test_comptime_optional_metadata.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 20,
+)
+
+test('ncc_comptime_degrade', test_runner,
+  args : [ncc_exe, 'comptime_degrade',
+          test_dir / 'test_comptime_degrade.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 20,
+)
+
+test('ncc_comptime_xcompile_guard', test_runner,
+  args : [ncc_exe, 'comptime_xcompile_guard',
+          test_dir / 'test_comptime_xcompile_guard.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 20,
+)
+
+test('ncc_comptime_var_link_strip', test_runner,
+  args : [ncc_exe, 'comptime_var_link_strip',
+          test_dir / 'test_comptime_var.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 20,
+)
+
+test('ncc_comptime_var_object_link_strip', test_runner,
+  args : [ncc_exe, 'comptime_var_object_link_strip',
+          test_dir / 'test_comptime_var.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 20,
+)
+
+test('ncc_comptime_image_e2e', test_runner,
+  args : [ncc_exe, 'comptime_image_e2e',
+          test_dir / 'test_comptime_image_e2e.c'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 30,
+)
+
+test('ncc_static_init_const_e2e', test_runner,
+  args : [ncc_exe, 'comptime_image_e2e',
+          test_dir / 'test_static_init_const_e2e.c'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 30,
+)
+
+test('ncc_static_init_writable_e2e', test_runner,
+  args : [ncc_exe, 'comptime_image_e2e',
+          test_dir / 'test_static_init_writable_e2e.c'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 30,
+)
+
+test('ncc_static_init_buffer_representative', test_runner,
+  args : [ncc_exe, 'comptime_image_e2e',
+          test_dir / 'test_static_init_buffer_representative.c'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 30,
+)
+
+test('ncc_buffer_static_migrated', test_runner,
+  args : [ncc_exe, 'comptime_image_e2e',
+          test_dir / 'test_buffer_static_migrated.c'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 30,
+)
+
+test('ncc_array_static_migrated', test_runner,
+  args : [ncc_exe, 'comptime_image_e2e',
+          test_dir / 'test_array_static_migrated.c'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 90,
+)
+
+test('ncc_array_static_minimal_include', test_runner,
+  args : [ncc_exe, 'comptime_image_e2e',
+          test_dir / 'test_array_static_minimal_include.c'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 60,
+)
+
+test('ncc_array_static_indirect_alloc_include', test_runner,
+  args : [ncc_exe, 'comptime_image_e2e',
+          test_dir / 'test_array_static_indirect_alloc_include.c'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 60,
+)
+
+test('ncc_array_static_const_elem_migrated', test_runner,
+  args : [ncc_exe, 'comptime_image_e2e',
+          test_dir / 'test_array_static_const_elem_migrated.c'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 60,
+)
+
+test('ncc_list_static_migrated', test_runner,
+  args : [ncc_exe, 'comptime_image_e2e',
+          test_dir / 'test_list_static_migrated.c'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 60,
+)
+
+test('ncc_dict_static_migrated', test_runner,
+  args : [ncc_exe, 'comptime_image_e2e',
+          test_dir / 'test_dict_static_migrated.c'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 60,
+)
+
+test('ncc_style_static_migrated', test_runner,
+  args : [ncc_exe, 'comptime_image_e2e',
+          test_dir / 'test_style_static_migrated.c'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 60,
+)
+
+test('ncc_container_baking_no_helper', test_runner,
+  args : [ncc_exe, 'comptime_image_e2e',
+          test_dir / 'test_container_baking_no_helper.c'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 90,
+)
+
+test('ncc_dict_baking_no_helper', test_runner,
+  args : [ncc_exe, 'comptime_image_e2e',
+          test_dir / 'test_dict_baking_no_helper.c'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 60,
+)
+
+test('ncc_array_static_const_error', test_runner,
+  args : [ncc_exe, 'expect_error_contains',
+          test_dir / 'test_array_static_const_error.c',
+          'const array static-init migration'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 30,
+)
+
+test('ncc_list_static_const_error', test_runner,
+  args : [ncc_exe, 'expect_error_contains',
+          test_dir / 'test_list_static_const_error.c',
+          'const value-root static initializer'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 30,
+)
+
+test('ncc_dict_static_const_error', test_runner,
+  args : [ncc_exe, 'expect_error_contains',
+          test_dir / 'test_dict_static_const_error.c',
+          'const value-root static initializer'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 30,
+)
+
+test('ncc_dict_static_unsupported_key_error', test_runner,
+  args : [ncc_exe, 'expect_error_contains',
+          test_dir / 'test_dict_static_unsupported_key_error.c',
+          'scalar, r-string, and buffer key types only'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 30,
+)
+
+test('ncc_dict_static_unsupported_value_error', test_runner,
+  args : [ncc_exe, 'expect_error_contains',
+          test_dir / 'test_dict_static_unsupported_value_error.c',
+          'supports scalar values, plain r-string pointer values, buffer pointer values, and marshalable static pointer values only'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 30,
+)
+
+test('ncc_dict_static_computed_pointer_migrated', test_runner,
+  args : [ncc_exe, 'comptime_image_e2e',
+          test_dir / 'test_dict_static_computed_pointer_migrated.c'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 60,
+)
+
+test('ncc_dict_static_computed_pointer_unsupported_pointee_error', test_runner,
+  args : [ncc_exe, 'expect_error_contains',
+          test_dir / 'test_dict_static_computed_pointer_unsupported_pointee_error.c',
+          'computed migrated pointer dict value pointee'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 30,
+)
+
+test('ncc_dict_static_aggregate_value_error', test_runner,
+  args : [ncc_exe, 'expect_error_contains',
+          test_dir / 'test_dict_static_aggregate_value_error.c',
+          'nested containers and aggregate values still require'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 30,
+)
+
+test('ncc_dict_static_styled_value_error', test_runner,
+  args : [ncc_exe, 'expect_error_contains',
+          test_dir / 'test_dict_static_styled_value_error.c',
+          'styled r-string dict values are not supported',
+          '--ncc-rstr-string-type=n00b_string_t'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 30,
+)
+
+test('ncc_list_static_styled_error', test_runner,
+  args : [ncc_exe, 'expect_error_contains',
+          test_dir / 'test_list_static_styled_error.c',
+          'styled r-string elements are not supported',
+          '--ncc-rstr-string-type=n00b_string_t'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 30,
+)
+
+test('ncc_list_static_aggregate_scalar_error', test_runner,
+  args : [ncc_exe, 'expect_error_contains',
+          test_dir / 'test_list_static_aggregate_scalar_error.c',
+          'non-pointer field'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 30,
+)
+
+test('ncc_array_static_styled_error', test_runner,
+  args : [ncc_exe, 'expect_error_contains',
+          test_dir / 'test_array_static_styled_error.c',
+          'styled r-string elements are not supported',
+          '--ncc-rstr-string-type=n00b_string_t'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 30,
+)
+
+test('ncc_array_static_aggregate_scalar_error', test_runner,
+  args : [ncc_exe, 'expect_error_contains',
+          test_dir / 'test_array_static_aggregate_scalar_error.c',
+          'non-pointer field'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 30,
+)
+
+test('ncc_static_init_mutation_error', test_runner,
+  args : [ncc_exe, 'static_init_mutation_error',
+          test_dir / 'test_static_init_mutation_error.c'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 30,
+)
+
+test('ncc_static_init_no_comptime_degrade', test_runner,
+  args : [ncc_exe, 'static_init_no_comptime_degrade',
+          test_dir / 'test_static_init_const_e2e.c'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 30,
+)
+
+test('ncc_static_init_writable_no_comptime_degrade', test_runner,
+  args : [ncc_exe, 'static_init_no_comptime_degrade',
+          test_dir / 'test_static_init_writable_e2e.c'],
+  suite : 'ncc',
+  depends : ncc_exe,
+  timeout : 30,
+)
+
+test('ncc_static_init_internal_error', test_runner,
+  args : [ncc_exe, 'expect_error_contains_no_output',
+          test_dir / 'test_static_init_internal_error.c',
+          'static initializer \'state\' has internal linkage']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps',
                              '--ncc-no-auto-gc-roots'],
   suite : 'ncc',
@@ -638,91 +1171,73 @@ test('ncc_function_contracts_release_kargs_statement_default', test_runner,
 test('ncc_static_object_descriptors', test_runner,
   args : [ncc_exe, 'compile_run',
           test_dir / 'test_static_object_descriptors.c']
-         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags
+         + ncc_test_flags + ncc_static_descriptor_flags
          + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
   suite : 'ncc',
-  depends : [ncc_exe, static_image_helper],
+  depends : ncc_exe,
 )
 
-test('ncc_static_object_descriptors_array_desc', test_runner,
+test('ncc_static_object_descriptors_array_data', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
-          'n00b_static_object_desc_t __ncc_arraylit_']
-         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
+          'static int __ncc_arraylit_']
+         + ncc_test_flags + ncc_static_descriptor_flags,
   suite : 'ncc',
-  depends : [ncc_exe, static_image_helper],
+  depends : ncc_exe,
 )
 
 test('ncc_static_object_descriptors_rstr_desc', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
           'n00b_static_object_desc_t _ncc_rsd_']
-         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
+         + ncc_test_flags + ncc_static_descriptor_flags,
   suite : 'ncc',
-  depends : [ncc_exe, static_image_helper],
+  depends : ncc_exe,
 )
 
 test('ncc_static_object_descriptors_pointer_scan', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
           '.scan_kind = 2']
-         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
+         + ncc_test_flags + ncc_static_descriptor_flags,
   suite : 'ncc',
-  depends : [ncc_exe, static_image_helper],
+  depends : ncc_exe,
 )
 
 test('ncc_static_object_descriptors_nested_scan', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
           'n00b_gc_scan_cb_struct_field']
-         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
+         + ncc_test_flags + ncc_static_descriptor_flags,
   suite : 'ncc',
-  depends : [ncc_exe, static_image_helper],
+  depends : ncc_exe,
 )
 
 test('ncc_static_object_descriptors_sparse_scan', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
           'n00b_gc_scan_cb_struct_layout']
-         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
+         + ncc_test_flags + ncc_static_descriptor_flags,
   suite : 'ncc',
-  depends : [ncc_exe, static_image_helper],
+  depends : ncc_exe,
 )
 
 test('ncc_static_object_descriptors_sparse_offset', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
           '__builtin_offsetof (descriptor_sparse_item_t, left)']
-         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
+         + ncc_test_flags + ncc_static_descriptor_flags,
   suite : 'ncc',
-  depends : [ncc_exe, static_image_helper],
+  depends : ncc_exe,
 )
 
 test('ncc_static_object_descriptors_entry_attr', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_static_object_descriptors.c',
           '__attribute__ ((used))']
-         + ncc_test_flags + ncc_static_descriptor_flags + static_image_helper_flags,
+         + ncc_test_flags + ncc_static_descriptor_flags,
   suite : 'ncc',
-  depends : [ncc_exe, static_image_helper],
-)
-
-test('ncc_static_image_response_contract', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
-          test_dir / 'test_static_image.c',
-          'n00b_static_image_response_t __ncc_static_image_']
-         + ncc_test_flags + static_image_helper_flags,
-  suite : 'ncc',
-  depends : [ncc_exe, static_image_helper],
-)
-
-test('ncc_static_image_dependency_contract', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
-          test_dir / 'test_static_image.c',
-          '.dependency_count = 1']
-         + ncc_test_flags + static_image_helper_flags,
-  suite : 'ncc',
-  depends : [ncc_exe, static_image_helper],
+  depends : ncc_exe,
 )
 
 test('ncc_gc_typemap_direct_pointer_offset', test_runner,
@@ -916,6 +1431,30 @@ test('ncc_gc_typemap_gcidx_entry', test_runner,
           test_dir / 'test_gc_typemap.c',
           '__ncc_gcidx_ent_']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_disabled_omits_gcmap', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_typemap.c',
+          'n00b_gcmap']
+         + ncc_test_flags
+         + ['--ncc-no-gc-stack-maps',
+            '--ncc-no-auto-gc-roots',
+            '--ncc-no-gc-typemaps'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_disabled_omits_gcidx', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__ncc_gcidx_ent_']
+         + ncc_test_flags
+         + ['--ncc-no-gc-stack-maps',
+            '--ncc-no-auto-gc-roots',
+            '--ncc-no-gc-typemaps'],
   suite : 'ncc',
   depends : ncc_exe,
 )
@@ -1530,6 +2069,33 @@ test('ncc_auto_gc_roots_atomic_pointer_num_words', test_runner,
   depends : ncc_exe,
 )
 
+test('ncc_auto_gc_roots_atomic_struct_member', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_atomic_struct_member.c',
+          '& (atomic_member_holder).head']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_auto_gc_roots_atomic_struct_member_array_addr', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_atomic_struct_member.c',
+          '& (atomic_member_holder).tail']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_auto_gc_roots_atomic_struct_member_array_num_words', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_atomic_struct_member.c',
+          '.num_words = 3']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 test('ncc_auto_gc_roots_atomic_scalar_skipped', test_runner,
   args : [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_auto_gc_roots_atomic_pointer_scalar.c',
@@ -1913,8 +2479,75 @@ test('ncc_verbose_high_output', test_runner,
   timeout : 10,
 )
 
-test('ncc_compiler_stdin_close', test_runner,
-  args : [ncc_exe, 'compiler_stdin_close', test_dir / 'test_bang.c']
+test('ncc_crt_entry_default_no_inject', test_runner,
+  args : [ncc_exe, 'custom_entry_default_no_inject',
+          test_dir / 'test_crt_entry_smoke.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_crt_entry_compile_only_no_inject', test_runner,
+  args : [ncc_exe, 'custom_entry_compile_only_no_inject',
+          test_dir / 'test_crt_entry_smoke.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_crt_entry_assemble_only_no_inject', test_runner,
+  args : [ncc_exe, 'custom_entry_assemble_only_no_inject',
+          test_dir / 'test_crt_entry_smoke.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_crt_entry_syntax_only_no_inject', test_runner,
+  args : [ncc_exe, 'custom_entry_syntax_only_no_inject',
+          test_dir / 'test_crt_entry_smoke.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_crt_entry_dep_only_no_inject', test_runner,
+  args : [ncc_exe, 'custom_entry_dep_only_no_inject',
+          test_dir / 'test_crt_entry_smoke.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots',
+                             '--ncc-constexpr-include',
+                             'ncc-passthrough-marker'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_crt_entry_smoke', test_runner,
+  args : [ncc_exe, 'custom_entry_run',
+          test_dir / 'test_crt_entry_smoke.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_crt_entry_object_smoke', test_runner,
+  args : [ncc_exe, 'custom_entry_object_run',
+          test_dir / 'test_crt_entry_smoke.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                             '--ncc-no-auto-gc-roots',
+                             '--ncc-constexpr-include',
+                             'ncc-object-link-marker'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_compiler_temp_source', test_runner,
+  args : [ncc_exe, 'compiler_temp_source', test_dir / 'test_bang.c']
          + ncc_test_flags,
   env : {'NCC_COMPILER' : test_fake_stdin_close_compiler.full_path()},
   suite : 'ncc',
@@ -2037,7 +2670,7 @@ ncc_error_contains_tests = {
   ],
   'err_function_contract_declaration': [
     test_dir / 'err_function_contract_declaration.c',
-    'parse failed',
+    'parse FAILED',
   ],
   'err_function_contract_once': [
     test_dir / 'err_function_contract_once.c',
@@ -2139,10 +2772,6 @@ ncc_error_contains_tests = {
     test_dir / 'err_array_literal_missing_field_policy.c',
     'no static-layout policy',
   ],
-  'err_array_literal_missing_helper': [
-    test_dir / 'err_array_literal_missing_helper.c',
-    'requires --ncc-static-init-helper=PATH',
-  ],
   'err_list_literal_non_list_target': [
     test_dir / 'err_list_literal_non_list_target.c',
     'list literal initializer',
@@ -2155,14 +2784,6 @@ ncc_error_contains_tests = {
     test_dir / 'err_list_literal_bstr_type.c',
     'b-string list element requires element type',
   ],
-  'err_list_literal_missing_helper': [
-    test_dir / 'err_list_literal_missing_helper.c',
-    'requires --ncc-static-init-helper=PATH',
-  ],
-  # WP-011 Phase 2 dict literal fixtures.  These all expect targeted
-  # diagnostics; the helper-backed lowering lands in Phase 3.  The
-  # `_stub` fixture pins the Phase 2 stub message and is DELETED when
-  # Phase 3 implements real dict lowering.
   'err_dict_literal_non_dict_target': [
     test_dir / 'err_dict_literal_non_dict_target.c',
     'dict literal initializer',
@@ -2175,14 +2796,11 @@ ncc_error_contains_tests = {
     test_dir / 'err_dict_literal_local_mutable.c',
     'non-const local dict literal',
   ],
-  # Phase 3c.iii permanent fixture: generic struct-pointer key
-  # (DICT_KEY_KIND_POINTER, not r-string and not buffer) routes to
-  # the dict pointer-key partial-stub diagnostic.  Renamed from
-  # `err_dict_literal_stub` in Phase 3c.iii; see the fixture's
-  # leading comment.
+  # WP-007 migrated dict roots now intercept file-scope writable
+  # struct-pointer-keyed dicts before legacy helper fallback.
   'err_dict_literal_struct_pointer_key': [
     test_dir / 'err_dict_literal_struct_pointer_key.c',
-    'dict pointer-key lowering not yet implemented for this pointer type in WP-011 Phase 3c.ii.b',
+    'currently supports scalar, r-string, and buffer key types only',
   ],
   # Phase 3c.iii: non-pointer-non-scalar key types (e.g. `float`)
   # land in DICT_KEY_KIND_UNSUPPORTED and emit a friendly
@@ -2199,40 +2817,10 @@ ncc_error_contains_tests = {
     test_dir / 'err_dict_literal_unsupported_value_type.c',
     'dict literal value type',
   ],
-  # Phase 3c.iii: a valid dict literal compiled without
-  # `--ncc-static-init-helper=PATH` fails with the missing-helper
-  # diagnostic (parallel to the list / array missing-helper
-  # fixtures).
-  'err_dict_literal_missing_helper': [
-    test_dir / 'err_dict_literal_missing_helper.c',
-    'requires --ncc-static-init-helper=PATH',
-  ],
   # Phase 3c.i duplicate-key compile-time rejection (D-065).
   'err_dict_literal_duplicate_key': [
     test_dir / 'err_dict_literal_duplicate_key.c',
     'duplicate key',
-  ],
-  'err_static_image_bad_payload': [
-    test_dir / 'err_static_image_bad_payload.c',
-    'requires a string payload',
-    '--ncc-static-init-helper=' + static_image_helper.full_path(),
-  ],
-  'err_static_image_non_pointer': [
-    test_dir / 'err_static_image_non_pointer.c',
-    'must target a pointer',
-  ],
-  'err_static_image_local_mutable': [
-    test_dir / 'err_static_image_local_mutable.c',
-    'must be declared at file scope',
-  ],
-  'err_static_image_not_initializer': [
-    test_dir / 'err_static_image_not_initializer.c',
-    'must be used as the whole initializer expression',
-  ],
-  'err_static_image_unsupported_target': [
-    test_dir / 'err_static_image_unsupported_target.c',
-    'not supported',
-    '--ncc-static-init-helper=' + static_image_helper.full_path(),
   ],
   'err_buffer_literal_target': [
     test_dir / 'err_buffer_literal_target.c',
@@ -2264,6 +2852,6 @@ foreach name, params : ncc_error_contains_tests
     args : [ncc_exe, 'expect_error_contains', params[0], params[1]]
            + ncc_test_flags + extra_args,
     suite : 'ncc',
-    depends : [ncc_exe, static_image_helper],
+    depends : ncc_exe,
   )
 endforeach

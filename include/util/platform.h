@@ -2,6 +2,14 @@
 
 #include "ncc.h"
 
+typedef enum {
+    NCC_PROCESS_TERM_UNKNOWN = 0,
+    NCC_PROCESS_TERM_EXITED,
+    NCC_PROCESS_TERM_SIGNALED,
+    NCC_PROCESS_TERM_EXCEPTION,
+    NCC_PROCESS_TERM_LAUNCH,
+} ncc_process_term_kind_t;
+
 typedef struct {
     const char *program;
     const char **argv;
@@ -12,11 +20,14 @@ typedef struct {
 } ncc_process_spec_t;
 
 typedef struct {
-    int exit_code;
-    char *stdout_data;
-    size_t stdout_len;
-    char *stderr_data;
-    size_t stderr_len;
+    int                     exit_code;
+    ncc_process_term_kind_t term_kind;
+    int                     signal_number;
+    unsigned long           exception_code;
+    char                   *stdout_data;
+    size_t                  stdout_len;
+    char                   *stderr_data;
+    size_t                  stderr_len;
 } ncc_process_result_t;
 
 /*
@@ -29,12 +40,13 @@ typedef struct {
  * otherwise the child inherits the corresponding parent stream.
  *
  * Returns false for invalid specs, OS setup failures, launch/exec failures,
- * and fatal parent-side I/O failures. In that case out->exit_code remains -1
- * and out->stderr_data may contain a diagnostic owned by the caller. Returns
- * true only after the child process has launched successfully; child exit
- * status is reported through out->exit_code even when it is nonzero. If the
- * child closes stdin before all requested input is written, the child result
- * is still reported instead of treating the closed pipe as a launch failure.
+ * and fatal parent-side I/O failures. In that case out->exit_code remains -1,
+ * out->term_kind is NCC_PROCESS_TERM_LAUNCH, and out->stderr_data may contain a
+ * diagnostic owned by the caller. Returns true only after the child process has
+ * launched successfully; child exit status or signal/exception termination is
+ * reported through out even when it is nonzero. If the child closes stdin
+ * before all requested input is written, the child result is still reported
+ * instead of treating the closed pipe as a launch failure.
  *
  * Captured stdout/stderr buffers are byte buffers owned by the caller and
  * released by ncc_process_result_free(). A capture buffer may contain embedded

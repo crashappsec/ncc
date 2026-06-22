@@ -1,11 +1,11 @@
 // test_auto_gc_roots_ncc_emitted_skipped.c
 //
 // Phase 2 skip-rule regression test (spec § 2.2 row 3 — declarator
-// inside `__ncc_static_image(...)` form or other ncc-emitted
+// inside a buflit static object or other ncc-emitted
 // static-object range). With `--ncc-auto-gc-roots` on, any
 // TU-scope pointer decl whose identifier begins with `__ncc_` must
 // NOT produce a registration entry — those names belong to
-// ncc-emitted static-object pipelines (static-image, once-guard,
+// ncc-emitted static-object pipelines (buflit, once-guard,
 // buflit, future ones) that register their pointer slots via their
 // own machinery.
 //

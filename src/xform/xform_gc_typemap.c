@@ -1176,6 +1176,11 @@ ncc_gc_typemap_note(ncc_xform_ctx_t *ctx, const char *type_str, uint64_t hash)
         return;
     }
 
+    ncc_xform_data_t *data = ncc_xform_get_data(ctx);
+    if (data && !data->gc_typemaps) {
+        return;
+    }
+
     // _Atomic(T *) may carry a trailing '*' in its normalized spelling, but it
     // is not an aggregate object type we can allocate and describe with
     // offsetof(). Atomic pointer FIELDS are handled by gc_walk; top-level
@@ -1287,7 +1292,13 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
 {
     ncc_buffer_t *out      = ncc_buffer_empty();
     size_t        n_emitted = 0;
-    const char   *stobj_attr = ncc_xform_get_data(ctx)->static_object_entry_attr;
+
+    ncc_xform_data_t *data = ncc_xform_get_data(ctx);
+    if (data && !data->gc_typemaps) {
+        return ncc_buffer_take(out);
+    }
+
+    const char   *stobj_attr = data ? data->static_object_entry_attr : nullptr;
     char         *gcmap_attr = derive_gcmap_attr(stobj_attr);
     char         *gcidx_attr = derive_gcidx_attr(stobj_attr);
 

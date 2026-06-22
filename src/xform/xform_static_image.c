@@ -1,4 +1,4 @@
-// xform_static_image.c -- Constructor/static-image literal lowering.
+// xform_static_image.c -- File-scope b"..." buffer literal lowering.
 
 #include "lib/alloc.h"
 #include "lib/buffer.h"
@@ -60,7 +60,11 @@ typedef struct {
     size_t              cap;
 } static_image_arg_list_t;
 
-static const char *static_image_host_endian_value(void);
+typedef struct {
+    unsigned char *bytes;
+    size_t         byte_len;
+    size_t         storage_len;
+} buffer_static_payload_t;
 
 static void
 static_image_errorf(ncc_parse_tree_t *node, const char *fmt, ...)
@@ -167,6 +171,54 @@ copy_cstr(const char *text)
 }
 
 static char *
+declarator_name(ncc_parse_tree_t *node)
+{
+    if (!node) {
+        return nullptr;
+    }
+
+    if (ncc_tree_is_leaf(node)) {
+        const char *text = ncc_xform_leaf_text(node);
+        if (text && (isalpha((unsigned char)text[0]) || text[0] == '_')) {
+            return copy_cstr(text);
+        }
+        return nullptr;
+    }
+
+    char  *last = nullptr;
+    size_t nc   = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        char *candidate = declarator_name(ncc_tree_child(node, i));
+        if (candidate) {
+            ncc_free(last);
+            last = candidate;
+        }
+    }
+
+    return last;
+}
+
+static ncc_sym_entry_t *
+lookup_static_init_entry(ncc_xform_ctx_t *ctx, const char *name)
+{
+    ncc_xform_data_t *data = ncc_xform_get_data(ctx);
+    if (!data || !data->symtab || !name) {
+        return nullptr;
+    }
+
+    ncc_string_t key = {
+        .data = (char *)name,
+        .u8_bytes = strlen(name),
+    };
+    ncc_sym_entry_t *entry =
+        ncc_symtab_lookup(data->symtab, ncc_string_empty(), key);
+
+    return entry && entry->kind == NCC_SYM_VARIABLE && entry->is_static_init
+               ? entry
+               : nullptr;
+}
+
+static char *
 compact_type(const char *type)
 {
     ncc_buffer_t *buf = ncc_buffer_empty();
@@ -194,7 +246,7 @@ insert_generated_decl(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
 
     if (!wrapper) {
         static_image_errorf(decl,
-                            "static image transform could not find insertion "
+                            "buffer literal transform could not find insertion "
                             "context");
     }
 
@@ -202,7 +254,7 @@ insert_generated_decl(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                                                     "xform_static_image");
     if (!tree) {
         fprintf(stderr,
-                "ncc: error: failed to parse generated static image "
+                "ncc: error: failed to parse generated buffer literal "
                 "declaration:\n%s\n",
                 src);
         exit(1);
@@ -289,8 +341,7 @@ is_static_image_call(ncc_parse_tree_t *node)
     }
 
     const char *name = callee_name(node);
-    return name && (strcmp(name, "ncc_static_image") == 0
-                    || strcmp(name, "__ncc_buflit") == 0);
+    return name && strcmp(name, "__ncc_buflit") == 0;
 }
 
 static bool
@@ -303,8 +354,8 @@ is_buffer_literal_call(ncc_parse_tree_t *node)
 static const char *
 static_image_syntax_name(ncc_parse_tree_t *call)
 {
-    return is_buffer_literal_call(call) ? "b\"...\" buffer literal"
-                                       : "ncc_static_image()";
+    (void)call;
+    return "b\"...\" buffer literal";
 }
 
 static ncc_parse_tree_t *
@@ -454,26 +505,6 @@ decode_string_literal_sequence(ncc_parse_tree_t *node, ncc_buffer_t *out,
     }
 
     return true;
-}
-
-static void
-append_hex(ncc_buffer_t *out, const void *data, size_t len)
-{
-    static const char hex[] = "0123456789abcdef";
-    const unsigned char *bytes = data;
-
-    for (size_t i = 0; i < len; i++) {
-        ncc_buffer_putc(out, hex[bytes[i] >> 4]);
-        ncc_buffer_putc(out, hex[bytes[i] & 0xf]);
-    }
-}
-
-static char *
-hex_string(const void *data, size_t len)
-{
-    ncc_buffer_t *out = ncc_buffer_empty();
-    append_hex(out, data, len);
-    return ncc_buffer_take(out);
 }
 
 static char *
@@ -640,8 +671,8 @@ collect_static_image_args(ncc_parse_tree_t *call)
 {
     if (ncc_tree_num_children(call) < 3) {
         static_image_errorf(call,
-                            "ncc_static_image() requires static initializer "
-                            "arguments");
+                            "b\"...\" buffer literal requires static "
+                            "initializer arguments");
     }
 
     ncc_parse_tree_t *arglist = ncc_tree_child(call, 2);
@@ -667,8 +698,9 @@ collect_static_image_args(ncc_parse_tree_t *call)
                 ncc_free(args);
                 free_arg_list(&result);
                 static_image_errorf(arg_node,
-                                    "ncc_static_image() keyword arguments "
-                                    "must have the form .name = literal");
+                                    "b\"...\" buffer literal keyword "
+                                    "arguments must have the form "
+                                    ".name = literal");
             }
         }
 
@@ -681,9 +713,9 @@ collect_static_image_args(ncc_parse_tree_t *call)
             ncc_free(args);
             free_arg_list(&result);
             static_image_errorf(arg_node,
-                                "ncc_static_image() arguments must be string, "
-                                "integer, or boolean literals for the static "
-                                "initializer helper; got '%s'",
+                                "b\"...\" buffer literal arguments must be "
+                                "string, integer, or boolean literals; got "
+                                "'%s'",
                                 bad_text);
         }
         arg_list_push(&result, item);
@@ -693,16 +725,13 @@ collect_static_image_args(ncc_parse_tree_t *call)
     return result;
 }
 
-// WP-011 Phase 5f: inject `cached_hash_lo`/`cached_hash_hi` integer
-// args into the static-image arg list for the standalone buffer
-// literal case (`static n00b_buffer_t *p = b"...";`).  The single
-// positional bytes arg the prescan emits for `__ncc_buflit("...")`
-// carries the payload; we hash it with the same XXH3_128bits
-// sequence `n00b_buffer_hash` uses at runtime, then append the two
-// halves as named integer args.  The n00b-side
-// `n00b_buffer_static_init` (and the test stub) already accept these
-// kwargs (Phase 3c.iii) and emit the resulting `.cached_hash`
-// expression into the buffer object descriptor.
+// Inject `cached_hash_lo`/`cached_hash_hi` integer args into the
+// static-init arg list for the standalone buffer literal case
+// (`static n00b_buffer_t *p = b"...";`).  The single positional bytes
+// arg the prescan emits for `__ncc_buflit("...")` carries the payload;
+// we hash it with the same XXH3_128bits sequence `n00b_buffer_hash`
+// uses at runtime, then append the two halves as named integer args for
+// the migrated generalized static-init builder.
 //
 // Empty buffers (zero-length payload) skip the injection so the
 // descriptor's `.cached_hash` slot stays at zero — `n00b_buffer_hash`
@@ -745,10 +774,9 @@ inject_buffer_cached_hash_args(static_image_arg_list_t *args)
     }
 
     XXH128_hash_t h = XXH3_128bits(payload, payload_len);
-    // The helper wire is signed int64 underneath (see
-    // `static_image_arg_t.scalar_text` decoding in build_helper_request
-    // and the n00b-side parser in src/core/buffer.c); cast through
-    // int64_t so the bit pattern survives sign reinterpretation.
+    // The buffer parser expects signed integer text for these cached-hash
+    // arguments; cast through int64_t so the bit pattern survives sign
+    // reinterpretation.
     int64_t lo_signed = (int64_t)(uint64_t)h.low64;
     int64_t hi_signed = (int64_t)(uint64_t)h.high64;
 
@@ -771,176 +799,278 @@ inject_buffer_cached_hash_args(static_image_arg_list_t *args)
     arg_list_push(args, hi_arg);
 }
 
-static char *
-build_helper_request(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *call,
-                     const char *type_name, const char *prefix, bool readonly,
-                     const static_image_arg_list_t *args)
+static bool
+arg_name_is(const static_image_arg_t *arg, const char *name)
 {
-    ncc_buffer_t *buf = ncc_buffer_empty();
-    char *type_hex = hex_string(type_name, strlen(type_name));
-    ncc_buffer_t *hash_type_buf = ncc_buffer_empty();
-    ncc_buffer_printf(hash_type_buf, "%s*", type_name);
-    char *hash_type = ncc_buffer_take(hash_type_buf);
-    char *type_hash = ncc_static_object_typehash_expr(hash_type);
-    const char *entry_attr = ncc_static_object_entry_attr(ctx);
-    char *entry_attr_hex = hex_string(entry_attr, strlen(entry_attr));
-    char *identity_namespace =
-        ncc_static_object_identity_namespace(ctx, call);
-    char *identity_object_key =
-        ncc_static_object_identity_key(ctx,
-                                       "ncc-static-image-object",
-                                       call,
-                                       type_hash,
-                                       "1");
-    char *identity_payload_key =
-        ncc_static_object_identity_key(ctx,
-                                       "ncc-static-image-payload",
-                                       call,
-                                       "0",
-                                       "payload");
-    char *identity_namespace_hex =
-        hex_string(identity_namespace, strlen(identity_namespace));
-    char *identity_object_key_hex =
-        hex_string(identity_object_key, strlen(identity_object_key));
-    char *identity_payload_key_hex =
-        hex_string(identity_payload_key, strlen(identity_payload_key));
+    return arg && arg->name && strcmp(arg->name, name) == 0;
+}
 
-    ncc_buffer_printf(buf,
-                      "NCC_STATIC_INIT 1\n"
-                      "type_hex %s\n"
-                      "type_hash %s\n"
-                      "prefix %s\n"
-                      "readonly %u\n"
-                      "abi %zu %zu 8 %s\n"
-                      "entry_attr_hex %s\n"
-                      "identity_namespace_hex %s\n"
-                      "identity_object_key_hex %s\n"
-                      "identity_payload_key_hex %s\n"
-                      "arg_count %zu\n",
-                      type_hex, type_hash, prefix, readonly ? 1u : 0u,
-                      sizeof(void *), sizeof(size_t),
-                      static_image_host_endian_value(),
-                      entry_attr_hex,
-                      identity_namespace_hex,
-                      identity_object_key_hex,
-                      identity_payload_key_hex,
-                      args->len);
+static size_t
+buffer_static_capacity(size_t len)
+{
+    if (len == 0) {
+        return 16;
+    }
+
+    size_t cap = 1;
+    while (cap < len) {
+        cap <<= 1;
+    }
+    return cap;
+}
+
+static int
+hex_digit_value(unsigned char c)
+{
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+static unsigned char *
+decode_buffer_hex_arg(ncc_parse_tree_t *call,
+                      const static_image_arg_t *arg,
+                      size_t *out_len)
+{
+    if ((arg->byte_len % 2u) != 0) {
+        static_image_errorf(call,
+                            "migrated n00b_buffer_t static-init .hex "
+                            "requires an even number of hex digits");
+    }
+
+    size_t len = arg->byte_len / 2u;
+    unsigned char *data = ncc_alloc_array(unsigned char, len ? len : 1);
+    for (size_t i = 0; i < len; i++) {
+        int hi = hex_digit_value((unsigned char)arg->bytes[i * 2u]);
+        int lo = hex_digit_value((unsigned char)arg->bytes[i * 2u + 1u]);
+        if (hi < 0 || lo < 0) {
+            ncc_free(data);
+            static_image_errorf(call,
+                                "migrated n00b_buffer_t static-init .hex "
+                                "contains a non-hex digit");
+        }
+        data[i] = (unsigned char)((hi << 4) | lo);
+    }
+
+    *out_len = len;
+    return data;
+}
+
+static void
+buffer_static_init_payload(ncc_parse_tree_t *call,
+                           const static_image_arg_list_t *args,
+                           buffer_static_payload_t *out)
+{
+    const unsigned char *payload = nullptr;
+    unsigned char       *decoded_hex = nullptr;
+    size_t               payload_len = 0;
+    bool                 have_payload = false;
+    bool                 have_length = false;
+    size_t               length = 0;
 
     for (size_t i = 0; i < args->len; i++) {
         const static_image_arg_t *arg = &args->data[i];
-        const char *name = arg->name ? arg->name : "-";
-        if (arg->kind == STATIC_IMAGE_ARG_BYTES) {
-            char *payload_hex = hex_string(arg->bytes, arg->byte_len);
-            ncc_buffer_printf(buf, "arg %s bytes %zu %s\n", name,
-                              arg->byte_len, payload_hex);
-            ncc_free(payload_hex);
+        bool positional = arg->name == nullptr;
+
+        if ((positional || arg_name_is(arg, "raw"))
+            && arg->kind == STATIC_IMAGE_ARG_BYTES) {
+            if (have_payload) {
+                ncc_free(decoded_hex);
+                static_image_errorf(call,
+                                    "migrated n00b_buffer_t static-init "
+                                    "accepts only one raw or hex payload");
+            }
+            payload = (const unsigned char *)arg->bytes;
+            payload_len = arg->byte_len;
+            have_payload = true;
+            continue;
         }
-        else if (arg->kind == STATIC_IMAGE_ARG_INT) {
-            ncc_buffer_printf(buf, "arg %s int %s\n", name,
-                              arg->scalar_text);
+
+        if (arg_name_is(arg, "hex") && arg->kind == STATIC_IMAGE_ARG_BYTES) {
+            if (have_payload) {
+                ncc_free(decoded_hex);
+                static_image_errorf(call,
+                                    "migrated n00b_buffer_t static-init "
+                                    "accepts only one raw or hex payload");
+            }
+            decoded_hex = decode_buffer_hex_arg(call, arg, &payload_len);
+            payload = decoded_hex;
+            have_payload = true;
+            continue;
         }
-        else {
-            bool value = strcmp(arg->scalar_text, "true") == 0
-                      || strcmp(arg->scalar_text, "1") == 0;
-            ncc_buffer_printf(buf, "arg %s bool %u\n", name,
-                              value ? 1u : 0u);
+
+        if (arg_name_is(arg, "length") && arg->kind == STATIC_IMAGE_ARG_INT) {
+            if (arg->scalar_text[0] == '-') {
+                ncc_free(decoded_hex);
+                static_image_errorf(call,
+                                    "migrated n00b_buffer_t static-init "
+                                    ".length must be non-negative");
+            }
+            char *end = nullptr;
+            unsigned long long parsed = strtoull(arg->scalar_text, &end, 10);
+            if (!end || *end != '\0') {
+                ncc_free(decoded_hex);
+                static_image_errorf(call,
+                                    "migrated n00b_buffer_t static-init "
+                                    ".length must be an integer literal");
+            }
+            length = (size_t)parsed;
+            have_length = true;
+            continue;
         }
+
+        if (arg_name_is(arg, "no_lock") && arg->kind == STATIC_IMAGE_ARG_BOOL) {
+            continue;
+        }
+
+        if ((arg_name_is(arg, "cached_hash_lo")
+             || arg_name_is(arg, "cached_hash_hi"))
+            && arg->kind == STATIC_IMAGE_ARG_INT) {
+            continue;
+        }
+
+        ncc_free(decoded_hex);
+        static_image_errorf(call,
+                            "migrated n00b_buffer_t static-init currently "
+                            "supports only b\"...\", .raw, .hex, .length, "
+                            "and .no_lock arguments");
     }
 
-    ncc_buffer_puts(buf, "end\n");
+    if (!have_payload) {
+        payload_len = have_length ? length : 0;
+    }
+    else if (have_length && length != payload_len) {
+        ncc_free(decoded_hex);
+        static_image_errorf(call,
+                            "migrated n00b_buffer_t static-init .length "
+                            "must match the raw/hex payload length");
+    }
 
-    ncc_free(type_hex);
-    ncc_free(hash_type);
+    size_t storage_len = buffer_static_capacity(payload_len);
+    unsigned char *bytes = ncc_alloc_array(unsigned char, storage_len);
+    if (payload && payload_len) {
+        memcpy(bytes, payload, payload_len);
+    }
+
+    ncc_free(decoded_hex);
+    *out = (buffer_static_payload_t){
+        .bytes       = bytes,
+        .byte_len    = payload_len,
+        .storage_len = storage_len,
+    };
+}
+
+static void
+append_c_byte_array(ncc_buffer_t *buf, const unsigned char *payload,
+                    size_t payload_len)
+{
+    if (payload_len == 0) {
+        ncc_buffer_puts(buf, "0");
+        return;
+    }
+
+    for (size_t i = 0; i < payload_len; i++) {
+        if (i > 0) {
+            ncc_buffer_puts(buf, ",");
+        }
+        ncc_buffer_printf(buf, "0x%02x", (unsigned)payload[i]);
+    }
+}
+
+static char *
+buffer_static_init_runtime_decls(const char *prefix,
+                                 const buffer_static_payload_t *payload)
+{
+    ncc_buffer_t *buf = ncc_buffer_empty();
+    char *type_hash = ncc_static_object_typehash_expr("n00b_buffer_t*");
+    char *payload_type_hash = ncc_static_object_typehash_expr("char*");
+    XXH128_hash_t h = {0};
+    if (payload->byte_len > 0) {
+        h = XXH3_128bits(payload->bytes, payload->byte_len);
+    }
+
+	    ncc_buffer_printf(buf,
+	                      "# line 1 \"ncc-generated-buffer-static-init-%s.c\"\n"
+	                      "#ifndef N00B_BUF_F_BORROWED\n"
+	                      "#define N00B_BUF_F_BORROWED (1 << 1)\n"
+	                      "#endif\n"
+	                      "static const unsigned char %s_payload[] = {",
+	                      prefix,
+	                      prefix);
+	    append_c_byte_array(buf, payload->bytes, payload->storage_len);
+	    ncc_buffer_printf(buf,
+	                      "};\n"
+	                      "extern n00b_buffer_t *n00b_crt_alloc_static_buffer("
+	                      "unsigned long long, unsigned long long, "
+	                      "unsigned long long);\n"
+	                      "extern void *n00b_crt_alloc_static_payload("
+	                      "unsigned long long, unsigned long long, "
+	                      "unsigned long long, unsigned int, "
+	                      "n00b_gc_scan_cb_t, void *);\n"
+	                      "static n00b_buffer_t *%s_make(void)\n"
+	                      "{\n"
+	                      "    n00b_buffer_t *buf = "
+	                      "n00b_crt_alloc_static_buffer("
+	                      "%s, 0x%016llxULL, 0x%016llxULL);\n"
+	                      "    char *data = n00b_crt_alloc_static_payload("
+	                      "%zuULL, (unsigned long long)sizeof(char), %s, "
+	                      "(unsigned int)N00B_GC_SCAN_KIND_NONE, "
+	                      "nullptr, nullptr);\n"
+	                      "    if (!buf || !data) { __builtin_trap(); }\n"
+	                      "    __builtin_memcpy(data, %s_payload, %zuULL);\n"
+	                      "    buf->data = data;\n"
+	                      "    buf->byte_len = %zuULL;\n"
+	                      "    buf->alloc_len = %zuULL;\n"
+	                      "    buf->lock = nullptr;\n"
+	                      "    buf->allocator = nullptr;\n"
+	                      "    buf->flags = N00B_BUF_F_BORROWED;\n"
+	                      "    buf->scan_kind = N00B_GC_SCAN_KIND_NONE;\n"
+	                      "    buf->scan_cb = nullptr;\n"
+	                      "    buf->scan_user = nullptr;\n"
+	                      "    return buf;\n"
+	                      "}\n"
+	                      "%s",
+	                      prefix, type_hash,
+	                      (unsigned long long)h.high64,
+	                      (unsigned long long)h.low64,
+	                      payload->storage_len,
+	                      payload_type_hash,
+	                      prefix,
+	                      payload->storage_len,
+	                      payload->byte_len,
+	                      payload->storage_len,
+	                      "# line 1 \"ncc-generated-buffer-static-init-end.c\"\n");
+
     ncc_free(type_hash);
-    ncc_free(entry_attr_hex);
-    ncc_free(identity_namespace);
-    ncc_free(identity_object_key);
-    ncc_free(identity_payload_key);
-    ncc_free(identity_namespace_hex);
-    ncc_free(identity_object_key_hex);
-    ncc_free(identity_payload_key_hex);
+    ncc_free(payload_type_hash);
     return ncc_buffer_take(buf);
 }
 
-static void
-static_image_helper_error(ncc_parse_tree_t *call, const char *type_name,
-                          const char *message, const char *stderr_data,
-                          size_t stderr_len)
+static bool
+target_is_static_init_buffer(ncc_xform_ctx_t *ctx,
+                             ncc_parse_tree_t *init_decl,
+                             const char *type_name)
 {
-    ncc_buffer_t *buf = ncc_buffer_empty();
-    ncc_buffer_printf(buf,
-                      "ncc_static_image() static initializer for '%s' %s",
-                      type_name, message);
-    if (stderr_data && stderr_len) {
-        ncc_buffer_puts(buf, ": ");
-        ncc_buffer_append(buf, stderr_data, stderr_len);
+    char *compact = compact_type(type_name);
+    bool  is_buffer = strcmp(compact, "n00b_buffer_t") == 0;
+    ncc_free(compact);
+    if (!is_buffer) {
+        return false;
     }
 
-    char *text = ncc_buffer_take(buf);
-    static_image_errorf(call, "%s", text);
-}
-
-static void
-run_static_init_helper(ncc_parse_tree_t *call, const char *helper,
-                       const char *type_name, const char *request,
-                       char **expr_out, char **decls_out)
-{
-    *expr_out  = nullptr;
-    *decls_out = nullptr;
-
-    const char *argv[] = {helper, nullptr};
-    ncc_process_spec_t spec = {
-        .program        = helper,
-        .argv           = argv,
-        .stdin_data     = request,
-        .stdin_len      = strlen(request),
-        .capture_stdout = true,
-        .capture_stderr = true,
-    };
-    ncc_process_result_t proc = {0};
-
-    if (!ncc_process_run(&spec, &proc)) {
-        static_image_helper_error(call, type_name, "could not be launched",
-                                  proc.stderr_data, proc.stderr_len);
-    }
-
-    if (proc.exit_code != 0) {
-        static_image_helper_error(call, type_name, "failed",
-                                  proc.stderr_data, proc.stderr_len);
-    }
-
-    const char prefix[] = "NCC_STATIC_INIT_OK ";
-    if (!proc.stdout_data
-        || proc.stdout_len < sizeof(prefix) - 1
-        || strncmp(proc.stdout_data, prefix, sizeof(prefix) - 1) != 0) {
-        static_image_helper_error(call, type_name,
-                                  "returned an invalid response",
-                                  proc.stderr_data, proc.stderr_len);
-    }
-
-    char *newline = memchr(proc.stdout_data, '\n', proc.stdout_len);
-    if (!newline || newline == proc.stdout_data + sizeof(prefix) - 1) {
-        static_image_helper_error(call, type_name,
-                                  "returned an invalid response",
-                                  proc.stderr_data, proc.stderr_len);
-    }
-
-    size_t expr_len = (size_t)(newline - proc.stdout_data)
-                    - (sizeof(prefix) - 1);
-    char *expr = ncc_alloc_array(char, expr_len + 1);
-    memcpy(expr, proc.stdout_data + sizeof(prefix) - 1, expr_len);
-    expr[expr_len] = '\0';
-
-    size_t decl_len = proc.stdout_len
-                    - (size_t)(newline + 1 - proc.stdout_data);
-    char *decls = ncc_alloc_array(char, decl_len + 1);
-    memcpy(decls, newline + 1, decl_len);
-    decls[decl_len] = '\0';
-
-    *expr_out  = expr;
-    *decls_out = decls;
-
-    ncc_process_result_free(&proc);
+    ncc_parse_tree_t *declarator =
+        ncc_xform_find_child_nt(init_decl, "declarator");
+    char *name = declarator_name(declarator);
+    ncc_sym_entry_t *entry = lookup_static_init_entry(ctx, name);
+    ncc_free(name);
+    return entry != nullptr;
 }
 
 static bool
@@ -1044,17 +1174,6 @@ static_image_base_type(ncc_parse_tree_t *decl_specs)
     return result;
 }
 
-static const char *
-static_image_host_endian_value(void)
-{
-#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) \
-    && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-    return "2u";
-#else
-    return "1u";
-#endif
-}
-
 static void
 lower_static_image_initializer(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                                ncc_parse_tree_t *decl_specs,
@@ -1069,17 +1188,9 @@ lower_static_image_initializer(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
     int ptr_depth = ncc_layout_pointer_depth_in_declarator(declarator);
     const char *syntax_name = static_image_syntax_name(call);
     if (ptr_depth == 0) {
-        if (is_buffer_literal_call(call)) {
-            static_image_errorf(call,
-                                "%s initializer must target n00b_buffer_t *",
-                                syntax_name);
-        }
-        else {
-            static_image_errorf(call,
-                                "%s initializer must target a pointer to a "
-                                "static-image type",
-                                syntax_name);
-        }
+        static_image_errorf(call,
+                            "%s initializer must target n00b_buffer_t *",
+                            syntax_name);
     }
 
     char *type_name = static_image_base_type(decl_specs);
@@ -1100,73 +1211,68 @@ lower_static_image_initializer(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
         static_image_errorf(call,
                             "mutable %s initializers must be "
                             "declared at file scope; use a const target for "
-                            "block-scope static image references",
+                            "block-scope buffer literal references",
                             syntax_name);
     }
 
     int id = ctx->unique_id++;
     char prefix[64];
-    snprintf(prefix, sizeof(prefix), "__ncc_static_image_%d", id);
+    snprintf(prefix, sizeof(prefix), "__ncc_buflit_%d", id);
 
     static_image_arg_list_t args = collect_static_image_args(call);
 
-    // WP-011 Phase 5f: thread the payload's XXH3_128bits into the
-    // n00b-side `n00b_buffer_static_init` builder so every standalone
+    // Precompute the payload's XXH3_128bits so every standalone
     // `b"..."` literal emission (file-scope declarations like
     // `static const n00b_buffer_t *p = b"...";`) lands a populated
-    // `.cached_hash` slot on the buffer object descriptor.  Together
-    // with `lower_buffer_literal_ref`'s update (xform_array_literal.c)
-    // this closes Phase 5f's algorithm-match contract: every buffer
-    // literal in ncc-compiled source now carries the same XXH3 the
-    // runtime would compute, so cross-occurrence
-    // `n00b_hash(buffer_ptr)` results are bit-identical.
+    // `.cached_hash` slot in the generated static-init descriptor.
+    // Together with `lower_buffer_literal_ref`'s update
+    // (xform_array_literal.c), every buffer literal in ncc-compiled
+    // source carries the same XXH3 the runtime would compute, so
+    // cross-occurrence `n00b_hash(buffer_ptr)` results are bit-identical.
     //
-    // We gate the injection on `is_buffer_literal_call` because the
-    // production `n00b_buffer_static_init` arg-parser only accepts
-    // `cached_hash_lo`/`cached_hash_hi` (and the other documented
-    // buffer kwargs); injecting them into a non-buffer
-    // `ncc_static_image(...)` target — whose static-init handler may
-    // not know those names — would trigger the helper's
-    // "unsupported ... argument" failure (see src/core/buffer.c's
-    // `n00b_static_image_builder_fail` path).  The buffer-literal
-    // gate ensures the new kwargs only ride on the buffer codepath.
-    if (is_buffer_literal_call(call)) {
-        inject_buffer_cached_hash_args(&args);
-    }
+    inject_buffer_cached_hash_args(&args);
 
-    const char *helper = ncc_xform_get_data(ctx)->static_init_helper;
-    if (!helper || !*helper) {
+    if (target_is_static_init_buffer(ctx, init_decl, type_name)) {
+        if (!readonly) {
+            free_arg_list(&args);
+            static_image_errorf(call,
+                                "migrated n00b_buffer_t static-init "
+                                "requires a const target");
+        }
+
+        buffer_static_payload_t payload = {};
+        buffer_static_init_payload(call, &args, &payload);
+
+        char *decls = buffer_static_init_runtime_decls(prefix, &payload);
+        insert_generated_decl(ctx, decl, decls);
+
+        ncc_buffer_t *expr = ncc_buffer_empty();
+        ncc_buffer_printf(expr, "%s_make()", prefix);
+        char *expr_name = ncc_buffer_take(expr);
+        ncc_parse_tree_t *replacement = ncc_xform_parse_source(
+            ctx->grammar, "initializer", expr_name, "xform_static_image");
+        if (!replacement) {
+            fprintf(stderr,
+                    "ncc: error: failed to parse generated buffer "
+                    "static-init initializer:\n%s\n",
+                    expr_name);
+            exit(1);
+        }
+
+        replace_initializer(init_decl, replacement);
+        ncc_free(type_name);
+        ncc_free(decls);
+        ncc_free(expr_name);
+        ncc_free(payload.bytes);
         free_arg_list(&args);
-        static_image_errorf(call,
-                            "%s for '%s' requires "
-                            "--ncc-static-init-helper=PATH",
-                            syntax_name, type_name);
+        return;
     }
 
-    char *request = build_helper_request(ctx, call, type_name, prefix, readonly,
-                                         &args);
-    char *expr_name = nullptr;
-    char *decls     = nullptr;
-    run_static_init_helper(call, helper, type_name, request, &expr_name,
-                           &decls);
-    insert_generated_decl(ctx, decl, decls);
-
-    ncc_parse_tree_t *replacement = ncc_xform_parse_source(
-        ctx->grammar, "initializer", expr_name, "xform_static_image");
-    if (!replacement) {
-        fprintf(stderr,
-                "ncc: error: failed to parse generated static image "
-                "initializer:\n%s\n",
-                expr_name);
-        exit(1);
-    }
-
-    replace_initializer(init_decl, replacement);
     ncc_free(type_name);
-    ncc_free(request);
-    ncc_free(expr_name);
-    ncc_free(decls);
     free_arg_list(&args);
+    static_image_errorf(call, "%s is only supported for migrated "
+                              "n00b_buffer_t static-init targets",
+                        syntax_name);
 }
 
 static ncc_parse_tree_t *

@@ -8,6 +8,7 @@
 #else
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <unistd.h>
 #endif
 
@@ -142,6 +143,21 @@ child_check_fd_leak(void)
 
     return 0;
 }
+
+static int
+child_abort_signal(void)
+{
+    abort();
+    return 127;
+}
+#else
+static int
+child_access_violation(void)
+{
+    volatile int *p = (volatile int *)0;
+    *p = 1;
+    return 127;
+}
 #endif
 
 static char *
@@ -183,6 +199,12 @@ test_missing_executable(void)
     pass &= expect(!ok, "missing executable should be a launch failure");
     pass &= expect(result.exit_code == -1,
                    "missing executable should not report a child exit code");
+    pass &= expect(result.term_kind == NCC_PROCESS_TERM_LAUNCH,
+                   "missing executable should report launch failure");
+    pass &= expect(result.signal_number == 0,
+                   "missing executable should not report a signal");
+    pass &= expect(result.exception_code == 0,
+                   "missing executable should not report an exception");
     pass &= expect(result.stderr_data && result.stderr_data[0],
                    "missing executable should produce an error message");
 
@@ -213,8 +235,14 @@ test_captured_output_during_stdin(const char *self)
     bool pass = true;
 
     pass &= expect(ok, "early-output child should run successfully");
+    pass &= expect(result.term_kind == NCC_PROCESS_TERM_EXITED,
+                   "early-output child should report normal exit");
     pass &= expect(result.exit_code == 0,
                    "early-output child should exit successfully");
+    pass &= expect(result.signal_number == 0,
+                   "early-output child should not report a signal");
+    pass &= expect(result.exception_code == 0,
+                   "early-output child should not report an exception");
     pass &= expect(result.stdout_data != nullptr,
                    "early-output child stdout should be captured");
     pass &= expect(result.stdout_len == LARGE_PAYLOAD_SIZE,
@@ -247,8 +275,14 @@ test_early_stdin_close(const char *self)
     bool pass = true;
 
     pass &= expect(ok, "early stdin close should preserve the child result");
+    pass &= expect(result.term_kind == NCC_PROCESS_TERM_EXITED,
+                   "early stdin close should report normal exit");
     pass &= expect(result.exit_code == EARLY_STDIN_CLOSE_EXIT,
                    "early stdin close should report the child exit status");
+    pass &= expect(result.signal_number == 0,
+                   "early stdin close should not report a signal");
+    pass &= expect(result.exception_code == 0,
+                   "early stdin close should not report an exception");
     pass &= expect(result.stderr_data
                        && strstr(result.stderr_data,
                                  EARLY_STDIN_CLOSE_MESSAGE) != nullptr,
@@ -357,6 +391,54 @@ test_unrelated_fd_not_inherited(const char *self)
 #endif
 }
 
+static bool
+test_signal_termination(const char *self)
+{
+#ifdef _WIN32
+    const char *argv[] = {self, "--child-access-violation", nullptr};
+    ncc_process_spec_t spec = {
+        .program        = self,
+        .argv           = argv,
+        .capture_stderr = true,
+    };
+    ncc_process_result_t result;
+    bool ok = ncc_process_run(&spec, &result);
+    bool pass = true;
+
+    pass &= expect(ok, "exception child should launch");
+    pass &= expect(result.term_kind == NCC_PROCESS_TERM_EXCEPTION,
+                   "exception child should report exception termination");
+    pass &= expect(result.exception_code != 0,
+                   "exception child should report exception code");
+    pass &= expect(result.signal_number == 0,
+                   "exception child should not report a POSIX signal");
+
+    ncc_process_result_free(&result);
+    return pass;
+#else
+    const char *argv[] = {self, "--child-abort-signal", nullptr};
+    ncc_process_spec_t spec = {
+        .program        = self,
+        .argv           = argv,
+        .capture_stderr = true,
+    };
+    ncc_process_result_t result;
+    bool ok = ncc_process_run(&spec, &result);
+    bool pass = true;
+
+    pass &= expect(ok, "signal child should launch");
+    pass &= expect(result.term_kind == NCC_PROCESS_TERM_SIGNALED,
+                   "signal child should report signaled termination");
+    pass &= expect(result.signal_number == SIGABRT,
+                   "signal child should report SIGABRT");
+    pass &= expect(result.exit_code == 128 + SIGABRT,
+                   "signal child should preserve legacy exit code shape");
+
+    ncc_process_result_free(&result);
+    return pass;
+#endif
+}
+
 int
 main(int argc, char **argv)
 {
@@ -373,6 +455,13 @@ main(int argc, char **argv)
     if (argc > 1 && strcmp(argv[1], "--child-check-fd-leak") == 0) {
         return child_check_fd_leak();
     }
+    if (argc > 1 && strcmp(argv[1], "--child-abort-signal") == 0) {
+        return child_abort_signal();
+    }
+#else
+    if (argc > 1 && strcmp(argv[1], "--child-access-violation") == 0) {
+        return child_access_violation();
+    }
 #endif
 
     bool pass = true;
@@ -382,6 +471,7 @@ main(int argc, char **argv)
     pass &= test_early_stdin_close(argv[0]);
     pass &= test_tricky_argv_round_trip(argv[0]);
     pass &= test_unrelated_fd_not_inherited(argv[0]);
+    pass &= test_signal_termination(argv[0]);
 
     if (!pass) {
         return 1;

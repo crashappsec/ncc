@@ -1193,6 +1193,55 @@ ncc_rstr_static_ref_t ncc_rstr_build_static_ref_ex(
   };
 }
 
+ncc_rstr_managed_expr_t
+ncc_rstr_build_plain_managed_expr(ncc_parse_tree_t *node)
+{
+  ncc_parse_tree_t *call = find_rstr_call(node);
+  if (!call) {
+    return (ncc_rstr_managed_expr_t){0};
+  }
+
+  ncc_parse_tree_t *kid2 = ncc_tree_child(call, 2);
+  if (!kid2 || ncc_xform_leaf_text_eq(kid2, ")")) {
+    fprintf(stderr, "ncc: error: __ncc_rstr() requires a string argument\n");
+    exit(1);
+  }
+
+  int content_len;
+  char *content = extract_rstr_content(kid2, &content_len);
+  if (!content) {
+    fprintf(stderr,
+            "ncc: error: __ncc_rstr() argument must be a string literal\n");
+    exit(1);
+  }
+
+  rstr_seg_list_t sl = {0};
+  ncc_buffer_t *tb = ncc_buffer_empty();
+  parse_rich_markup(content, content_len, &sl, tb);
+
+  out_style_list_t out = {0};
+  build_style_records(&sl, &out);
+
+  ncc_buffer_t *expr = nullptr;
+  if (out.count == 0) {
+    expr = ncc_buffer_empty();
+    ncc_buffer_puts(expr, "n00b_ncc_rstr(\"");
+    emit_escaped_string(expr, tb->data, (int)tb->byte_len);
+    ncc_buffer_puts(expr, "\")");
+  }
+
+  bool has_style = out.count > 0;
+  ncc_free(content);
+  ncc_free(sl.segs);
+  ncc_buffer_free(tb);
+  ncc_free(out.items);
+
+  return (ncc_rstr_managed_expr_t){
+      .expr = expr ? ncc_buffer_take(expr) : nullptr,
+      .has_style = has_style,
+  };
+}
+
 // =========================================================================
 // Main transform
 // =========================================================================

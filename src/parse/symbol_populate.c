@@ -91,6 +91,158 @@ subtree_has_token(ncc_parse_tree_t *node, const char *text)
     return false;
 }
 
+static bool
+subtree_has_token_prefix(ncc_parse_tree_t *node, const char *prefix)
+{
+    if (!node || !prefix) {
+        return false;
+    }
+    if (ncc_tree_is_leaf(node)) {
+        ncc_token_info_t *tok = ncc_tree_leaf_value(node);
+        if (tok && ncc_option_is_set(tok->value)) {
+            ncc_string_t val = ncc_option_get(tok->value);
+            size_t prefix_len = strlen(prefix);
+            return val.data && val.u8_bytes >= prefix_len
+                && strncmp(val.data, prefix, prefix_len) == 0;
+        }
+        return false;
+    }
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        if (subtree_has_token_prefix(ncc_tree_child(node, i), prefix)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool
+subtree_has_nt(ncc_parse_tree_t *node, const char *name)
+{
+    if (!node || !name || ncc_tree_is_leaf(node)) {
+        return false;
+    }
+    if (nt_is(node, name)) {
+        return true;
+    }
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        if (subtree_has_nt(ncc_tree_child(node, i), name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static const char *
+first_leaf_text(ncc_parse_tree_t *node)
+{
+    if (!node) {
+        return nullptr;
+    }
+    if (ncc_tree_is_leaf(node)) {
+        ncc_token_info_t *tok = ncc_tree_leaf_value(node);
+        if (!tok || !ncc_option_is_set(tok->value)) {
+            return nullptr;
+        }
+        ncc_string_t val = ncc_option_get(tok->value);
+        return val.data;
+    }
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        const char *text = first_leaf_text(ncc_tree_child(node, i));
+        if (text) {
+            return text;
+        }
+    }
+    return nullptr;
+}
+
+static bool
+declarator_has_pointer(ncc_parse_tree_t *node)
+{
+    if (!node) {
+        return false;
+    }
+    if (ncc_tree_is_leaf(node)) {
+        ncc_token_info_t *tok = ncc_tree_leaf_value(node);
+        if (tok && ncc_option_is_set(tok->value)) {
+            ncc_string_t val = ncc_option_get(tok->value);
+            return val.data && strcmp(val.data, "*") == 0;
+        }
+        return false;
+    }
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        if (declarator_has_pointer(ncc_tree_child(node, i))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool
+attribute_leaf_scan(ncc_parse_tree_t *node, const char *name, bool *saw_n00b)
+{
+    if (!node || !name) {
+        return false;
+    }
+
+    if (ncc_tree_is_leaf(node)) {
+        ncc_token_info_t *tok = ncc_tree_leaf_value(node);
+        if (!tok || !ncc_option_is_set(tok->value)) {
+            return false;
+        }
+        ncc_string_t text = ncc_option_get(tok->value);
+        if (!text.data) {
+            return false;
+        }
+        if (!*saw_n00b && strcmp(text.data, "n00b") == 0) {
+            *saw_n00b = true;
+            return false;
+        }
+        return *saw_n00b && strcmp(text.data, name) == 0;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        if (attribute_leaf_scan(ncc_tree_child(node, i), name, saw_n00b)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool
+attribute_is_n00b_named(ncc_parse_tree_t *node, const char *name)
+{
+    bool saw_n00b = false;
+    return attribute_leaf_scan(node, name, &saw_n00b);
+}
+
+static bool
+subtree_carries_n00b_named_attr(ncc_parse_tree_t *node, const char *name)
+{
+    if (!node || !name || ncc_tree_is_leaf(node)) {
+        return false;
+    }
+
+    if (nt_is(node, "attribute")
+        && attribute_is_n00b_named(node, name)) {
+        return true;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        if (subtree_carries_n00b_named_attr(ncc_tree_child(node, i), name)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 // First IDENTIFIER token in a declarator that names the declared entity — i.e.
 // the first identifier NOT inside a parameter list (which would be a parameter
 // name, not the name being declared). Handles `*x`, `x[]`, `(*fp)(args)`.
@@ -196,22 +348,23 @@ declarator_is_function(ncc_parse_tree_t *declarator)
     return s.decision == 1;
 }
 
-static void
+static ncc_sym_entry_t *
 add_named(ncc_symtab_t *st, ncc_string_t ns, ncc_token_info_t *name_tok,
           ncc_sym_kind_t kind, ncc_parse_tree_t *decl_node,
           ncc_parse_tree_t *type_node)
 {
     if (!name_tok) {
-        return;
+        return nullptr;
     }
     ncc_string_t name = tok_text(name_tok);
     if (!name.data || name.u8_bytes == 0) {
-        return;
+        return nullptr;
     }
     ncc_sym_entry_t *e = ncc_symtab_add(st, ns, name, kind, decl_node);
     if (e) {
         e->type_node = type_node;
     }
+    return e;
 }
 
 // The name token of a tag_name node, accepting either an IDENTIFIER or a
@@ -287,6 +440,359 @@ record_enum_constants(ncc_symtab_t *st, ncc_parse_tree_t *enum_spec,
     }
 }
 
+static bool
+leaf_text_is(ncc_parse_tree_t *node, const char *text)
+{
+    if (!node || !text || !ncc_tree_is_leaf(node)) {
+        return false;
+    }
+
+    ncc_token_info_t *tok = ncc_tree_leaf_value(node);
+    if (!tok || !ncc_option_is_set(tok->value)) {
+        return false;
+    }
+
+    ncc_string_t val = ncc_option_get(tok->value);
+    return val.data && strcmp(val.data, text) == 0;
+}
+
+static bool
+node_directly_has_leaf_text(ncc_parse_tree_t *node, const char *text)
+{
+    if (!node || ncc_tree_is_leaf(node)) {
+        return false;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        if (leaf_text_is(ncc_tree_child(node, i), text)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool
+postfix_expression_is_call(ncc_parse_tree_t *node)
+{
+    if (!nt_is(node, "postfix_expression")
+        || !node_directly_has_leaf_text(node, "(")) {
+        return false;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        if (nt_is(ncc_tree_child(node, i), "postfix_expression")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+typedef struct {
+    bool needs_bake;
+    bool needs_host_exec;
+} static_init_class_t;
+
+static static_init_class_t
+initializer_static_bake_class(ncc_parse_tree_t *init)
+{
+    static_init_class_t result = {0};
+
+    if (!init || ncc_tree_is_leaf(init)) {
+        return result;
+    }
+    if (subtree_has_token_prefix(init, "__ncc_")) {
+        return result;
+    }
+    if (nt_is(init, "unary_expression")) {
+        ncc_parse_tree_t *first = ncc_tree_num_children(init) > 0
+                                ? ncc_tree_child(init, 0)
+                                : nullptr;
+        if (leaf_text_is(first, "sizeof")
+            || leaf_text_is(first, "_Countof")
+            || leaf_text_is(first, "alignof")
+            || leaf_text_is(first, "_Alignof")) {
+            return result;
+        }
+    }
+
+    if (postfix_expression_is_call(init)) {
+        result.needs_bake = true;
+        result.needs_host_exec = true;
+        return result;
+    }
+
+    size_t nc = ncc_tree_num_children(init);
+    for (size_t i = 0; i < nc; i++) {
+        static_init_class_t child =
+            initializer_static_bake_class(ncc_tree_child(init, i));
+        result.needs_bake = result.needs_bake || child.needs_bake;
+        result.needs_host_exec = result.needs_host_exec
+                              || child.needs_host_exec;
+    }
+    return result;
+}
+
+static bool
+initializer_is_buffer_static_image(ncc_parse_tree_t *specs,
+                                   ncc_parse_tree_t *declarator,
+                                   ncc_parse_tree_t *init)
+{
+    if (!specs || !declarator || !init) {
+        return false;
+    }
+    if (!subtree_has_token(specs, "n00b_buffer_t")
+        || !declarator_has_pointer(declarator)) {
+        return false;
+    }
+    return subtree_has_token(init, "__ncc_buflit");
+}
+
+static bool
+initializer_has_array_literal(ncc_parse_tree_t *init)
+{
+    if (!init) {
+        return false;
+    }
+    if (subtree_has_nt(init, "array_literal")) {
+        return true;
+    }
+
+    ncc_parse_tree_t *modified = child_nt(init, "modified_literal");
+    if (!modified) {
+        return false;
+    }
+    const char *modifier = first_leaf_text(modified);
+    return modifier && strcmp(modifier, "a") == 0;
+}
+
+static bool
+initializer_has_list_literal(ncc_parse_tree_t *init)
+{
+    if (!init) {
+        return false;
+    }
+    if (subtree_has_nt(init, "list_literal")) {
+        return true;
+    }
+
+    ncc_parse_tree_t *modified = child_nt(init, "modified_literal");
+    if (!modified) {
+        return false;
+    }
+    const char *modifier = first_leaf_text(modified);
+    return modifier && strcmp(modifier, "l") == 0;
+}
+
+static bool
+initializer_has_dict_literal(ncc_parse_tree_t *init)
+{
+    if (!init) {
+        return false;
+    }
+    if (subtree_has_nt(init, "dict_literal")) {
+        return true;
+    }
+
+    ncc_parse_tree_t *modified = child_nt(init, "modified_literal");
+    if (!modified) {
+        return false;
+    }
+    const char *modifier = first_leaf_text(modified);
+    return modifier && strcmp(modifier, "d") == 0;
+}
+
+static bool
+specs_are_migrated_n00b_array_value(ncc_parse_tree_t *specs,
+                                    ncc_parse_tree_t *declarator)
+{
+    if (!specs || !declarator || declarator_has_pointer(declarator)) {
+        return false;
+    }
+    if (subtree_has_token_prefix(specs, "ncc_array_")) {
+        return false;
+    }
+    return subtree_has_token(specs, "typeid")
+        && subtree_has_token(specs, "\"array\"")
+        && subtree_has_token(specs, "data")
+        && subtree_has_token(specs, "len")
+        && subtree_has_token(specs, "cap")
+        && subtree_has_token(specs, "scan_kind");
+}
+
+static ncc_sym_entry_t *
+first_typedef_ref_in_specs(ncc_symtab_t *st, ncc_parse_tree_t *specs)
+{
+    if (!st || !specs) {
+        return nullptr;
+    }
+    if (ncc_tree_is_leaf(specs)) {
+        ncc_token_info_t *tok = ncc_tree_leaf_value(specs);
+        if (!tok || !ncc_option_is_set(tok->value)) {
+            return nullptr;
+        }
+        ncc_string_t name = ncc_option_get(tok->value);
+        ncc_sym_entry_t *entry =
+            ncc_symtab_lookup(st, ncc_string_empty(), name);
+        return entry && entry->kind == NCC_SYM_TYPEDEF ? entry : nullptr;
+    }
+
+    size_t nc = ncc_tree_num_children(specs);
+    for (size_t i = 0; i < nc; i++) {
+        ncc_sym_entry_t *entry =
+            first_typedef_ref_in_specs(st, ncc_tree_child(specs, i));
+        if (entry) {
+            return entry;
+        }
+    }
+    return nullptr;
+}
+
+static bool
+typedef_specs_can_alias_container(ncc_parse_tree_t *specs)
+{
+    return specs != nullptr
+        && !subtree_has_nt(specs, "member_declaration_list")
+        && !subtree_has_nt(specs, "enumerator_list");
+}
+
+static bool
+specs_are_migrated_n00b_array_value_resolved(ncc_symtab_t *st,
+                                             ncc_parse_tree_t *specs,
+                                             ncc_parse_tree_t *declarator,
+                                             int depth)
+{
+    if (specs_are_migrated_n00b_array_value(specs, declarator)) {
+        return true;
+    }
+    if (!st || !specs || !declarator || depth <= 0
+        || declarator_has_pointer(declarator)
+        || !typedef_specs_can_alias_container(specs)) {
+        return false;
+    }
+
+    ncc_sym_entry_t *entry = first_typedef_ref_in_specs(st, specs);
+    return entry && entry->type_node && entry->decl_node
+        && specs_are_migrated_n00b_array_value_resolved(st,
+                                                        entry->type_node,
+                                                        entry->decl_node,
+                                                        depth - 1);
+}
+
+static bool
+specs_are_migrated_n00b_list_value(ncc_parse_tree_t *specs,
+                                   ncc_parse_tree_t *declarator)
+{
+    if (!specs || !declarator || declarator_has_pointer(declarator)) {
+        return false;
+    }
+    return subtree_has_token(specs, "typeid")
+        && subtree_has_token(specs, "\"n00b_list\"")
+        && subtree_has_token(specs, "data")
+        && subtree_has_token(specs, "len")
+        && subtree_has_token(specs, "cap")
+        && subtree_has_token(specs, "lock")
+        && subtree_has_token(specs, "scan_kind");
+}
+
+static bool
+specs_are_migrated_n00b_list_value_resolved(ncc_symtab_t *st,
+                                            ncc_parse_tree_t *specs,
+                                            ncc_parse_tree_t *declarator,
+                                            int depth)
+{
+    if (specs_are_migrated_n00b_list_value(specs, declarator)) {
+        return true;
+    }
+    if (!st || !specs || !declarator || depth <= 0
+        || declarator_has_pointer(declarator)
+        || !typedef_specs_can_alias_container(specs)) {
+        return false;
+    }
+
+    ncc_sym_entry_t *entry = first_typedef_ref_in_specs(st, specs);
+    return entry && entry->type_node && entry->decl_node
+        && specs_are_migrated_n00b_list_value_resolved(st,
+                                                       entry->type_node,
+                                                       entry->decl_node,
+                                                       depth - 1);
+}
+
+static bool
+specs_are_migrated_n00b_dict_value(ncc_parse_tree_t *specs,
+                                   ncc_parse_tree_t *declarator)
+{
+    if (!specs || !declarator || declarator_has_pointer(declarator)) {
+        return false;
+    }
+    return subtree_has_token(specs, "typeid")
+        && subtree_has_token(specs, "\"n00b_dict\"");
+}
+
+static bool
+specs_are_migrated_n00b_dict_value_resolved(ncc_symtab_t *st,
+                                            ncc_parse_tree_t *specs,
+                                            ncc_parse_tree_t *declarator,
+                                            int depth)
+{
+    if (specs_are_migrated_n00b_dict_value(specs, declarator)) {
+        return true;
+    }
+    if (!st || !specs || !declarator || depth <= 0
+        || declarator_has_pointer(declarator)
+        || !typedef_specs_can_alias_container(specs)) {
+        return false;
+    }
+
+    ncc_sym_entry_t *entry = first_typedef_ref_in_specs(st, specs);
+    return entry && entry->type_node && entry->decl_node
+        && specs_are_migrated_n00b_dict_value_resolved(st,
+                                                       entry->type_node,
+                                                       entry->decl_node,
+                                                       depth - 1);
+}
+
+static bool
+initializer_is_n00b_array_literal_static_init(ncc_symtab_t *st,
+                                              ncc_parse_tree_t *specs,
+                                              ncc_parse_tree_t *declarator,
+                                              ncc_parse_tree_t *init)
+{
+    return specs_are_migrated_n00b_array_value_resolved(st, specs,
+                                                        declarator, 8)
+        && initializer_has_array_literal(init);
+}
+
+static bool
+initializer_is_n00b_list_literal_static_init(ncc_symtab_t *st,
+                                             ncc_parse_tree_t *specs,
+                                             ncc_parse_tree_t *declarator,
+                                             ncc_parse_tree_t *init)
+{
+    return specs_are_migrated_n00b_list_value_resolved(st, specs,
+                                                       declarator, 8)
+        && initializer_has_list_literal(init);
+}
+
+static bool
+initializer_is_n00b_dict_literal_static_init(ncc_symtab_t *st,
+                                             ncc_parse_tree_t *specs,
+                                             ncc_parse_tree_t *declarator,
+                                             ncc_parse_tree_t *init)
+{
+    return specs_are_migrated_n00b_dict_value_resolved(st, specs,
+                                                       declarator, 8)
+        && initializer_has_dict_literal(init);
+}
+
+static bool
+name_is_ncc_generated(ncc_string_t name)
+{
+    return name.data && name.u8_bytes >= 6
+        && strncmp(name.data, "__ncc_", 6) == 0;
+}
+
 // Walk specifiers for any struct/union/enum tag definitions + enum constants,
 // recording them regardless of whether the enclosing declaration declares a
 // name. (e.g. `struct foo { ... };` or a tag used inline in a variable's type.)
@@ -328,7 +834,9 @@ record_declaration(ncc_symtab_t *st, ncc_parse_tree_t *decl, int64_t id_tid)
         return;
     }
 
-    bool is_typedef = subtree_has_token(specs, "typedef");
+    bool is_typedef  = subtree_has_token(specs, "typedef");
+    bool is_file_scope = ncc_symtab_depth(st, ns_ord()) == 1;
+    bool decl_comptime = subtree_carries_n00b_named_attr(decl, "comptime");
 
     size_t nc = ncc_tree_num_children(list);
     for (size_t i = 0; i < nc; i++) {
@@ -366,7 +874,51 @@ record_declaration(ncc_symtab_t *st, ncc_parse_tree_t *decl, int64_t id_tid)
                             : declarator_is_function(declarator)
                                 ? NCC_SYM_FUNCTION
                                 : NCC_SYM_VARIABLE;
-        add_named(st, ns_ord(), name, kind, declarator, specs);
+        ncc_sym_entry_t *entry = add_named(st, ns_ord(), name, kind,
+                                           declarator, specs);
+        if (entry && kind == NCC_SYM_VARIABLE && is_file_scope
+            && (decl_comptime
+                || subtree_carries_n00b_named_attr(id, "comptime"))) {
+            entry->is_comptime = true;
+        }
+        if (entry && kind == NCC_SYM_VARIABLE && is_file_scope
+            && !entry->is_comptime && nt_is(id, "init_declarator")) {
+            ncc_parse_tree_t *init = child_nt(id, "initializer");
+            static_init_class_t init_class = {0};
+            if (initializer_is_buffer_static_image(specs, declarator, init)) {
+                init_class.needs_bake = true;
+                init_class.needs_host_exec = true;
+            }
+            else if (initializer_is_n00b_array_literal_static_init(st,
+                                                                   specs,
+                                                                   declarator,
+                                                                   init)) {
+                init_class.needs_bake = true;
+                init_class.needs_host_exec = true;
+            }
+            else if (initializer_is_n00b_list_literal_static_init(st,
+                                                                  specs,
+                                                                  declarator,
+                                                                  init)) {
+                init_class.needs_bake = true;
+                init_class.needs_host_exec = true;
+            }
+            else if (initializer_is_n00b_dict_literal_static_init(st,
+                                                                  specs,
+                                                                  declarator,
+                                                                  init)) {
+                init_class.needs_bake = true;
+                init_class.needs_host_exec = true;
+            }
+            else {
+                init_class = initializer_static_bake_class(init);
+            }
+            if (!name_is_ncc_generated(entry->name) && init_class.needs_bake) {
+                entry->is_static_init = true;
+                entry->static_init_needs_host_exec =
+                    init_class.needs_host_exec;
+            }
+        }
     }
 }
 

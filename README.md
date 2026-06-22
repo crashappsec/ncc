@@ -659,48 +659,23 @@ runtime containers, dictionaries, lock-bearing values, allocator-owned values,
 and callback-heavy types are rejected until they opt in through a future
 static-literal type policy.
 
-Nonempty static container literals require the build-time helper named by
-`--ncc-static-init-helper=PATH`. The helper owns the generated backing storage,
-static-object descriptors, portable identities, and list lock images. Empty
-array literals do not need helper output because their `.data` field is null.
-Generated helper output must be valid after preprocessing.
+Nonempty file-scope value-root array/list/dict literals are routed through
+ncc's generalized static-initialization path. Non-migrated targets receive
+targeted diagnostics rather than falling back to a subprocess helper. Empty
+array literals lower directly because their `.data` field is null.
 
-### Static Image Initializers
+### Buffer Literal Static Initializers
 
-`ncc_static_image(...)` is the constructor-backed static object escape hatch
-for runtime types whose layout should be produced by the embedding runtime,
-not reimplemented in ncc:
+`b"..."` is the shorthand literal for readonly static `n00b_buffer_t` objects:
 
 ```c
-const n00b_buffer_t *raw = ncc_static_image("payload");
-const n00b_buffer_t *hex = ncc_static_image(.hex = "6869");
-const n00b_buffer_t *buf = ncc_static_image(.raw = "raw", .length = 3);
 const n00b_buffer_t *lit = b"payload";
 ```
 
-The transform is declaration-initializer only. The target must be a pointer
-type. Block-scope mutable targets are rejected; use a `const` target locally or
-move mutable static-image objects to file scope. Arguments must currently be
-string-literal byte payloads, integer literals, or boolean literals. Keyword
-arguments use the ncc keyword-argument syntax (`.name = literal`) and are
-passed to the runtime static initializer helper.
-
-`b"..."` is the shorthand literal for readonly static `n00b_buffer_t` objects.
-It supports ordinary C string escapes and adjacent ordinary string literal
-concatenation, and has the same declaration/lifetime restrictions as
-`ncc_static_image(...)`. Unlike the generic call form, `b"..."` must target
-`n00b_buffer_t *`.
-
-ncc does not construct these objects at program startup. Instead it sends a
-build-time request to the helper named by `--ncc-static-init-helper=PATH`.
-The helper validates the registered type policy, emits ordinary C declarations
-for the static object, payload descriptors, dependency metadata, and response
-metadata, and returns the initializer expression that should replace the
-`ncc_static_image(...)` call.
-
-Generated helper output must be valid after preprocessing. In practice that
-means emitting concrete constants or enum names, not private macros that only
-existed while ncc was preprocessing the original source.
+The transform is declaration-initializer only. `b"..."` must target
+`n00b_buffer_t *`, supports ordinary C string escapes and adjacent ordinary
+string literal concatenation, and is lowered through the generalized
+static-initialization image path rather than a build-time helper subprocess.
 
 ### n00b GC Stack Maps
 
@@ -925,16 +900,14 @@ array literals use the same slot layout as the primary rich-string
 templates. Template expansion fails with a diagnostic if a template
 references a slot beyond the supported range.
 
-### Static Container Helper
+### Static Container Initialization
 
-Static array/list literals now use `--ncc-static-init-helper=PATH` for
-nonempty generated storage. ncc sends the helper typed C initializer records,
-target ABI facts, scan metadata, descriptor attributes, and portable identity
-keys. The helper emits ordinary C declarations and returns the initializer
-expression that ncc should place in the original declaration. Legacy
-`array_literal_data_template` and `array_literal_data_expr` settings are still
-accepted for compatibility with older build files, but the helper path no
-longer consults them.
+Static array/list/dict value roots no longer use a build-time helper
+subprocess. Supported file-scope writable roots lower through ncc's generalized
+static-initialization image path; unsupported storage/type shapes produce
+targeted diagnostics. Legacy `array_literal_data_template` and
+`array_literal_data_expr` settings are still accepted for compatibility with
+older build files, but static container lowering no longer consults them.
 
 ## Environment Variables
 

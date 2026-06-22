@@ -21,7 +21,9 @@
 //   * Pointer arrays (`T *x[N];`)  — one entry, `num_words = N`.
 //   * Pointer-bearing structs       — one entry per pointer-run
 //     (adjacent pointer-bearing words coalesce; non-pointer-bearing
-//     words break the run). The address-arithmetic emit uses
+//     words break the run). `_Atomic(T *)` members are pointer-bearing
+//     one-word fields; `_Atomic(non-pointer)` members are not scanned.
+//     The address-arithmetic emit uses
 //     `(void *)&(name).field.path`. We considered the canonical
 //     `(void *)((char *)&name + __builtin_offsetof(typeof(name),
 //     field.path))` form but ncc's grammar restricts the
@@ -295,6 +297,39 @@ specs_contain_thread_local(ncc_parse_tree_t *decl_specs)
            || specs_contain_leaf_text(decl_specs, "_Thread_local");
 }
 
+static ncc_parse_tree_t *
+spec_chain_atomic_type_specifier(ncc_parse_tree_t *node)
+{
+    if (!node || ncc_tree_is_leaf(node)) {
+        return nullptr;
+    }
+
+    if (ncc_xform_nt_name_is(node, "atomic_type_specifier")) {
+        return node;
+    }
+
+    bool allowed =
+        is_group_node(node)
+        || ncc_xform_nt_name_is(node, "declaration_specifiers")
+        || ncc_xform_nt_name_is(node, "declaration_specifier")
+        || ncc_xform_nt_name_is(node, "specifier_qualifier_list")
+        || ncc_xform_nt_name_is(node, "type_specifier_qualifier")
+        || ncc_xform_nt_name_is(node, "type_specifier");
+    if (!allowed) {
+        return nullptr;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        ncc_parse_tree_t *atomic =
+            spec_chain_atomic_type_specifier(ncc_tree_child(node, i));
+        if (atomic) {
+            return atomic;
+        }
+    }
+    return nullptr;
+}
+
 // Returns the top-level `atomic_type_specifier` node within
 // `decl_specs`, or nullptr if the spec list does not use `_Atomic(T)`.
 // Grammar: `atomic_type_specifier ::= _Atomic ( type_name )`. We
@@ -305,8 +340,13 @@ specs_contain_thread_local(ncc_parse_tree_t *decl_specs)
 static ncc_parse_tree_t *
 specs_atomic_type_specifier(ncc_parse_tree_t *decl_specs)
 {
-    return ncc_layout_first_descendant_nt(decl_specs,
-                                          "atomic_type_specifier");
+    return spec_chain_atomic_type_specifier(decl_specs);
+}
+
+static ncc_parse_tree_t *
+member_specs_atomic_type_specifier(ncc_parse_tree_t *member_specs)
+{
+    return spec_chain_atomic_type_specifier(member_specs);
 }
 
 // Within an `atomic_type_specifier` (i.e., `_Atomic(T)`), return true
@@ -838,11 +878,32 @@ walk_member_declarator(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *member_specs,
 
     char *field_path = append_path(path_prefix, field_name);
 
-    int ptr_depth = ncc_layout_pointer_depth_for_declarator(ctx, member_specs,
-                                                            declarator);
     bool is_array = ncc_layout_first_descendant_nt(declarator,
                                                     "array_declarator")
                   != nullptr;
+
+    ncc_parse_tree_t *atomic_spec =
+        member_specs_atomic_type_specifier(member_specs);
+    if (atomic_spec) {
+        if (atomic_type_specifier_wraps_pointer(atomic_spec)) {
+            uint64_t n_words = 1;
+            if (is_array && !classify_array_candidate(declarator, &n_words)) {
+                runvec_break(out);
+            }
+            else {
+                runvec_push_pointer(out, field_path, n_words);
+            }
+        }
+        else {
+            runvec_break(out);
+        }
+        ncc_free(field_name);
+        ncc_free(field_path);
+        return true;
+    }
+
+    int ptr_depth = ncc_layout_pointer_depth_for_declarator(ctx, member_specs,
+                                                            declarator);
 
     if (ptr_depth > 0) {
         if (is_array) {
@@ -998,6 +1059,23 @@ walk_member_declaration(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *member,
         //   (c) Same shape but with a pointer-typed
         //       specifier_qualifier_list. No field name available —
         //       cannot address — break run.
+        ncc_parse_tree_t *atomic_spec =
+            member_specs_atomic_type_specifier(member_specs);
+        if (atomic_spec) {
+            char *implicit_name = ncc_layout_implicit_member_field_name(
+                member, member_specs);
+            if (implicit_name && atomic_type_specifier_wraps_pointer(atomic_spec)) {
+                char *field_path = append_path(path_prefix, implicit_name);
+                runvec_push_pointer(out, field_path, 1);
+                ncc_free(field_path);
+                ncc_free(implicit_name);
+                return true;
+            }
+            ncc_free(implicit_name);
+            runvec_break(out);
+            return true;
+        }
+
         int ptr_depth = ncc_layout_pointer_depth_for_specs(ctx, member_specs);
         if (ptr_depth > 0) {
             // No field name to address from — break run.

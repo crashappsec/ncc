@@ -25,6 +25,8 @@ bytes_eq(const void *a, const void *b, size_t n)
 static int test_count = 0;
 static int fail_count = 0;
 
+#define MACRO_RSTR r"Macro value"
+
 #define TEST(name) \
     do { test_count++; printf("  test %d: %s ... ", test_count, name); } while (0)
 #define PASS() \
@@ -86,12 +88,23 @@ test_adjacent_concat(void)
 }
 
 static void
+test_macro_expanded_string(void)
+{
+    TEST("macro-expanded r-string");
+
+    ncc_string_t *s = MACRO_RSTR;
+
+    CHECK(s != nullptr, "null pointer");
+    CHECK(s->u8_bytes == 11, "wrong byte count");
+    CHECK(bytes_eq(s->data, "Macro value", 11), "wrong data");
+    PASS();
+}
+
+static void
 test_adjacent_rstr_concat(void)
 {
     TEST("adjacent r-string concatenation (r\"...\" r\"...\")");
 
-    // Two (and three) r-prefixed literals juxtaposed must concatenate
-    // exactly like a single r"..." spanning the same text.
     ncc_string_t *s = r"foo" r"bar";
 
     CHECK(s != nullptr, "null pointer");
@@ -105,7 +118,6 @@ test_adjacent_rstr_concat(void)
     CHECK(t->u8_bytes == 3, "wrong byte count (3-way)");
     CHECK(bytes_eq(t->data, "abc", 3), "wrong data (3-way)");
 
-    // Empty continuation literal contributes nothing.
     ncc_string_t *u = r"x" r"";
 
     CHECK(u != nullptr, "null pointer (empty cont)");
@@ -229,6 +241,7 @@ main(void)
     test_plain_string();
     test_bold_markup();
     test_adjacent_concat();
+    test_macro_expanded_string();
     test_adjacent_rstr_concat();
     test_escaped_guillemet();
     test_multiple_styles();

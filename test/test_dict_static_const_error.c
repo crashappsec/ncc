@@ -1,10 +1,3 @@
-// WP-011 Phase 3c.iii missing-helper fixture.
-//
-// A valid dict literal compiled WITHOUT `--ncc-static-init-helper=PATH`
-// must produce the missing-helper diagnostic, paralleling the list /
-// array literal missing-helper precedents.  The diagnostic names the
-// dict via its friendly `n00b_dict_t(K, V)` form.
-
 #include <stddef.h>
 #include <stdint.h>
 
@@ -30,4 +23,10 @@ typedef enum n00b_gc_scan_kind_t : uint8_t {
         void               *scan_user;                                        \
     }
 
-n00b_dict_t(int, int) x = d{1: 2, 3: 4};
+const n00b_dict_t(uint64_t, uint64_t) dict = d{1: 10};
+
+int
+main(void)
+{
+    return dict.len == 1 ? 0 : 1;
+}
