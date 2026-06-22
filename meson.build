@@ -838,7 +838,7 @@ test('ncc_gc_typemap_runtime_near_miss_scan_user_scanned', test_runner,
 )
 
 test('ncc_gc_typemap_noscan_trailing_field_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_typemap.c',
           '__builtin_offsetof(gcmap_noscan_trailing_t,noscan_ptr)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -847,7 +847,7 @@ test('ncc_gc_typemap_noscan_trailing_field_skipped', test_runner,
 )
 
 test('ncc_gc_typemap_noscan_trailing_sibling_scanned', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap.c',
           '__builtin_offsetof(gcmap_noscan_trailing_t,payload)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -856,7 +856,7 @@ test('ncc_gc_typemap_noscan_trailing_sibling_scanned', test_runner,
 )
 
 test('ncc_gc_typemap_noscan_prefix_field_skipped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_typemap.c',
           '__builtin_offsetof(gcmap_noscan_prefix_t,noscan_ptr)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -865,7 +865,7 @@ test('ncc_gc_typemap_noscan_prefix_field_skipped', test_runner,
 )
 
 test('ncc_gc_typemap_noscan_prefix_sibling_scanned', test_runner,
-  args : [ncc_exe, 'preprocess_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap.c',
           '__builtin_offsetof(gcmap_noscan_prefix_t,kept)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -874,7 +874,7 @@ test('ncc_gc_typemap_noscan_prefix_sibling_scanned', test_runner,
 )
 
 test('ncc_gc_typemap_noscan_attribute_stripped', test_runner,
-  args : [ncc_exe, 'preprocess_not_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_typemap.c',
           'n00b::noscan']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
@@ -1468,7 +1468,7 @@ test('ncc_nullable_guards', test_runner,
 )
 
 test('ncc_nodiscard_warn', test_runner,
-  args : [ncc_exe, 'preprocess_stderr_contains',
+  args : test_runner_args + [ncc_exe, 'preprocess_stderr_contains',
           test_dir / 'test_nodiscard_warn.c',
           'result of \'mk()\' is ignored',
           '_generic_struct']
@@ -1478,7 +1478,7 @@ test('ncc_nodiscard_warn', test_runner,
 )
 
 test('ncc_nodiscard_ok', test_runner,
-  args : [ncc_exe, 'preprocess_stderr_omits',
+  args : test_runner_args + [ncc_exe, 'preprocess_stderr_omits',
           test_dir / 'test_nodiscard_ok.c',
           'is ignored']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
