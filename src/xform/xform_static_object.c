@@ -632,6 +632,35 @@ ncc_static_object_typehash_expr(const char *type_name)
     return ncc_buffer_take(buf);
 }
 
+// Like ncc_static_object_typehash_expr, but hashes the POINTER form of the
+// type. The runtime type registry and heap objects' dynamic metadata records
+// key types by typehash(T*) (the reference form), so a static object's
+// descriptor must carry typehash(T*) too — otherwise n00b_type_info_for()
+// can't resolve a static object to the same type_info as its heap twin and
+// the formatter falls through to the generic pointer route. Callers whose
+// configured type name is spelled as a value (e.g. "n00b_string_t") need this;
+// names already ending in '*' are hashed as-is. (xform_static_image.c emits the
+// pointer form directly via "%s*"; this is the shared, '*'-idempotent helper.)
+char *
+ncc_static_object_ptr_typehash_expr(const char *type_name)
+{
+    if (!type_name) {
+        type_name = "";
+    }
+
+    size_t len = strlen(type_name);
+    if (len > 0 && type_name[len - 1] == '*') {
+        return ncc_static_object_typehash_expr(type_name);
+    }
+
+    ncc_buffer_t *buf = ncc_buffer_empty();
+    ncc_buffer_printf(buf, "%s*", type_name);
+    char *ptr_type = ncc_buffer_take(buf);
+    char *expr     = ncc_static_object_typehash_expr(ptr_type);
+    ncc_free(ptr_type);
+    return expr;
+}
+
 const char *
 ncc_static_object_entry_attr(ncc_xform_ctx_t *ctx)
 {

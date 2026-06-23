@@ -1086,7 +1086,12 @@ ncc_rstr_static_ref_t ncc_rstr_build_static_ref_ex(
   char cp_str[32];
   snprintf(cp_str, sizeof(cp_str), "%lld", (long long)cp_count);
 
-  char *typehash_str = ncc_static_object_typehash_expr(get_rstr_string_type(ctx));
+  // Hash the POINTER form: the descriptor's tinfo must match the runtime
+  // type registry (keyed by typehash(T*)) so a static r-string resolves to
+  // the same n00b_string_t type_info as a heap string. get_rstr_string_type
+  // is configured as a value type (n00b's array-literal type matcher relies
+  // on that), so use the '*'-normalizing helper here.
+  char *typehash_str = ncc_static_object_ptr_typehash_expr(get_rstr_string_type(ctx));
 
   char wrapper_var[64];
   snprintf(wrapper_var, sizeof(wrapper_var), "_ncc_rsh_%d", uid);
@@ -1344,7 +1349,12 @@ static ncc_parse_tree_t *xform_rstr(ncc_xform_ctx_t *ctx,
   // Extra args for n00b build (typehash + wrapper var name).
   // These are ignored by the default template (fewer slots), but
   // consumed by the n00b template override which adds more slots.
-  char *typehash_str = ncc_static_object_typehash_expr(get_rstr_string_type(ctx));
+  // Hash the POINTER form: the descriptor's tinfo must match the runtime
+  // type registry (keyed by typehash(T*)) so a static r-string resolves to
+  // the same n00b_string_t type_info as a heap string. get_rstr_string_type
+  // is configured as a value type (n00b's array-literal type matcher relies
+  // on that), so use the '*'-normalizing helper here.
+  char *typehash_str = ncc_static_object_ptr_typehash_expr(get_rstr_string_type(ctx));
 
   char wrapper_var[64];
   snprintf(wrapper_var, sizeof(wrapper_var), "_ncc_rsh_%d", uid);
