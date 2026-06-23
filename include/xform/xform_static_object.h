@@ -31,6 +31,7 @@ void ncc_static_object_names_for_array(ncc_static_object_names_t *out,
                                        const char *data_name);
 
 char *ncc_static_object_typehash_expr(const char *type_name);
+char *ncc_static_object_ptr_typehash_expr(const char *type_name);
 const char *ncc_static_object_entry_attr(ncc_xform_ctx_t *ctx);
 void ncc_static_object_slots_init(ncc_static_object_slots_t *out,
                                   ncc_xform_ctx_t *ctx,
