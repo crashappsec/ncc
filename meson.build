@@ -1491,7 +1491,8 @@ test('ncc_gc_typemap_variant_descriptor_emitted', test_runner,
   depends : ncc_exe,
 )
 
-# The descriptor records the selector and value word offsets.
+# The descriptor records the selector offset and, per alternative, the
+# element-relative pointer offsets that are live when that selector is active.
 test('ncc_gc_typemap_variant_selector_offset', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap_variant.c',
@@ -1501,10 +1502,34 @@ test('ncc_gc_typemap_variant_selector_offset', test_runner,
   depends : ncc_exe,
 )
 
-test('ncc_gc_typemap_variant_value_offset', test_runner,
+# A single-pointer alternative's pointer is the value word, addressed through
+# its named union field (value.field_0), not a bare `value` word.
+test('ncc_gc_typemap_variant_value_ptr_offset', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap_variant.c',
-          '__builtin_offsetof(vmap_variant_t,value)']
+          '__builtin_offsetof(vmap_variant_t,value.field_0)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# A by-value AGGREGATE alternative is described precisely: an arm table
+# (n00b_gc_variant_arm_t) carries the pointer offsets of the struct's fields,
+# addressed through value.<field>.<member>. (Previously this fell back to a
+# conservative scan.)
+test('ncc_gc_typemap_variant_aggregate_arm', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap_variant.c',
+          'n00b_gc_variant_arm_t']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_variant_aggregate_arm_field_offset', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap_variant.c',
+          '__builtin_offsetof(vmap_agg_variant_t,value.field_0.a)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
   suite : 'ncc',
   depends : ncc_exe,

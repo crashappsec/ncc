@@ -343,6 +343,7 @@ typedef struct {
 typedef enum {
     ALT_PTR,        // a heap pointer; its typehash joins the discriminant set
     ALT_NONPTR,     // carries no heap pointer (primitive scalar or code pointer)
+    ALT_AGGREGATE,  // a by-value aggregate; its pointer offsets are walked per-arm
     ALT_UNSUPPORTED // cannot be described safely -> fall back to conservative
 } alt_class_t;
 
@@ -438,12 +439,20 @@ classify_variant_alt(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *member,
 
     if (total == 0) {
         // Non-pointer by value: a recognized primitive scalar carries no heap
-        // word; a by-value aggregate may hide pointers across several words and
-        // anything else is an unknown typedef — bail to a conservative scan for
-        // both (never an under-scan).
+        // word. A by-value aggregate is described precisely per-arm by
+        // walk_variant (which walks its pointer fields via gc_walk); its
+        // selector is typehash(T) of the aggregate spelling — the same value
+        // n00b_variant_set stamps. An unknown typedef also reaches here and is
+        // tagged ALT_AGGREGATE; walk_variant then fails to resolve an aggregate
+        // spec for it and falls back to conservative (never an under-scan).
         bool scalar = elem_type_is_scalar_no_ptr(base);
+        if (scalar) {
+            ncc_free(base);
+            return ALT_NONPTR;
+        }
+        *out_hash = ncc_type_hash_u64(base);
         ncc_free(base);
-        return scalar ? ALT_NONPTR : ALT_UNSUPPORTED;
+        return ALT_AGGREGATE;
     }
 
     if (decl && ncc_layout_declarator_is_function_pointer(decl)) {
@@ -579,14 +588,47 @@ variant_value_union(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *spec)
     return all_field ? value_union : nullptr;
 }
 
+// Forward declarations: walk_variant (below) drives these, which are defined
+// later in the file.
+static void
+emit_pointer(const char *elem_type, const char *path, ncc_buffer_t *offs,
+             ncc_buffer_t *asserts, int *count);
+static void
+gc_walk(ncc_xform_ctx_t *ctx, const char *elem_type, ncc_parse_tree_t *spec,
+        const char *base, ncc_buffer_t *offs, ncc_buffer_t *asserts,
+        int *count, variant_acc_t *vacc, bool *ok, int depth);
+
+// One alternative's contribution to a variant descriptor: its selector
+// typehash and the element-relative pointer word offsets that are live when the
+// selector is active. `offs` is a CSV of offset expressions (as produced by
+// emit_pointer / gc_walk). Alignment static_asserts go straight into the shared
+// arrays buffer as they are discovered.
+typedef struct {
+    uint64_t      selector;
+    ncc_buffer_t *offs;
+    int           count;
+} variant_arm_acc_t;
+
+static int
+cmp_variant_arm(const void *a, const void *b)
+{
+    uint64_t sa = ((const variant_arm_acc_t *)a)->selector;
+    uint64_t sb = ((const variant_arm_acc_t *)b)->selector;
+    return (sa < sb) ? -1 : (sa > sb) ? 1 : 0;
+}
+
 // Emit a variant descriptor for an n00b_variant_t field at `base`. `vunion` is
-// the resolved value-union specifier. On any alternative we cannot describe,
-// sets *ok = false and warns (the whole type then falls back to conservative
-// scanning, exactly as the legacy union path does — never an under-scan).
+// the resolved value-union specifier. Each pointer-bearing alternative becomes
+// an arm carrying the element-relative pointer offsets that are live when its
+// selector is active: a single-pointer alternative has one offset (the value
+// word); a by-value aggregate alternative has the pointer offsets of its fields
+// (walked by gc_walk). On any alternative we cannot describe, sets *ok = false
+// and warns — the whole type then falls back to conservative scan (never an
+// under-scan).
 static void
 walk_variant(ncc_xform_ctx_t *ctx, const char *elem_type,
              ncc_parse_tree_t *vunion, const char *base, variant_acc_t *vacc,
-             bool *ok)
+             bool *ok, int depth)
 {
     ncc_parse_tree_t *members = ncc_xform_find_child_nt(
         vunion, "member_declaration_list");
@@ -598,71 +640,140 @@ walk_variant(ncc_xform_ctx_t *ctx, const char *elem_type,
     ncc_layout_parse_tree_list_t alts = {0};
     ncc_layout_collect_nt_children(members, "member_declaration", &alts);
 
-    ncc_layout_uint64_list_t hashes = {0};
-    bool                     unsupported = false;
+    char              *val_base    = path_join(base, "value");
+    variant_arm_acc_t *arms        = ncc_alloc_array(variant_arm_acc_t, alts.len);
+    size_t             narms       = 0;
+    bool               unsupported = false;
 
-    for (size_t i = 0; i < alts.len; i++) {
+    for (size_t i = 0; i < alts.len && !unsupported; i++) {
         uint64_t    h   = 0;
         alt_class_t cls = classify_variant_alt(ctx, alts.data[i], &h);
+
         if (cls == ALT_UNSUPPORTED) {
             unsupported = true;
             break;
         }
-        if (cls == ALT_PTR) {
-            ncc_layout_uint64_list_push(&hashes, h);
+        if (cls == ALT_NONPTR) {
+            continue; // no heap pointer in this alternative
         }
+
+        ncc_parse_tree_t *aspecs = ncc_xform_find_child_nt(
+            alts.data[i], "specifier_qualifier_list");
+        char *field = aspecs ? ncc_layout_implicit_member_field_name(
+                                   alts.data[i], aspecs)
+                             : nullptr;
+        if (!field) {
+            unsupported = true;
+            break;
+        }
+        char         *armbase = path_join(val_base, field);
+        ncc_buffer_t *aoffs   = ncc_buffer_empty();
+        int           acount  = 0;
+        ncc_free(field);
+
+        if (cls == ALT_PTR) {
+            // The value word itself is the heap pointer.
+            emit_pointer(elem_type, armbase, aoffs, vacc->arrays, &acount);
+        }
+        else { // ALT_AGGREGATE: walk the by-value struct's pointer fields.
+            ncc_parse_tree_t *aspec = ncc_layout_aggregate_spec_from_specs(
+                ctx, aspecs);
+            // A nested variant inside an arm needs conditional nesting we don't
+            // express yet; route it (and anything gc_walk can't fully describe)
+            // to the conservative fallback. A throwaway vacc catches a nested
+            // variant via its non-zero count.
+            variant_acc_t inner = {
+                .arrays = ncc_buffer_empty(),
+                .inits  = ncc_buffer_empty(),
+                .count  = 0,
+                .rec    = vacc->rec,
+            };
+            bool aok = true;
+            if (aspec) {
+                gc_walk(ctx, elem_type, aspec, armbase, aoffs, vacc->arrays,
+                        &acount, &inner, &aok, depth + 1);
+            }
+            bool inner_variant = inner.count != 0;
+            ncc_free(inner.arrays->data);
+            ncc_free(inner.arrays);
+            ncc_free(inner.inits->data);
+            ncc_free(inner.inits);
+            if (!aspec || !aok || inner_variant) {
+                ncc_free(armbase);
+                ncc_free(aoffs->data);
+                ncc_free(aoffs);
+                unsupported = true;
+                break;
+            }
+        }
+
+        ncc_free(armbase);
+
+        if (acount == 0) {
+            // Alternative with no heap pointers: omit it from the arm table.
+            ncc_free(aoffs->data);
+            ncc_free(aoffs);
+            continue;
+        }
+
+        arms[narms].selector = h;
+        arms[narms].offs     = aoffs;
+        arms[narms].count    = acount;
+        narms++;
     }
+
     if (alts.data) {
         ncc_free(alts.data);
     }
+    ncc_free(val_base);
 
     if (unsupported) {
+        for (size_t i = 0; i < narms; i++) {
+            ncc_free(arms[i].offs->data);
+            ncc_free(arms[i].offs);
+        }
+        ncc_free(arms);
         fprintf(stderr,
                 "ncc: warning: gc-typemap: type '%s' has an n00b_variant_t with "
                 "an alternative that cannot be statically described for GC "
                 "scanning; the type loses its precise pointer map and falls "
                 "back to conservative scan (not precisely marshalable).\n",
                 elem_type ? elem_type : "(anonymous)");
-        if (hashes.data) {
-            ncc_free(hashes.data);
-        }
         *ok = false;
         return;
     }
 
-    if (hashes.len == 0) {
-        // No pointer alternatives: the value word is never a heap pointer, so
-        // there is nothing to mark and the type stays precise.
-        if (hashes.data) {
-            ncc_free(hashes.data);
-        }
+    if (narms == 0) {
+        // No pointer-bearing alternatives: precise, nothing to mark.
+        ncc_free(arms);
         return;
     }
 
-    // Sort ascending and dedup so the runtime can binary-search.
-    qsort(hashes.data, hashes.len, sizeof(uint64_t), cmp_u64);
-    size_t n = 0;
-    for (size_t i = 0; i < hashes.len; i++) {
-        if (n == 0 || hashes.data[i] != hashes.data[n - 1]) {
-            hashes.data[n++] = hashes.data[i];
-        }
-    }
+    // Sort arms by selector so the runtime can binary-search.
+    qsort(arms, narms, sizeof(*arms), cmp_variant_arm);
 
     char *sel_path = path_join(base, "selector");
-    char *val_path = path_join(base, "value");
     char *sel_as   = offset_assert(elem_type, sel_path);
-    char *val_as   = offset_assert(elem_type, val_path);
     char *sel_off  = offset_expr(elem_type, sel_path);
-    char *val_off  = offset_expr(elem_type, val_path);
+    int   k        = vacc->count;
 
-    int k = vacc->count;
-    ncc_buffer_printf(vacc->arrays, "%s%s", sel_as, val_as);
-    ncc_buffer_printf(vacc->arrays,
-                      "static const uint64_t __ncc_gcvar_h_%zu_%d[]={",
-                      vacc->rec, k);
-    for (size_t i = 0; i < n; i++) {
-        ncc_buffer_printf(vacc->arrays, "%s%lluULL", i ? "," : "",
-                          (unsigned long long)hashes.data[i]);
+    ncc_buffer_puts(vacc->arrays, sel_as);
+    for (size_t a = 0; a < narms; a++) {
+        ncc_buffer_printf(
+            vacc->arrays,
+            "static const uint64_t __ncc_gcvaroff_%zu_%d_%zu[]={%s};",
+            vacc->rec, k, a, arms[a].offs->data ? arms[a].offs->data : "");
+    }
+    ncc_buffer_printf(
+        vacc->arrays,
+        "static const n00b_gc_variant_arm_t __ncc_gcvararms_%zu_%d[]={",
+        vacc->rec, k);
+    for (size_t a = 0; a < narms; a++) {
+        ncc_buffer_printf(vacc->arrays,
+                          "%s{.selector=%lluULL,.ptr_offset_count=%dULL,"
+                          ".ptr_offsets=__ncc_gcvaroff_%zu_%d_%zu}",
+                          a ? "," : "", (unsigned long long)arms[a].selector,
+                          arms[a].count, vacc->rec, k, a);
     }
     ncc_buffer_puts(vacc->arrays, "};");
 
@@ -670,20 +781,19 @@ walk_variant(ncc_xform_ctx_t *ctx, const char *elem_type,
         ncc_buffer_puts(vacc->inits, ",");
     }
     ncc_buffer_printf(vacc->inits,
-                      "{.selector_offset=%s,.value_offset=%s,"
-                      ".ptr_hash_count=%zuULL,.ptr_hashes=__ncc_gcvar_h_%zu_%d}",
-                      sel_off, val_off, n, vacc->rec, k);
+                      "{.selector_offset=%s,.arm_count=%zuULL,"
+                      ".arms=__ncc_gcvararms_%zu_%d}",
+                      sel_off, narms, vacc->rec, k);
     vacc->count++;
 
     ncc_free(sel_path);
-    ncc_free(val_path);
     ncc_free(sel_as);
-    ncc_free(val_as);
     ncc_free(sel_off);
-    ncc_free(val_off);
-    if (hashes.data) {
-        ncc_free(hashes.data);
+    for (size_t a = 0; a < narms; a++) {
+        ncc_free(arms[a].offs->data);
+        ncc_free(arms[a].offs);
     }
+    ncc_free(arms);
 }
 
 // ---------------------------------------------------------------------------
@@ -1134,7 +1244,7 @@ gc_walk(ncc_xform_ctx_t *ctx, const char *elem_type, ncc_parse_tree_t *spec,
     // never sees (and warns about) the variant's value union.
     ncc_parse_tree_t *vunion = variant_value_union(ctx, spec);
     if (vunion) {
-        walk_variant(ctx, elem_type, vunion, base, vacc, ok);
+        walk_variant(ctx, elem_type, vunion, base, vacc, ok, depth);
         return;
     }
 
