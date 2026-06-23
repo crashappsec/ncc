@@ -5,8 +5,13 @@ project('ncc', 'c',
 
 cc = meson.get_compiler('c')
 
-if cc.get_id() != 'clang' or not cc.version().version_compare('>=22.1.0')
-  error('ncc requires Clang 22.1.0+ because the compiler embeds assets with C23 #embed and Clang --embed-dir.')
+# ncc embeds its grammar assets via C23 #embed + Clang --embed-dir.  Rather than
+# gate on a clang VERSION number (which under-counts compilers that already have
+# the feature — clang 21.1.x supports #embed with --embed-dir fine), require
+# clang and let the functional #embed compile check below be the authoritative
+# capability gate.
+if cc.get_id() != 'clang'
+  error('ncc requires Clang (it embeds assets with C23 #embed and Clang --embed-dir).')
 endif
 
 embed_check = '''
