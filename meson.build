@@ -207,6 +207,7 @@ src_xform = files(
   'src/xform/xform_nullable.c',
   'src/xform/nullability.c',
   'src/xform/nodiscard.c',
+  'src/xform/union_deprecation.c',
   'src/xform/xform_generic_struct.c',
   'src/xform/xform_gc_globals.c',
   'src/xform/xform_gc_stack_maps.c',
@@ -1575,6 +1576,53 @@ test('ncc_gc_typemap_variant_generic_struct', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap_variant.c',
           '__builtin_offsetof(vmap_generic_variant_t,selector)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# Traditional-union deprecation: a bare (non-variant) union is steered toward
+# n00b_variant_t.
+
+# A hand-rolled tagged union warns.
+test('ncc_union_deprecation_warn', test_runner,
+  args : [ncc_exe, 'preprocess_stderr_contains',
+          test_dir / 'test_union_deprecation.c',
+          'traditional C union is discouraged']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# --ncc-allow-unions suppresses the warning entirely.
+test('ncc_union_deprecation_allow', test_runner,
+  args : [ncc_exe, 'preprocess_stderr_omits',
+          test_dir / 'test_union_deprecation.c',
+          'traditional C union']
+         + ncc_test_flags
+         + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots',
+            '--ncc-allow-unions'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# --ncc-error-on-union makes it a hard error (non-zero exit).
+test('ncc_union_deprecation_error', test_runner,
+  args : [ncc_exe, 'expect_error_contains',
+          test_dir / 'test_union_deprecation.c',
+          'traditional C union is discouraged']
+         + ncc_test_flags
+         + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots',
+            '--ncc-error-on-union'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# An n00b_variant_t value-union and a [[n00b::raw_union]] union are NOT flagged.
+test('ncc_union_deprecation_excluded', test_runner,
+  args : [ncc_exe, 'preprocess_stderr_omits',
+          test_dir / 'test_union_deprecation_excluded.c',
+          'traditional C union']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
   suite : 'ncc',
   depends : ncc_exe,
