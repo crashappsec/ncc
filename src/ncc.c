@@ -10,7 +10,11 @@
 //   --ncc-dump-tree-raw    Dump parse tree with group wrapper nodes visible
 //   --ncc-dump-output      Dump emitted C to stderr
 //   --ncc-gc-stack-maps    Emit n00b GC stack-map metadata
+//   --ncc-gc-typemaps      Emit n00b type-to-GC-map metadata
 //   --ncc-auto-gc-roots    Auto-register TU-scope pointer globals as GC roots
+//   --ncc-custom-entry     Link with ncc's generated libc-less n00b entry
+//   --ncc-comptime-arg=VAL Pass VAL as a comptime_main argument
+//   --ncc-no-comptime      Do not run comptime_main during this link
 //   -E                     Preprocess + transform, emit to stdout
 //   -c                     Compile only (pipe to clang)
 //   -o FILE                Output file
@@ -41,6 +45,11 @@
 #include "parse/nullability.h"
 #include "parse/nodiscard.h"
 #include "parse/c_tokenizer.h"
+#include "parse/comptime_check.h"
+#include "parse/comptime_guard.h"
+#include "parse/comptime_build.h"
+#include "parse/comptime_meta.h"
+#include "parse/crt_entry.h"
 #include "parse/emit.h"
 #include "xform/xform_gc_typemap.h"
 #include "xform/xform_helpers.h"
@@ -52,6 +61,8 @@
 #include "lib/buffer.h"
 #include "lib/dict.h"
 #include "util/platform.h"
+#include "util/type_normalize.h"
+#include "internal/ncc_opts.h"
 
 static const char embedded_grammar[] = {
 #embed "c_ncc.bnf"
@@ -80,6 +91,7 @@ extern void ncc_register_try_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_nullable_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_option_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_array_literal_xform(ncc_xform_registry_t *reg);
+extern void ncc_register_static_init_xform(ncc_xform_registry_t *reg);
 #include "scanner/scan_builtins.h"
 #include "scanner/scanner.h"
 #include "scanner/token_stream.h"
@@ -225,151 +237,6 @@ maybe_print_array_literal_parse_hint(ncc_token_stream_t *ts)
     }
 }
 
-// Print "file:line:col" for a token, falling back to the input file name when
-// the token carries no #line-derived source path.
-static void
-print_token_location(FILE *out, ncc_token_info_t *tok, const char *fallback_file)
-{
-    const char *file = fallback_file ? fallback_file : "<input>";
-
-    if (tok && ncc_option_is_set(tok->file)) {
-        ncc_string_t f = ncc_option_get(tok->file);
-        if (f.data) {
-            file = (const char *)f.data;
-        }
-    }
-
-    fprintf(out, "%s:%u:%u", file, tok ? tok->line : 0, tok ? tok->column : 0);
-}
-
-// Print a single token in the context window: "  > [idx] file:line:col text"
-// (the '>' marker flags the offending token).
-static void
-print_context_token(FILE *out, ncc_token_info_t *tok, int32_t idx,
-                    bool is_culprit, const char *fallback_file)
-{
-    fprintf(out, "  %s [%d] ", is_culprit ? ">" : " ", idx);
-    print_token_location(out, tok, fallback_file);
-
-    if (tok && ncc_option_is_set(tok->value)) {
-        ncc_string_t v = ncc_option_get(tok->value);
-        if (v.data) {
-            fprintf(out, "  %.*s",
-                    v.u8_bytes > 60 ? 60 : (int)v.u8_bytes, v.data);
-        }
-    }
-
-    fprintf(out, "\n");
-}
-
-// Report a parse failure with the source location of the offending token plus a
-// small window of surrounding tokens, so the error maps back to a file:line.
-static void
-print_parse_error(ncc_token_stream_t *ts, int32_t error_pos,
-                  const char *input_file)
-{
-    int32_t ntokens = ts ? ts->token_count : 0;
-
-    if (ntokens <= 0 || error_pos < 0) {
-        fprintf(stderr, "ncc: parse failed (no tokens / location unavailable)\n");
-        return;
-    }
-
-    // error_pos may be the EOF position (== ntokens); clamp to the last real
-    // token and flag the unexpected-EOF case.
-    bool    at_eof  = error_pos >= ntokens;
-    int32_t culprit = at_eof ? ntokens - 1 : error_pos;
-    ncc_token_info_t *tok = ts->tokens[culprit];
-
-    fprintf(stderr, "ncc: ");
-    print_token_location(stderr, tok, input_file);
-
-    if (at_eof) {
-        fprintf(stderr, ": error: unexpected end of input while parsing\n");
-    } else if (tok && ncc_option_is_set(tok->value)) {
-        ncc_string_t v = ncc_option_get(tok->value);
-        fprintf(stderr, ": error: parse failed at '%.*s'\n",
-                v.u8_bytes > 60 ? 60 : (int)v.u8_bytes,
-                v.data ? (char *)v.data : "");
-    } else {
-        fprintf(stderr, ": error: parse failed here\n");
-    }
-
-    // Context window: a few tokens on either side of the culprit.
-    int32_t lo = culprit - 5;
-    int32_t hi = culprit + 3;
-    if (lo < 0) {
-        lo = 0;
-    }
-    if (hi >= ntokens) {
-        hi = ntokens - 1;
-    }
-
-    fprintf(stderr, "  context:\n");
-    for (int32_t i = lo; i <= hi; i++) {
-        print_context_token(stderr, ts->tokens[i], i, i == culprit, input_file);
-    }
-}
-
-// ============================================================================
-// Parsed command-line state
-// ============================================================================
-
-typedef struct {
-    const char  *input_file;
-    const char  *output_file;
-    const char  *compiler;
-    const char  *constexpr_headers; // comma-separated <...> or "..." headers
-
-    bool         has_E;
-    bool         has_c;
-    bool         has_std;       // user specified -std=
-    bool         no_ncc;
-    bool         ncc_help;
-    bool         dump_tokens;
-    bool         dump_tree;
-    bool         dump_tree_raw;
-    bool         dump_output;
-    bool         gc_stack_maps;
-    bool         gc_stack_maps_relaxed;
-    bool         auto_gc_roots;
-    bool         static_identity_generate_namespace;
-
-    // Dependency file generation (handled separately from compilation).
-    bool         has_dep_flags; // -MD or -MMD present
-    bool         dep_mmmd;      // -MMD (user headers only) vs -MD (all)
-    const char  *dep_mf;        // -MF <file>
-    const char  *dep_mq;        // -MQ <target>
-    const char  *dep_mt;        // -MT <target>
-
-    // rstr template overrides (CLI > meson define > default).
-    const char  *rstr_template_styled;
-    const char  *rstr_template_plain;
-    const char  *rstr_static_ref_template_styled;
-    const char  *rstr_static_ref_template_plain;
-    const char  *rstr_static_ref_expr_styled;
-    const char  *rstr_static_ref_expr_plain;
-    const char  *array_literal_data_template;
-    const char  *array_literal_data_expr;
-    const char  *static_object_entry_attr;
-    const char  *static_init_helper;
-
-    // vargs/once/rstr overrides (CLI > meson define > default).
-    const char  *vargs_type;
-    const char  *once_prefix;
-    const char  *rstr_string_type;
-    const char  *rstr_text_style_type;
-    const char  *rstr_style_record_type;
-
-    // Grammar file override (CLI > env > embedded).
-    const char  *grammar_file;
-
-    // Flags to pass through to clang.
-    const char **clang_args;
-    int          n_clang_args;
-    int          clang_args_cap;
-} ncc_opts_t;
-
 #include "xform/xform_data.h"
 
 static void
@@ -398,8 +265,25 @@ add_clang_arg(ncc_opts_t *opts, const char *arg)
     opts->clang_args[opts->n_clang_args++] = arg;
 }
 
+static void
+add_comptime_arg(ncc_opts_t *opts, const char *arg)
+{
+    if (opts->n_comptime_args >= opts->comptime_args_cap) {
+        opts->comptime_args_cap = opts->comptime_args_cap
+                                      ? opts->comptime_args_cap * 2
+                                      : 4;
+        opts->comptime_args = ncc_realloc(
+            opts->comptime_args,
+            sizeof(char *) * (size_t)opts->comptime_args_cap);
+    }
+    opts->comptime_args[opts->n_comptime_args++] = arg;
+}
+
 // Forward declaration — defined below.
 static char *get_exe_path(void);
+static bool ncc_arg_is_ncc_only_with_value(const char *arg);
+static int custom_entry_link_passthrough(const ncc_opts_t *opts, int argc,
+                                         const char **orig_argv);
 
 static bool
 path_is_sep(char c)
@@ -518,6 +402,7 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
 #ifdef NCC_AUTO_GC_ROOTS_DEFAULT
     opts->auto_gc_roots = true;
 #endif
+    opts->gc_typemaps = true;
 
     opts->compiler = getenv("NCC_COMPILER");
     if (opts->compiler) {
@@ -539,6 +424,11 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
         ncc_verbose("using build-time default compiler=%s", opts->compiler);
     }
 #endif
+    if (opts->compiler && is_ncc_path(opts->compiler)) {
+        ncc_verbose("ignoring compiler=%s because it resolves to ncc",
+                    opts->compiler);
+        opts->compiler = nullptr;
+    }
     if (!opts->compiler) {
         opts->compiler = "clang";
         ncc_verbose("using fallback compiler=%s", opts->compiler);
@@ -611,12 +501,32 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
             opts->gc_stack_maps_relaxed = false;
             continue;
         }
+        if (strcmp(arg, "--ncc-gc-typemaps") == 0) {
+            opts->gc_typemaps = true;
+            continue;
+        }
+        if (strcmp(arg, "--ncc-no-gc-typemaps") == 0) {
+            opts->gc_typemaps = false;
+            continue;
+        }
         if (strcmp(arg, "--ncc-auto-gc-roots") == 0) {
             opts->auto_gc_roots = true;
             continue;
         }
         if (strcmp(arg, "--ncc-no-auto-gc-roots") == 0) {
             opts->auto_gc_roots = false;
+            continue;
+        }
+        if (strcmp(arg, "--ncc-custom-entry") == 0) {
+            opts->custom_entry = true;
+            continue;
+        }
+        if (strncmp(arg, "--ncc-comptime-arg=", 19) == 0) {
+            add_comptime_arg(opts, arg + 19);
+            continue;
+        }
+        if (strcmp(arg, "--ncc-no-comptime") == 0) {
+            opts->no_comptime = true;
             continue;
         }
         if (strcmp(arg, "--ncc-constexpr-include") == 0) {
@@ -706,13 +616,6 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
                 continue;
             }
         }
-        {
-            static const char prefix[] = "--ncc-static-init-helper=";
-            if (strncmp(arg, prefix, sizeof(prefix) - 1) == 0) {
-                opts->static_init_helper = arg + sizeof(prefix) - 1;
-                continue;
-            }
-        }
         if (strcmp(arg, "--ncc-static-identity-generate-namespace") == 0) {
             opts->static_identity_generate_namespace = true;
             continue;
@@ -751,6 +654,16 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
         }
         if (strcmp(arg, "-c") == 0) {
             opts->has_c = true;
+            add_clang_arg(opts, arg);
+            continue;
+        }
+        if (strcmp(arg, "-S") == 0) {
+            opts->has_S = true;
+            add_clang_arg(opts, arg);
+            continue;
+        }
+        if (strcmp(arg, "-fsyntax-only") == 0) {
+            opts->has_fsyntax_only = true;
             add_clang_arg(opts, arg);
             continue;
         }
@@ -801,6 +714,11 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
             opts->dep_mmmd      = true;
             continue;
         }
+        if (strcmp(arg, "-M") == 0 || strcmp(arg, "-MM") == 0) {
+            opts->has_dep_only = true;
+            add_clang_arg(opts, arg);
+            continue;
+        }
         if (strcmp(arg, "-MF") == 0 && i + 1 < argc) {
             opts->dep_mf = argv[++i];
             continue;
@@ -849,12 +767,19 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
                 opts->no_ncc ? "passthrough"
                              : opts->has_E ? "emit-c"
                                            : opts->has_c ? "compile-only"
-                                                         : "compile-and-link",
+                                                         : opts->has_S ? "assemble-output"
+                                                                       : opts->has_fsyntax_only ? "syntax-only"
+                                                                                                 : opts->has_dep_only ? "dependency-only"
+                                                                                                                       : "compile-and-link",
                 opts->compiler, opts->n_clang_args);
-    ncc_verbose("flags: -E=%d -c=%d std=%d dep=%d dump_tokens=%d dump_tree=%d dump_output=%d gc_stack_maps=%d auto_gc_roots=%d",
-                opts->has_E, opts->has_c, opts->has_std, opts->has_dep_flags,
+    ncc_verbose("flags: -E=%d -c=%d -S=%d syntax_only=%d dep_only=%d std=%d dep=%d dump_tokens=%d dump_tree=%d dump_output=%d gc_stack_maps=%d gc_typemaps=%d auto_gc_roots=%d custom_entry=%d no_comptime=%d comptime_args=%d",
+                opts->has_E, opts->has_c, opts->has_S,
+                opts->has_fsyntax_only, opts->has_dep_only,
+                opts->has_std, opts->has_dep_flags,
                 opts->dump_tokens, opts->dump_tree, opts->dump_output,
-                opts->gc_stack_maps, opts->auto_gc_roots);
+                opts->gc_stack_maps, opts->gc_typemaps, opts->auto_gc_roots,
+                opts->custom_entry, opts->no_comptime,
+                opts->n_comptime_args);
     if (opts->constexpr_headers) {
         ncc_verbose("constexpr headers=%s", opts->constexpr_headers);
     }
@@ -891,10 +816,17 @@ print_help(void)
         "                       Emit n00b GC stack maps, skipping unsupported roots\n"
         "  --ncc-no-gc-stack-maps\n"
         "                       Disable n00b GC stack-map metadata\n"
+        "  --ncc-gc-typemaps    Emit n00b type-to-GC-map metadata\n"
+        "  --ncc-no-gc-typemaps\n"
+        "                       Disable n00b type-to-GC-map metadata\n"
         "  --ncc-auto-gc-roots  Auto-register TU-scope pointer-bearing globals\n"
         "                       as libn00b GC roots\n"
         "  --ncc-no-auto-gc-roots\n"
         "                       Disable auto-registration of TU-scope GC roots\n"
+        "  --ncc-custom-entry   Link with ncc's generated libc-less n00b entry\n"
+        "  --ncc-comptime-arg=VAL\n"
+        "                       Pass VAL as an argv element to comptime_main\n"
+        "  --ncc-no-comptime    Skip link-time comptime execution\n"
         "  --ncc-constexpr-include HDRS\n"
         "                       Comma-separated headers for constexpr eval\n"
         "                       (e.g. '<myheader.h>,\"local.h\"')\n"
@@ -913,16 +845,13 @@ print_help(void)
         "                       array literal static initializers\n"
         "  --ncc-array-literal-data-template=TMPL\n"
         "                       Legacy compatibility flag; ignored by\n"
-        "                       helper-backed array literals\n"
+        "                       migrated array literal lowering\n"
         "  --ncc-array-literal-data-expr=EXPR\n"
         "                       Legacy compatibility flag; ignored by\n"
-        "                       helper-backed array literals\n"
+        "                       migrated array literal lowering\n"
         "  --ncc-static-object-entry-attr=ATTR\n"
         "                       Attribute text for generated static-object\n"
         "                       descriptor section entries\n"
-        "  --ncc-static-init-helper=PATH\n"
-        "                       Build-time helper for constructor-backed\n"
-        "                       static image literals\n"
         "  --ncc-static-identity-generate-namespace\n"
         "                       Write .namespace.toml beside the source file\n"
         "                       when stable static identity metadata is absent\n"
@@ -1239,16 +1168,17 @@ ncc_literal_prescan(char *src, size_t len, size_t *out_len)
                             i = ws; // plain continuation
                             continue;
                         }
-
-                        if (ws + 1 < len && src[ws] == prefix_ch
-                            && src[ws + 1] == '"') {
-                            i = ws + 1; // same-prefix continuation; strip prefix
+                        if (ws + 1 < len
+                            && src[ws] == prefix_ch
+                            && src[ws + 1] == '"'
+                            && (ws == 0 || !is_id_char(src[ws - 1]))) {
+                            i = ws + 1; // strip same prefix, continue at '"'
                             continue;
                         }
-
                         break;
                     }
 
+                    // Emit closing ).
                     ncc_buffer_append(buf, ")", 1);
                     flush_from = i;
                     continue;
@@ -1502,6 +1432,12 @@ run_preprocessor(const ncc_opts_t *opts, size_t *out_len)
     char  *wrapped_pp     = wrap_system_headers(buf, len, &wrapped_pp_len);
     ncc_free(buf);
 
+    // A project macro can expand to r"..." / b"..." only after CPP has run.
+    // The raw-source prescan above cannot see that spelling, so run the same
+    // lexer-aware rewrite once more before tokenization.
+    wrapped_pp = ncc_literal_prescan(wrapped_pp, wrapped_pp_len,
+                                     &wrapped_pp_len);
+
     if (out_len) {
         *out_len = wrapped_pp_len;
     }
@@ -1514,6 +1450,8 @@ run_preprocessor(const ncc_opts_t *opts, size_t *out_len)
 // ============================================================================
 // Compiler passthrough (exec clang with all original args)
 // ============================================================================
+
+static bool ncc_arg_is_ncc_only_with_value(const char *arg);
 
 static int
 compiler_passthrough(const ncc_opts_t *opts, int argc, const char **argv)
@@ -1529,8 +1467,12 @@ compiler_passthrough(const ncc_opts_t *opts, int argc, const char **argv)
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
 
-        // Skip ncc-specific flags.
+        // Skip ncc-specific flags. If the ncc flag consumes a separate value,
+        // drop that value too so clang does not see it as a stray input file.
         if (strncmp(arg, "--ncc-", 6) == 0 || strcmp(arg, "--no-ncc") == 0) {
+            if (ncc_arg_is_ncc_only_with_value(arg) && i + 1 < argc) {
+                i++;
+            }
             continue;
         }
         new_argv[n++] = arg;
@@ -1565,6 +1507,24 @@ compiler_passthrough(const ncc_opts_t *opts, int argc, const char **argv)
     ncc_verbose("passthrough exit code=%d", rc);
     ncc_process_result_free(&proc);
     return rc;
+}
+
+static int
+ncc_link_passthrough(const ncc_opts_t *opts, int argc, const char **argv)
+{
+    if (opts->custom_entry && !opts->has_E && !opts->has_c && !opts->has_S
+        && !opts->has_fsyntax_only) {
+        return custom_entry_link_passthrough(opts, argc, argv);
+    }
+
+    return compiler_passthrough(opts, argc, argv);
+}
+
+static bool
+ncc_arg_is_ncc_only_with_value(const char *arg)
+{
+    return strcmp(arg, "--ncc-constexpr-include") == 0
+        || strcmp(arg, "--ncc-grammar") == 0;
 }
 
 // ============================================================================
@@ -1648,6 +1608,41 @@ dump_tokens(ncc_token_stream_t *ts, FILE *out)
 // Pipe transformed C to compiler
 // ============================================================================
 
+static char *
+write_transformed_source_temp(ncc_temp_workspace_t *workspace,
+                              const char *prefix,
+                              const char *c_source,
+                              size_t c_len)
+{
+    char *tmp_err = nullptr;
+
+    if (!ncc_temp_workspace_create(workspace, prefix, &tmp_err)) {
+        print_process_message("failed to create compiler source temp path",
+                              tmp_err);
+        ncc_free(tmp_err);
+        return nullptr;
+    }
+
+    char *path = ncc_temp_workspace_join(workspace, "input.c");
+    if (!path) {
+        fprintf(stderr, "ncc: failed to create compiler source path\n");
+        ncc_temp_workspace_cleanup(workspace);
+        return nullptr;
+    }
+
+    char *write_err = nullptr;
+    if (!ncc_platform_write_file(path, c_source, c_len, &write_err)) {
+        print_process_message("write to compiler source temp file failed",
+                              write_err);
+        ncc_free(write_err);
+        ncc_free(path);
+        ncc_temp_workspace_cleanup(workspace);
+        return nullptr;
+    }
+
+    return path;
+}
+
 static bool
 is_linker_input(const char *arg)
 {
@@ -1666,14 +1661,1344 @@ is_linker_input(const char *arg)
     return false;
 }
 
+static bool
+is_metadata_linker_input(const char *arg)
+{
+    if (!arg || arg[0] == '-') {
+        return false;
+    }
+
+    const char *dot = strrchr(arg, '.');
+    return dot && (strcmp(dot, ".o") == 0 || strcmp(dot, ".a") == 0);
+}
+
+typedef struct {
+    const char **user_inputs;
+    int          n_user_inputs;
+    const char **metadata_inputs;
+    int          n_metadata_inputs;
+    const char **ordered_link_args;
+    int          n_ordered_link_args;
+    const char **link_args;
+    int          n_link_args;
+} ncc_link_inputs_t;
+
+static void
+ncc_link_inputs_free(ncc_link_inputs_t *inputs)
+{
+    if (!inputs) {
+        return;
+    }
+
+    ncc_free(inputs->user_inputs);
+    ncc_free(inputs->metadata_inputs);
+    ncc_free(inputs->ordered_link_args);
+    ncc_free(inputs->link_args);
+    memset(inputs, 0, sizeof(*inputs));
+}
+
+static void
+ncc_push_const_arg(const char ***items, int *n_items, const char *arg)
+{
+    *items = ncc_realloc(*items, sizeof(char *) * (size_t)(*n_items + 1));
+    (*items)[(*n_items)++] = arg;
+}
+
+static void
+ncc_insert_const_arg(const char ***items, int *n_items, int index,
+                     const char *arg)
+{
+    if (index < 0) {
+        index = 0;
+    }
+    if (index > *n_items) {
+        index = *n_items;
+    }
+
+    *items = ncc_realloc(*items, sizeof(char *) * (size_t)(*n_items + 1));
+    memmove((void *)(*items + index + 1), *items + index,
+            sizeof(char *) * (size_t)(*n_items - index));
+    (*items)[index] = arg;
+    (*n_items)++;
+}
+
+static void
+ncc_collect_link_input_arg(ncc_link_inputs_t *inputs, const char *arg)
+{
+    if (is_linker_input(arg)) {
+        ncc_push_const_arg(&inputs->user_inputs, &inputs->n_user_inputs, arg);
+    }
+    if (is_metadata_linker_input(arg)) {
+        ncc_push_const_arg(&inputs->metadata_inputs,
+                           &inputs->n_metadata_inputs, arg);
+    }
+}
+
+static void
+ncc_collect_link_arg(ncc_link_inputs_t *inputs, const char *arg)
+{
+    ncc_push_const_arg(&inputs->link_args, &inputs->n_link_args, arg);
+}
+
+static void
+ncc_collect_ordered_link_arg(ncc_link_inputs_t *inputs, const char *arg)
+{
+    ncc_push_const_arg(&inputs->ordered_link_args,
+                       &inputs->n_ordered_link_args, arg);
+}
+
+static bool ncc_replay_link_arg_takes_value(const char *arg);
+static bool ncc_replay_link_arg_is_single(const char *arg);
+
+static void
+ncc_collect_link_inputs_from_clang_args(const ncc_opts_t *opts,
+                                        ncc_link_inputs_t *inputs)
+{
+    memset(inputs, 0, sizeof(*inputs));
+
+    for (int i = 0; opts && i < opts->n_clang_args; i++) {
+        const char *arg = opts->clang_args[i];
+
+        if (strcmp(arg, "-o") == 0) {
+            i++;
+            continue;
+        }
+        if (strncmp(arg, "-o", 2) == 0 && arg[2] != '\0') {
+            continue;
+        }
+        if (strcmp(arg, "-c") == 0 || strcmp(arg, "-S") == 0
+            || strcmp(arg, "-E") == 0 || strcmp(arg, "-fsyntax-only") == 0) {
+            continue;
+        }
+
+        if (is_linker_input(arg)) {
+            ncc_collect_link_input_arg(inputs, arg);
+            ncc_collect_ordered_link_arg(inputs, arg);
+            continue;
+        }
+
+        if (ncc_replay_link_arg_takes_value(arg)) {
+            ncc_collect_link_arg(inputs, arg);
+            ncc_collect_ordered_link_arg(inputs, arg);
+            if (i + 1 < opts->n_clang_args) {
+                ncc_collect_link_arg(inputs, opts->clang_args[++i]);
+                ncc_collect_ordered_link_arg(inputs, opts->clang_args[i]);
+            }
+            continue;
+        }
+        if (ncc_replay_link_arg_is_single(arg)) {
+            ncc_collect_link_arg(inputs, arg);
+            ncc_collect_ordered_link_arg(inputs, arg);
+            continue;
+        }
+    }
+}
+
+static void
+ncc_collect_link_inputs_from_argv(const ncc_opts_t *opts, int argc,
+                                  const char **orig_argv,
+                                  ncc_link_inputs_t *inputs)
+{
+    (void)opts;
+    memset(inputs, 0, sizeof(*inputs));
+
+    for (int i = 1; i < argc; i++) {
+        const char *arg = orig_argv[i];
+
+        if (strncmp(arg, "--ncc-", 6) == 0 || strcmp(arg, "--no-ncc") == 0) {
+            if (ncc_arg_is_ncc_only_with_value(arg) && i + 1 < argc) {
+                i++;
+            }
+            continue;
+        }
+        if (strcmp(arg, "-o") == 0) {
+            i++;
+            continue;
+        }
+        if (strncmp(arg, "-o", 2) == 0 && arg[2] != '\0') {
+            continue;
+        }
+
+        if (is_linker_input(arg)) {
+            ncc_collect_link_input_arg(inputs, arg);
+            ncc_collect_ordered_link_arg(inputs, arg);
+            continue;
+        }
+
+        if (ncc_replay_link_arg_takes_value(arg)) {
+            ncc_collect_link_arg(inputs, arg);
+            ncc_collect_ordered_link_arg(inputs, arg);
+            if (i + 1 < argc) {
+                ncc_collect_link_arg(inputs, orig_argv[++i]);
+                ncc_collect_ordered_link_arg(inputs, orig_argv[i]);
+            }
+            continue;
+        }
+        if (ncc_replay_link_arg_is_single(arg)) {
+            ncc_collect_link_arg(inputs, arg);
+            ncc_collect_ordered_link_arg(inputs, arg);
+            continue;
+        }
+    }
+}
+
+static bool
+ncc_read_comptime_metadata_inputs(const ncc_opts_t *opts,
+                                  const char *const *inputs, int n_inputs,
+                                  ncc_ct_rec_list_t *records,
+                                  char **err_out)
+{
+    for (int i = 0; i < n_inputs; i++) {
+        if (!ncc_ct_read_object(opts, inputs[i], records, err_out)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool
+ncc_aggregate_comptime_records(const ncc_ct_rec_list_t *records,
+                               ncc_ct_aggregate_t *agg, char **err_out)
+{
+    memset(agg, 0, sizeof(*agg));
+    return ncc_ct_aggregate(records, agg, err_out);
+}
+
+static const char *
+ncc_link_output_file(const ncc_opts_t *opts)
+{
+    return opts && opts->output_file ? opts->output_file : "a.out";
+}
+
+static int
+ncc_strip_comptime_output(const ncc_opts_t *opts)
+{
+    char *err = nullptr;
+
+    if (ncc_ct_strip_section(opts, ncc_link_output_file(opts), &err)) {
+        ncc_free(err);
+        return 0;
+    }
+
+    print_process_message("failed to strip comptime metadata", err);
+    ncc_free(err);
+    return 1;
+}
+
+static bool
+ncc_link_arg_takes_value(const char *arg)
+{
+    return strcmp(arg, "-Xlinker") == 0 || strcmp(arg, "-framework") == 0
+        || strcmp(arg, "-weak_framework") == 0 || strcmp(arg, "-l") == 0
+        || strcmp(arg, "-L") == 0 || strcmp(arg, "-F") == 0
+        || strcmp(arg, "-u") == 0 || strcmp(arg, "-rpath") == 0
+        || strcmp(arg, "-install_name") == 0
+        || strcmp(arg, "-compatibility_version") == 0
+        || strcmp(arg, "-current_version") == 0
+        || strcmp(arg, "-undefined") == 0;
+}
+
+static bool
+ncc_link_arg_is_single(const char *arg)
+{
+    return strncmp(arg, "-Wl,", 4) == 0
+        || (strncmp(arg, "-l", 2) == 0 && arg[2] != '\0')
+        || (strncmp(arg, "-L", 2) == 0 && arg[2] != '\0')
+        || (strncmp(arg, "-F", 2) == 0 && arg[2] != '\0')
+        || strcmp(arg, "-shared") == 0 || strcmp(arg, "-static") == 0
+        || strcmp(arg, "-rdynamic") == 0 || strcmp(arg, "-nostdlib") == 0
+        || strcmp(arg, "-nodefaultlibs") == 0
+        || strcmp(arg, "-nostartfiles") == 0 || strcmp(arg, "-pie") == 0
+        || strcmp(arg, "-no-pie") == 0;
+}
+
+static bool
+ncc_replay_link_arg_takes_value(const char *arg)
+{
+    return ncc_link_arg_takes_value(arg)
+        || strcmp(arg, "-target") == 0 || strcmp(arg, "--target") == 0
+        || strcmp(arg, "-arch") == 0 || strcmp(arg, "-isysroot") == 0
+        || strcmp(arg, "--sysroot") == 0;
+}
+
+static bool
+ncc_replay_link_arg_is_single(const char *arg)
+{
+    return ncc_link_arg_is_single(arg)
+        || strncmp(arg, "--target=", 9) == 0
+        || strncmp(arg, "-target=", 8) == 0
+        || strncmp(arg, "--sysroot=", 10) == 0
+        || strncmp(arg, "-isysroot=", 10) == 0
+        || strncmp(arg, "-mmacosx-version-min=", 21) == 0
+        || strncmp(arg, "-miphoneos-version-min=", 24) == 0
+        || strncmp(arg, "-mios-simulator-version-min=", 28) == 0
+        || strncmp(arg, "-mtvos-version-min=", 19) == 0
+        || strncmp(arg, "-mwatchos-version-min=", 22) == 0
+        || strncmp(arg, "-fuse-ld=", 9) == 0
+        || strcmp(arg, "-pthread") == 0;
+}
+
+static int
+ncc_run_comptime_link_plan(const ncc_opts_t *opts,
+                           const ncc_link_inputs_t *inputs,
+                           const ncc_ct_aggregate_t *agg)
+{
+    const char **ct_argv = ncc_collect_comptime_argv(
+        ncc_link_output_file(opts), opts->comptime_args,
+        opts->n_comptime_args);
+    char *err = nullptr;
+
+    ncc_comptime_plan_t plan = {
+        .user_inputs      = inputs->user_inputs,
+        .n_user_inputs    = inputs->n_user_inputs,
+        .output_file      = ncc_link_output_file(opts),
+        .runtime_inputs   = nullptr,
+        .n_runtime_inputs = 0,
+        .ordered_link_args   = inputs->ordered_link_args,
+        .n_ordered_link_args = inputs->n_ordered_link_args,
+        .link_args        = inputs->link_args,
+        .n_link_args      = inputs->n_link_args,
+        .comptime_argv    = ct_argv,
+        .n_comptime_argv  = opts->n_comptime_args + 1,
+        .meta             = agg,
+    };
+
+    int rc = ncc_comptime_run_and_link(opts, &plan, &err);
+    if (rc != 0) {
+        print_process_message("comptime build failed", err);
+    }
+
+    ncc_free(err);
+    ncc_free((void *)ct_argv);
+    return rc;
+}
+
+static int
+ncc_degrade_comptime_link_plan(const ncc_opts_t *opts,
+                               const ncc_link_inputs_t *inputs,
+                               const ncc_ct_aggregate_t *agg)
+{
+    char *err = nullptr;
+
+    ncc_comptime_plan_t plan = {
+        .user_inputs      = inputs->user_inputs,
+        .n_user_inputs    = inputs->n_user_inputs,
+        .output_file      = ncc_link_output_file(opts),
+        .runtime_inputs   = nullptr,
+        .n_runtime_inputs = 0,
+        .ordered_link_args   = inputs->ordered_link_args,
+        .n_ordered_link_args = inputs->n_ordered_link_args,
+        .link_args        = inputs->link_args,
+        .n_link_args      = inputs->n_link_args,
+        .meta             = agg,
+    };
+
+    int rc = ncc_comptime_degrade_and_link(opts, &plan, &err);
+    if (rc != 0) {
+        print_process_message("comptime degrade build failed", err);
+    }
+
+    ncc_free(err);
+    return rc;
+}
+
+static bool
+ncc_compile_transformed_object(const ncc_opts_t *opts, const char *c_source,
+                               size_t c_len, const char *object_path)
+{
+    ncc_temp_workspace_t source_workspace = {0};
+    char *source_path = write_transformed_source_temp(&source_workspace,
+                                                      "ncc_ct_compile_",
+                                                      c_source,
+                                                      c_len);
+
+    if (!source_path) {
+        return false;
+    }
+
+    int max_args = 16 + opts->n_clang_args * 2;
+    const char **argv = ncc_alloc_array(const char *, (size_t)max_args + 1);
+    int ai = 0;
+
+    argv[ai++] = opts->compiler;
+
+    if (!opts->has_std) {
+        argv[ai++] = "-std=gnu23";
+    }
+
+    argv[ai++] = "-Wno-odr";
+
+    for (int i = 0; i < opts->n_clang_args; i++) {
+        const char *arg = opts->clang_args[i];
+
+        if (strcmp(arg, "-o") == 0) {
+            i++;
+            continue;
+        }
+        if (strncmp(arg, "-o", 2) == 0 && arg[2] != '\0') {
+            continue;
+        }
+        if (strcmp(arg, "-c") == 0 || strcmp(arg, "-S") == 0
+            || strcmp(arg, "-E") == 0 || strcmp(arg, "-fsyntax-only") == 0) {
+            continue;
+        }
+        if (strcmp(arg, "-include") == 0) {
+            i++;
+            continue;
+        }
+        if (is_linker_input(arg)) {
+            continue;
+        }
+        if (ncc_link_arg_takes_value(arg)) {
+            i++;
+            continue;
+        }
+        if (ncc_link_arg_is_single(arg)) {
+            continue;
+        }
+
+        argv[ai++] = arg;
+    }
+
+    argv[ai++] = "-c";
+    argv[ai++] = "-x";
+    argv[ai++] = "c";
+    argv[ai++] = source_path;
+    argv[ai++] = "-o";
+    argv[ai++] = object_path;
+    argv[ai] = nullptr;
+
+    ncc_verbose("comptime source object=%s", object_path);
+    ncc_verbose_args("comptime source compiler argv", argv, ai);
+
+    ncc_process_spec_t spec = {
+        .program        = opts->compiler,
+        .argv           = argv,
+        .capture_stdout = verbose,
+        .capture_stderr = verbose,
+    };
+    ncc_process_result_t proc;
+
+    if (!ncc_process_run(&spec, &proc)) {
+        print_process_message("failed to launch comptime source compiler",
+                              proc.stderr_data);
+        ncc_process_result_free(&proc);
+        ncc_free(argv);
+        ncc_free(source_path);
+        ncc_temp_workspace_cleanup(&source_workspace);
+        return false;
+    }
+
+    forward_process_output("comptime source compiler stdout",
+                           proc.stdout_data, proc.stdout_len, stdout);
+    forward_process_output("comptime source compiler stderr",
+                           proc.stderr_data, proc.stderr_len, stderr);
+
+    int rc = proc.exit_code;
+    ncc_verbose("comptime source compiler exit code=%d", rc);
+    ncc_process_result_free(&proc);
+    ncc_free(argv);
+    ncc_free(source_path);
+    ncc_temp_workspace_cleanup(&source_workspace);
+
+    if (rc != 0) {
+        fprintf(stderr, "ncc: comptime source object compilation failed (exit %d)\n",
+                rc);
+        return false;
+    }
+
+    return true;
+}
+
+static int
+maybe_comptime_link_passthrough(const ncc_opts_t *opts, int argc,
+                                const char **orig_argv, bool *handled)
+{
+    *handled = false;
+
+    ncc_opts_t link_opts = *opts;
+    if (!link_opts.input_file) {
+        link_opts.input_file = "<link>";
+    }
+
+    if (!ncc_is_link_invocation(&link_opts)) {
+        return 0;
+    }
+
+    ncc_link_inputs_t inputs = {0};
+    ncc_ct_rec_list_t records = {0};
+    ncc_ct_aggregate_t agg = {0};
+    char *err = nullptr;
+    int rc = 0;
+
+    ncc_collect_link_inputs_from_argv(&link_opts, argc, orig_argv, &inputs);
+    if (inputs.n_metadata_inputs == 0) {
+        goto cleanup;
+    }
+
+    if (!ncc_read_comptime_metadata_inputs(&link_opts, inputs.metadata_inputs,
+                                           inputs.n_metadata_inputs,
+                                           &records, &err)
+        || !ncc_aggregate_comptime_records(&records, &agg, &err)) {
+        print_process_message("failed to read comptime metadata", err);
+        rc = 1;
+        *handled = true;
+        goto cleanup;
+    }
+
+    if (!ncc_comptime_guard_check(&link_opts, &agg, &err)) {
+        *handled = true;
+        print_process_message("comptime guard failed", err);
+        rc = 1;
+        goto cleanup;
+    }
+
+    bool has_comptime_work = agg.has_comptime_main || agg.n_static_inits > 0;
+    ncc_comptime_degrade_route_t degrade_route =
+        ncc_comptime_degrade_route(&link_opts, &agg);
+
+    if ((degrade_route.static_init_degrade
+         || degrade_route.comptime_main_degrade)
+        && agg.n_static_inits > 0
+        && !ncc_static_init_degrade_allowed(&agg, &err)) {
+        *handled = true;
+        print_process_message("static-init degrade failed", err);
+        rc = 1;
+        goto cleanup;
+    }
+
+    if (degrade_route.comptime_main_degrade
+        || degrade_route.static_init_degrade) {
+        *handled = true;
+        rc = ncc_degrade_comptime_link_plan(&link_opts, &inputs, &agg);
+        goto cleanup;
+    }
+
+    if (link_opts.no_comptime) {
+        *handled = true;
+        rc = ncc_link_passthrough(&link_opts, argc, orig_argv);
+        if (rc == 0) {
+            rc = ncc_strip_comptime_output(&link_opts);
+        }
+        goto cleanup;
+    }
+
+    if (!has_comptime_work) {
+        *handled = true;
+        rc = ncc_link_passthrough(&link_opts, argc, orig_argv);
+        if (rc == 0) {
+            rc = ncc_strip_comptime_output(&link_opts);
+        }
+        goto cleanup;
+    }
+
+    *handled = true;
+    rc = ncc_run_comptime_link_plan(&link_opts, &inputs, &agg);
+
+cleanup:
+    ncc_free(err);
+    ncc_ct_aggregate_free(&agg);
+    ncc_ct_rec_list_free(&records);
+    ncc_link_inputs_free(&inputs);
+    return rc;
+}
+
+static bool
+ncc_tree_nt_is(ncc_parse_tree_t *node, const char *name)
+{
+    if (!node || ncc_tree_is_leaf(node) || !name) {
+        return false;
+    }
+
+    ncc_string_t node_name = ncc_tree_node_value(node).name;
+    return node_name.data && strcmp(node_name.data, name) == 0;
+}
+
+static ncc_parse_tree_t *
+ncc_tree_child_nt(ncc_parse_tree_t *node, const char *child_name)
+{
+    if (!node || ncc_tree_is_leaf(node)) {
+        return nullptr;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        ncc_parse_tree_t *child = ncc_tree_child(node, i);
+        if (!child || ncc_tree_is_leaf(child)) {
+            continue;
+        }
+
+        ncc_nt_node_t *nt = &ncc_tree_node_value(child);
+        if (nt->group_top) {
+            ncc_parse_tree_t *found = ncc_tree_child_nt(child, child_name);
+            if (found) {
+                return found;
+            }
+            continue;
+        }
+
+        if (nt->name.data && strcmp(nt->name.data, child_name) == 0) {
+            return child;
+        }
+    }
+
+    return nullptr;
+}
+
+static ncc_token_info_t *
+ncc_declared_name_tok(ncc_parse_tree_t *node)
+{
+    if (!node) {
+        return nullptr;
+    }
+
+    if (ncc_tree_is_leaf(node)) {
+        ncc_token_info_t *tok = ncc_tree_leaf_value(node);
+        return tok && tok->tid == NCC_TOK_IDENTIFIER ? tok : nullptr;
+    }
+
+    if (ncc_tree_nt_is(node, "parameter_type_list")
+        || ncc_tree_nt_is(node, "parameter_list")) {
+        return nullptr;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        ncc_token_info_t *tok = ncc_declared_name_tok(ncc_tree_child(node, i));
+        if (tok) {
+            return tok;
+        }
+    }
+
+    return nullptr;
+}
+
+static bool
+ncc_has_function_definition_named(ncc_parse_tree_t *node, const char *name)
+{
+    if (!node || !name) {
+        return false;
+    }
+
+    if (!ncc_tree_is_leaf(node) && ncc_tree_nt_is(node, "function_definition")) {
+        ncc_parse_tree_t *declr = ncc_tree_child_nt(node, "declarator");
+        ncc_token_info_t *tok   = ncc_declared_name_tok(declr);
+        if (token_text_is(tok, name)) {
+            return true;
+        }
+    }
+
+    if (ncc_tree_is_leaf(node)) {
+        return false;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        if (ncc_has_function_definition_named(ncc_tree_child(node, i), name)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool
+ncc_append_fragment(ncc_string_t *emitted, const char *fragment)
+{
+    if (!emitted || !emitted->data || !fragment || !fragment[0]) {
+        return true;
+    }
+
+    size_t fragment_len = strlen(fragment);
+    ncc_buffer_t *buf   = ncc_buffer_empty();
+    ncc_buffer_ensure(buf, emitted->u8_bytes + fragment_len + 2);
+    ncc_buffer_append(buf, emitted->data, emitted->u8_bytes);
+    if (emitted->u8_bytes == 0
+        || emitted->data[emitted->u8_bytes - 1] != '\n') {
+        ncc_buffer_putc(buf, '\n');
+    }
+    ncc_buffer_append(buf, fragment, fragment_len);
+
+    ncc_free(emitted->data);
+    emitted->data     = ncc_buffer_take(buf);
+    emitted->u8_bytes = strlen(emitted->data);
+    return true;
+}
+
+static bool
+ncc_subtree_has_token_text(ncc_parse_tree_t *node, const char *text)
+{
+    if (!node || !text) {
+        return false;
+    }
+
+    if (ncc_tree_is_leaf(node)) {
+        ncc_token_info_t *tok = ncc_tree_leaf_value(node);
+        return token_text_is(tok, text);
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        if (ncc_subtree_has_token_text(ncc_tree_child(node, i), text)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void
+ncc_free_comptime_vars(ncc_ct_var_t *vars, int n_vars)
+{
+    if (!vars) {
+        return;
+    }
+
+    for (int i = 0; i < n_vars; i++) {
+        ncc_free(vars[i].name.data);
+    }
+    ncc_free(vars);
+}
+
+static void
+ncc_free_static_inits(ncc_ct_static_init_t *static_inits, int n_static_inits)
+{
+    if (!static_inits) {
+        return;
+    }
+
+    for (int i = 0; i < n_static_inits; i++) {
+        ncc_free(static_inits[i].name.data);
+    }
+    ncc_free(static_inits);
+}
+
+static bool
+ncc_type_spelling_is_pointer(const char *type)
+{
+    if (!type) {
+        return false;
+    }
+
+    size_t len = strlen(type);
+    while (len > 0
+           && (type[len - 1] == ' ' || type[len - 1] == '\t'
+               || type[len - 1] == '\n' || type[len - 1] == '\r')) {
+        len--;
+    }
+
+    return len > 0 && type[len - 1] == '*';
+}
+
+static bool
+ncc_type_spelling_is_root_const(const char *type)
+{
+    int paren_depth = 0;
+    int brace_depth = 0;
+
+    for (const char *p = type; p && *p; p++) {
+        unsigned char ch = (unsigned char)*p;
+
+        if (ch == '(') {
+            paren_depth++;
+            continue;
+        }
+        if (ch == ')' && paren_depth > 0) {
+            paren_depth--;
+            continue;
+        }
+        if (ch == '{') {
+            brace_depth++;
+            continue;
+        }
+        if (ch == '}' && brace_depth > 0) {
+            brace_depth--;
+            continue;
+        }
+        if (paren_depth != 0 || brace_depth != 0) {
+            continue;
+        }
+        bool token_start = p == type
+                        || (!isalnum((unsigned char)p[-1]) && p[-1] != '_');
+        if (token_start
+            && strncmp(p, "const", 5) == 0
+            && (p[5] == '\0'
+                || (!isalnum((unsigned char)p[5]) && p[5] != '_'))) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool
+ncc_push_comptime_var(ncc_ct_var_t **vars, int *n_vars, int *cap,
+                      ncc_sym_entry_t *entry)
+{
+    if (*n_vars >= *cap) {
+        int new_cap = *cap ? *cap * 2 : 4;
+        *vars = ncc_realloc(*vars, (size_t)new_cap * sizeof(**vars));
+        *cap  = new_cap;
+    }
+
+    char *type = ncc_type_of_symbol(entry);
+    if (!type) {
+        fprintf(stderr,
+                "ncc: unsupported comptime variable type for '%s'\n",
+                entry->name.data ? entry->name.data : "<unnamed>");
+        return false;
+    }
+
+    ncc_ct_var_t *out = &(*vars)[(*n_vars)++];
+    out->name = ncc_string_from_raw(entry->name.data,
+                                    (int64_t)entry->name.u8_bytes);
+    out->typehash = ncc_type_hash_u64(type);
+    out->linkage = ncc_subtree_has_token_text(entry->type_node, "static")
+                       ? 0
+                       : 1;
+    out->flags = ncc_type_spelling_is_pointer(type)
+                     ? NCC_CT_VAR_FLAG_POINTER_ROOT
+                     : 0;
+
+    ncc_free(type);
+    return true;
+}
+
+static bool
+ncc_collect_comptime_vars(ncc_symtab_t *symtab, ncc_ct_var_t **out_vars,
+                          int *out_n_vars)
+{
+    *out_vars   = nullptr;
+    *out_n_vars = 0;
+    if (!symtab) {
+        return true;
+    }
+
+    ncc_ct_var_t *vars = nullptr;
+    int           n_vars = 0;
+    int           cap = 0;
+
+    for (ncc_scope_t *scope = symtab->all_scopes; scope;
+         scope = scope->all_next) {
+        for (ncc_sym_entry_t *entry = scope->first_in_scope; entry;
+             entry = entry->next_in_scope) {
+            if (entry->kind != NCC_SYM_VARIABLE || !entry->is_comptime
+                || entry->scope_depth != 1) {
+                continue;
+            }
+            if (!ncc_push_comptime_var(&vars, &n_vars, &cap, entry)) {
+                ncc_free_comptime_vars(vars, n_vars);
+                return false;
+            }
+        }
+    }
+
+    *out_vars   = vars;
+    *out_n_vars = n_vars;
+    return true;
+}
+
+static bool
+ncc_push_static_init(ncc_ct_static_init_t **static_inits, int *n_static_inits,
+                     int *cap, ncc_sym_entry_t *entry)
+{
+    if (ncc_subtree_has_token_text(entry->type_node, "static")) {
+        fprintf(stderr,
+                "ncc: static initializer '%s' has internal linkage; WP-005 "
+                "requires external static-init roots\n",
+                entry->name.data ? entry->name.data : "<unnamed>");
+        return false;
+    }
+
+    if (*n_static_inits >= *cap) {
+        int new_cap = *cap ? *cap * 2 : 4;
+        *static_inits = ncc_realloc(
+            *static_inits, (size_t)new_cap * sizeof(**static_inits));
+        *cap = new_cap;
+    }
+
+    char *type = ncc_type_of_symbol(entry);
+    if (!type) {
+        fprintf(stderr,
+                "ncc: unsupported static initializer type for '%s'\n",
+                entry->name.data ? entry->name.data : "<unnamed>");
+        return false;
+    }
+
+    uint8_t kind = ncc_type_spelling_is_root_const(type)
+                       ? NCC_CT_STATIC_INIT_CONST_RO
+                       : NCC_CT_STATIC_INIT_WRITABLE;
+    uint8_t flags = ncc_type_spelling_is_pointer(type)
+                        ? NCC_CT_STATIC_INIT_FLAG_POINTER_ROOT
+                        : 0;
+    if (kind == NCC_CT_STATIC_INIT_CONST_RO
+        && (flags & NCC_CT_STATIC_INIT_FLAG_POINTER_ROOT) == 0) {
+        fprintf(stderr,
+                "ncc: const value-root static initializer '%s' is not "
+                "supported by migrated baking yet\n",
+                entry->name.data ? entry->name.data : "<unnamed>");
+        ncc_free(type);
+        return false;
+    }
+
+    ncc_ct_static_init_t *out = &(*static_inits)[*n_static_inits];
+    out->name = ncc_string_from_raw(entry->name.data,
+                                    (int64_t)entry->name.u8_bytes);
+    out->typehash = ncc_type_hash_u64(type);
+    out->kind = kind;
+    out->flags = flags;
+    out->degrade_ok = entry->static_init_needs_host_exec ? 1 : 0;
+    (*n_static_inits)++;
+
+    ncc_free(type);
+    return true;
+}
+
+static int
+compare_static_init_entries_by_source(const void *a, const void *b);
+
+static bool
+ncc_collect_static_inits(ncc_symtab_t *symtab,
+                         ncc_ct_static_init_t **out_static_inits,
+                         int *out_n_static_inits)
+{
+    *out_static_inits = nullptr;
+    *out_n_static_inits = 0;
+    if (!symtab) {
+        return true;
+    }
+
+    ncc_ct_static_init_t *static_inits = nullptr;
+    int n_static_inits = 0;
+    int cap = 0;
+    ncc_sym_entry_t **entries = nullptr;
+    int n_entries = 0;
+    int entries_cap = 0;
+
+    for (ncc_scope_t *scope = symtab->all_scopes; scope;
+         scope = scope->all_next) {
+        for (ncc_sym_entry_t *entry = scope->first_in_scope; entry;
+             entry = entry->next_in_scope) {
+            if (entry->kind != NCC_SYM_VARIABLE || !entry->is_static_init
+                || entry->is_comptime || entry->scope_depth != 1) {
+                continue;
+            }
+            if (n_entries >= entries_cap) {
+                int new_cap = entries_cap ? entries_cap * 2 : 4;
+                entries = ncc_realloc(entries,
+                                      (size_t)new_cap * sizeof(*entries));
+                entries_cap = new_cap;
+            }
+            entries[n_entries++] = entry;
+        }
+    }
+
+    qsort(entries, (size_t)n_entries, sizeof(*entries),
+          compare_static_init_entries_by_source);
+
+    for (int i = 0; i < n_entries; i++) {
+        if (!ncc_push_static_init(&static_inits, &n_static_inits, &cap,
+                                  entries[i])) {
+            ncc_free(entries);
+            ncc_free_static_inits(static_inits, n_static_inits);
+            return false;
+        }
+    }
+
+    ncc_free(entries);
+    *out_static_inits = static_inits;
+    *out_n_static_inits = n_static_inits;
+    return true;
+}
+
+static int
+compare_static_init_entries_by_source(const void *a, const void *b)
+{
+    const ncc_sym_entry_t *ea = *(const ncc_sym_entry_t * const *)a;
+    const ncc_sym_entry_t *eb = *(const ncc_sym_entry_t * const *)b;
+    uint32_t a_line = 0;
+    uint32_t a_col = 0;
+    uint32_t b_line = 0;
+    uint32_t b_col = 0;
+
+    ncc_xform_first_leaf_pos(ea ? ea->decl_node : nullptr, &a_line, &a_col);
+    ncc_xform_first_leaf_pos(eb ? eb->decl_node : nullptr, &b_line, &b_col);
+
+    if (a_line != b_line) {
+        return a_line < b_line ? -1 : 1;
+    }
+    if (a_col != b_col) {
+        return a_col < b_col ? -1 : 1;
+    }
+    return 0;
+}
+
+typedef enum {
+    NCC_CRT_TARGET_LINUX,
+    NCC_CRT_TARGET_DARWIN,
+    NCC_CRT_TARGET_WINDOWS,
+} ncc_crt_target_os_t;
+
+static ncc_crt_target_os_t
+ncc_crt_default_target_os(void)
+{
+#ifdef _WIN32
+    return NCC_CRT_TARGET_WINDOWS;
+#elif defined(__APPLE__)
+    return NCC_CRT_TARGET_DARWIN;
+#else
+    return NCC_CRT_TARGET_LINUX;
+#endif
+}
+
+static ncc_crt_target_os_t
+ncc_crt_target_os_from_triple(const char *triple, ncc_crt_target_os_t fallback)
+{
+    if (!triple) {
+        return fallback;
+    }
+
+    if (strstr(triple, "windows") || strstr(triple, "mingw")
+        || strstr(triple, "msvc") || strstr(triple, "cygwin")) {
+        return NCC_CRT_TARGET_WINDOWS;
+    }
+    if (strstr(triple, "darwin") || strstr(triple, "apple")
+        || strstr(triple, "macos") || strstr(triple, "ios")
+        || strstr(triple, "tvos") || strstr(triple, "watchos")) {
+        return NCC_CRT_TARGET_DARWIN;
+    }
+    if (strstr(triple, "linux") || strstr(triple, "android")) {
+        return NCC_CRT_TARGET_LINUX;
+    }
+
+    return fallback;
+}
+
+static ncc_crt_target_os_t
+ncc_crt_target_os(const ncc_opts_t *opts)
+{
+    ncc_crt_target_os_t os = ncc_crt_default_target_os();
+
+    for (int i = 0; opts && i < opts->n_clang_args; i++) {
+        const char *arg = opts->clang_args[i];
+
+        if (strncmp(arg, "--target=", 9) == 0) {
+            os = ncc_crt_target_os_from_triple(arg + 9, os);
+            continue;
+        }
+        if (strncmp(arg, "-target=", 8) == 0) {
+            os = ncc_crt_target_os_from_triple(arg + 8, os);
+            continue;
+        }
+        if ((strcmp(arg, "-target") == 0 || strcmp(arg, "--target") == 0)
+            && i + 1 < opts->n_clang_args) {
+            os = ncc_crt_target_os_from_triple(opts->clang_args[++i], os);
+        }
+    }
+
+    return os;
+}
+
+static const char *
+ncc_crt_platform_entry_flag(const ncc_opts_t *opts)
+{
+    switch (ncc_crt_target_os(opts)) {
+    case NCC_CRT_TARGET_WINDOWS:
+        return "-Wl,/entry:n00b_start";
+    case NCC_CRT_TARGET_DARWIN:
+        return "-Wl,-e,_n00b_start";
+    case NCC_CRT_TARGET_LINUX:
+    default:
+        return "-Wl,-e,n00b_start";
+    }
+}
+
+static const char *
+ncc_crt_platform_entry_force_undefined_flag(const ncc_opts_t *opts)
+{
+    switch (ncc_crt_target_os(opts)) {
+    case NCC_CRT_TARGET_DARWIN:
+        return "-Wl,-u,_n00b_start";
+    case NCC_CRT_TARGET_LINUX:
+        return "-Wl,-u,n00b_start";
+    case NCC_CRT_TARGET_WINDOWS:
+    default:
+        return nullptr;
+    }
+}
+
+static bool
+ncc_crt_compile_arg_takes_value(const char *arg)
+{
+    return strcmp(arg, "-target") == 0 || strcmp(arg, "--target") == 0
+           || strcmp(arg, "-arch") == 0 || strcmp(arg, "-isysroot") == 0
+           || strcmp(arg, "--sysroot") == 0 || strcmp(arg, "-march") == 0
+           || strcmp(arg, "-mcpu") == 0 || strcmp(arg, "-mtune") == 0
+           || strcmp(arg, "-mabi") == 0;
+}
+
+static bool
+ncc_crt_compile_arg_is_single(const char *arg)
+{
+    return strncmp(arg, "--target=", 9) == 0
+           || strncmp(arg, "-target=", 8) == 0
+           || strncmp(arg, "--sysroot=", 10) == 0
+           || strncmp(arg, "-isysroot=", 10) == 0
+           || strncmp(arg, "-mmacosx-version-min=", 21) == 0
+           || strncmp(arg, "-miphoneos-version-min=", 24) == 0
+           || strncmp(arg, "-mios-simulator-version-min=", 28) == 0
+           || strncmp(arg, "-mtvos-version-min=", 19) == 0
+           || strncmp(arg, "-mwatchos-version-min=", 22) == 0
+           || strncmp(arg, "-march=", 7) == 0
+           || strncmp(arg, "-mcpu=", 6) == 0
+           || strncmp(arg, "-mtune=", 7) == 0
+           || strncmp(arg, "-mfpu=", 6) == 0
+           || strncmp(arg, "-mfloat-abi=", 12) == 0
+           || strncmp(arg, "-mabi=", 6) == 0
+           || strcmp(arg, "-m32") == 0 || strcmp(arg, "-m64") == 0
+           || strcmp(arg, "-mthumb") == 0 || strcmp(arg, "-fPIC") == 0
+           || strcmp(arg, "-fpic") == 0 || strcmp(arg, "-fPIE") == 0
+           || strcmp(arg, "-fpie") == 0 || strcmp(arg, "-fno-pic") == 0
+           || strcmp(arg, "-fno-pie") == 0;
+}
+
+static int
+ncc_crt_append_compile_target_args(const ncc_opts_t *opts, const char **argv,
+                                   int ai)
+{
+    for (int i = 0; opts && i < opts->n_clang_args; i++) {
+        const char *arg = opts->clang_args[i];
+
+        if (ncc_crt_compile_arg_takes_value(arg)) {
+            argv[ai++] = arg;
+            if (i + 1 < opts->n_clang_args) {
+                argv[ai++] = opts->clang_args[++i];
+            }
+            continue;
+        }
+
+        if (ncc_crt_compile_arg_is_single(arg)) {
+            argv[ai++] = arg;
+        }
+    }
+
+    return ai;
+}
+
+static bool
+compile_crt_entry_object(const ncc_opts_t *opts, ncc_temp_workspace_t *workspace,
+                         char **object_path_out)
+{
+    *object_path_out = nullptr;
+
+    char *tmp_err = nullptr;
+    if (!ncc_temp_workspace_create(workspace, "ncc_crt_", &tmp_err)) {
+        print_process_message("failed to create crt entry temp path", tmp_err);
+        ncc_free(tmp_err);
+        return false;
+    }
+
+    const char *entry_source =
+        ncc_crt_emit_entry(opts, NCC_CRT_VARIANT_BASE);
+    if (!entry_source) {
+        fprintf(stderr, "ncc: failed to generate custom crt entry source\n");
+        return false;
+    }
+
+    char *source_path = ncc_temp_workspace_join(workspace, "entry.c");
+    char *object_path = ncc_temp_workspace_join(workspace, "entry.o");
+
+    if (!source_path || !object_path) {
+        fprintf(stderr, "ncc: failed to create custom crt entry temp files\n");
+        ncc_free(source_path);
+        ncc_free(object_path);
+        return false;
+    }
+
+    char *write_err = nullptr;
+    if (!ncc_platform_write_file(source_path, entry_source,
+                                 strlen(entry_source), &write_err)) {
+        print_process_message("write to custom crt entry temp file failed",
+                              write_err);
+        ncc_free(write_err);
+        ncc_free(source_path);
+        ncc_free(object_path);
+        return false;
+    }
+
+    int          max_args = 8 + opts->n_clang_args;
+    const char **argv     = ncc_alloc_array(const char *, (size_t)max_args);
+    int          ai       = 0;
+
+    argv[ai++] = opts->compiler;
+    ai         = ncc_crt_append_compile_target_args(opts, argv, ai);
+    argv[ai++] = "-std=gnu23";
+    argv[ai++] = "-c";
+    argv[ai++] = source_path;
+    argv[ai++] = "-o";
+    argv[ai++] = object_path;
+    argv[ai]   = nullptr;
+
+    ncc_verbose("custom crt entry source=%s", source_path);
+    ncc_verbose("custom crt entry object=%s", object_path);
+    ncc_verbose_args("custom crt entry compiler argv", argv, ai);
+
+    ncc_process_spec_t spec = {
+        .program        = opts->compiler,
+        .argv           = argv,
+        .capture_stdout = verbose,
+        .capture_stderr = true,
+    };
+    ncc_process_result_t proc;
+
+    if (!ncc_process_run(&spec, &proc)) {
+        print_process_message("failed to launch custom crt entry compiler",
+                              proc.stderr_data);
+        ncc_process_result_free(&proc);
+        ncc_free(argv);
+        ncc_free(source_path);
+        ncc_free(object_path);
+        return false;
+    }
+
+    forward_process_output("custom crt entry compiler stdout",
+                           proc.stdout_data, proc.stdout_len, stdout);
+    forward_process_output("custom crt entry compiler stderr",
+                           proc.stderr_data, proc.stderr_len, stderr);
+
+    int rc = proc.exit_code;
+    ncc_process_result_free(&proc);
+    ncc_free(argv);
+    ncc_free(source_path);
+
+    if (rc != 0) {
+        fprintf(stderr, "ncc: custom crt entry compilation failed (exit %d)\n",
+                rc);
+        ncc_free(object_path);
+        return false;
+    }
+
+    *object_path_out = object_path;
+    return true;
+}
+
+static int
+custom_entry_link_passthrough(const ncc_opts_t *opts, int argc,
+                              const char **orig_argv)
+{
+    ncc_verbose("custom-entry passthrough link to %s", opts->compiler);
+
+    ncc_opts_t link_opts = *opts;
+    if (!link_opts.input_file) {
+        link_opts.input_file = "<link>";
+    }
+
+    ncc_temp_workspace_t crt_workspace = {0};
+    char *crt_entry_object = nullptr;
+
+    if (!compile_crt_entry_object(&link_opts, &crt_workspace,
+                                  &crt_entry_object)) {
+        ncc_temp_workspace_cleanup(&crt_workspace);
+        return 1;
+    }
+
+    const char **argv = ncc_alloc_array(const char *, (size_t)(argc + 9));
+    int          ai   = 0;
+
+    argv[ai++] = opts->compiler;
+    argv[ai++] = "-nostartfiles";
+    argv[ai++] = ncc_crt_platform_entry_flag(opts);
+    const char *entry_force =
+        ncc_crt_platform_entry_force_undefined_flag(opts);
+    if (entry_force) {
+        argv[ai++] = entry_force;
+    }
+    argv[ai++] = "-x";
+    argv[ai++] = "none";
+    argv[ai++] = crt_entry_object;
+
+    for (int i = 1; i < argc; i++) {
+        const char *arg = orig_argv[i];
+
+        if (strncmp(arg, "--ncc-", 6) == 0 || strcmp(arg, "--no-ncc") == 0) {
+            if (ncc_arg_is_ncc_only_with_value(arg) && i + 1 < argc) {
+                i++;
+            }
+            continue;
+        }
+
+        argv[ai++] = arg;
+    }
+
+    argv[ai] = nullptr;
+
+    ncc_verbose_args("custom-entry passthrough linker argv", argv, ai);
+
+    ncc_process_spec_t spec = {
+        .program        = opts->compiler,
+        .argv           = argv,
+        .capture_stdout = verbose,
+        .capture_stderr = verbose,
+    };
+    ncc_process_result_t proc;
+
+    if (!ncc_process_run(&spec, &proc)) {
+        print_process_message("failed to launch custom-entry linker",
+                              proc.stderr_data);
+        ncc_process_result_free(&proc);
+        ncc_free(argv);
+        ncc_free(crt_entry_object);
+        ncc_temp_workspace_cleanup(&crt_workspace);
+        return 1;
+    }
+
+    forward_process_output("custom-entry linker stdout",
+                           proc.stdout_data, proc.stdout_len, stdout);
+    forward_process_output("custom-entry linker stderr",
+                           proc.stderr_data, proc.stderr_len, stderr);
+
+    int rc = proc.exit_code;
+    ncc_verbose("custom-entry linker exit code=%d", rc);
+    ncc_process_result_free(&proc);
+    ncc_free(argv);
+    ncc_free(crt_entry_object);
+    ncc_temp_workspace_cleanup(&crt_workspace);
+    return rc;
+}
+
 static int
 pipe_to_compiler(const ncc_opts_t *opts, const char *c_source, size_t c_len)
 {
-    // Build argv: compiler [-std=gnu23] [flags...] -x c - [-x none linker-inputs...]
+    // Build argv: compiler [-std=gnu23] [flags...] -x c temp.c
+    //             [-x none linker-inputs...]
     // clang_args already includes -c, -o, and all passthrough flags.
-    // Linker inputs (.a, .o, .so) must come after "-x c -" with a
+    // Linker inputs (.a, .o, .so) must come after the transformed source with a
     // "-x none" reset so clang treats them correctly on all platforms.
-    int          max_args = 10 + opts->n_clang_args * 2;
+    bool use_custom_entry = opts->custom_entry && ncc_is_link_invocation(opts);
+    ncc_temp_workspace_t crt_workspace = {0};
+    char *crt_entry_object = nullptr;
+    ncc_temp_workspace_t source_workspace = {0};
+    char *source_path = nullptr;
+
+    if (use_custom_entry
+        && !compile_crt_entry_object(opts, &crt_workspace, &crt_entry_object)) {
+        ncc_temp_workspace_cleanup(&crt_workspace);
+        return 1;
+    }
+
+    source_path = write_transformed_source_temp(&source_workspace,
+                                                "ncc_compile_",
+                                                c_source,
+                                                c_len);
+    if (!source_path) {
+        ncc_free(crt_entry_object);
+        ncc_temp_workspace_cleanup(&crt_workspace);
+        return 1;
+    }
+
+    int          max_args = 16 + opts->n_clang_args * 2
+                            + (use_custom_entry ? 9 : 0);
     const char **argv     = ncc_alloc_array(const char *, (size_t)(max_args + 1));
     int          ai       = 0;
 
@@ -1685,6 +3010,16 @@ pipe_to_compiler(const ncc_opts_t *opts, const char *c_source, size_t c_len)
 
     // Suppress ODR warnings from alignas attributes in transformed code.
     argv[ai++] = "-Wno-odr";
+
+    if (use_custom_entry) {
+        argv[ai++] = "-nostartfiles";
+        argv[ai++] = ncc_crt_platform_entry_flag(opts);
+        const char *entry_force =
+            ncc_crt_platform_entry_force_undefined_flag(opts);
+        if (entry_force) {
+            argv[ai++] = entry_force;
+        }
+    }
 
     // Pass compiler flags (non-linker-input args) before -x c -.
     // Track -o so its argument (often ending in .o) isn't mistaken
@@ -1706,11 +3041,17 @@ pipe_to_compiler(const ncc_opts_t *opts, const char *c_source, size_t c_len)
 
     argv[ai++] = "-x";
     argv[ai++] = "c";
-    argv[ai++] = "-";
+    argv[ai++] = source_path;
 
-    // Append linker inputs (.a, .o, etc.) after "-x c -", resetting
+    // Append linker inputs (.a, .o, etc.) after the transformed source, resetting
     // the language so clang doesn't misinterpret them as C source.
     bool need_reset = true;
+    if (use_custom_entry) {
+        argv[ai++] = "-x";
+        argv[ai++] = "none";
+        need_reset = false;
+        argv[ai++] = crt_entry_object;
+    }
     for (int i = 0; i < opts->n_clang_args; i++) {
         if (strcmp(opts->clang_args[i], "-o") == 0) {
             i++; // skip -o and its argument
@@ -1728,14 +3069,12 @@ pipe_to_compiler(const ncc_opts_t *opts, const char *c_source, size_t c_len)
 
     argv[ai] = nullptr;
 
-    ncc_verbose("compiler stdin bytes=%zu", c_len);
+    ncc_verbose("compiler source bytes=%zu path=%s", c_len, source_path);
     ncc_verbose_args("compiler argv", argv, ai);
 
     ncc_process_spec_t   spec = {
         .program        = opts->compiler,
         .argv           = argv,
-        .stdin_data     = c_source,
-        .stdin_len      = c_len,
         .capture_stdout = verbose,
         .capture_stderr = verbose,
     };
@@ -1745,6 +3084,10 @@ pipe_to_compiler(const ncc_opts_t *opts, const char *c_source, size_t c_len)
         print_process_message("failed to launch compiler", proc.stderr_data);
         ncc_process_result_free(&proc);
         ncc_free(argv);
+        ncc_free(source_path);
+        ncc_free(crt_entry_object);
+        ncc_temp_workspace_cleanup(&source_workspace);
+        ncc_temp_workspace_cleanup(&crt_workspace);
         return 1;
     }
 
@@ -1754,6 +3097,10 @@ pipe_to_compiler(const ncc_opts_t *opts, const char *c_source, size_t c_len)
                            proc.stderr_len, stderr);
 
     ncc_free(argv);
+    ncc_free(source_path);
+    ncc_free(crt_entry_object);
+    ncc_temp_workspace_cleanup(&source_workspace);
+    ncc_temp_workspace_cleanup(&crt_workspace);
     int rc = proc.exit_code;
     ncc_verbose("compiler exit code=%d", rc);
     ncc_process_result_free(&proc);
@@ -1994,8 +3341,50 @@ compile_file(ncc_opts_t *opts)
     bool ok = ncc_pwz_parse(parser, ts);
 
     if (!ok) {
-        print_parse_error(ts, ncc_pwz_error_pos(parser), opts->input_file);
+        int32_t ntokens = ts->token_count;
+        fprintf(stderr, "ncc: parse FAILED (%d tokens produced)\n", ntokens);
         maybe_print_array_literal_parse_hint(ts);
+
+        int32_t show = 10;
+        if (ntokens > 0) {
+            fprintf(stderr, "  first %d tokens:\n",
+                    show < ntokens ? show : ntokens);
+            for (int32_t i = 0; i < ntokens && i < show; i++) {
+                ncc_token_info_t *t = ts->tokens[i];
+                if (t) {
+                    fprintf(stderr, "    [%d] tid=%d", i, t->tid);
+                    if (ncc_option_is_set(t->value)) {
+                        ncc_string_t v = ncc_option_get(t->value);
+                        if (v.data) {
+                            fprintf(stderr, " \"%.*s\"",
+                                    v.u8_bytes > 40 ? 40 : (int)v.u8_bytes,
+                                    v.data);
+                        }
+                    }
+                    fprintf(stderr, "\n");
+                }
+            }
+            if (ntokens > show * 2) {
+                fprintf(stderr, "  last %d tokens:\n", show);
+                for (int32_t i = ntokens - show; i < ntokens; i++) {
+                    ncc_token_info_t *t = ts->tokens[i];
+                    if (t) {
+                        fprintf(stderr, "    [%d] tid=%d", i, t->tid);
+                        if (ncc_option_is_set(t->value)) {
+                            ncc_string_t v = ncc_option_get(t->value);
+                            if (v.data) {
+                                fprintf(stderr, " \"%.*s\"",
+                                        v.u8_bytes > 40
+                                            ? 40
+                                            : (int)v.u8_bytes,
+                                        v.data);
+                            }
+                        }
+                        fprintf(stderr, "\n");
+                    }
+                }
+            }
+        }
 
         ncc_pwz_free(parser);
         ncc_token_stream_free(ts);
@@ -2106,6 +3495,7 @@ compile_file(ncc_opts_t *opts)
     ncc_register_gc_stack_maps_xform(&xreg);
     ncc_register_constexpr_xform(&xreg);
     ncc_register_constexpr_paste_xform(&xreg);
+    ncc_register_static_init_xform(&xreg);
     // gc_globals must run LAST: it walks the final flattened TU
     // (including any synthetic decls earlier passes — rpc, once,
     // kargs_vargs, static_image — produced) per spec § 8.3.
@@ -2310,11 +3700,11 @@ compile_file(ncc_opts_t *opts)
         .array_literal_data_template = array_literal_data_template,
         .array_literal_data_expr     = array_literal_data_expr,
         .static_object_entry_attr    = static_object_entry_attr,
-        .static_init_helper          = opts->static_init_helper,
         .static_identity_generate_namespace =
             opts->static_identity_generate_namespace,
         .gc_stack_maps               = opts->gc_stack_maps,
         .gc_stack_maps_relaxed       = opts->gc_stack_maps_relaxed,
+        .gc_typemaps                 = opts->gc_typemaps,
         .auto_gc_roots               = opts->auto_gc_roots,
     };
     ncc_dict_init(&xdata.func_meta,
@@ -2357,6 +3747,58 @@ compile_file(ncc_opts_t *opts)
     // skipped by the discard check.
     ncc_nodiscard_check(g, tree, xdata.symtab);
 
+    bool has_optional_comptime = false;
+    if (ncc_comptime_check(g, tree, xdata.symtab, &has_optional_comptime) > 0) {
+        ncc_symtab_free(xdata.symtab);
+        xdata.symtab = nullptr;
+        ncc_dict_free(&xdata.func_meta);
+        ncc_dict_free(&xdata.option_meta);
+        ncc_dict_free(&xdata.option_decls);
+        ncc_dict_free(&xdata.generic_struct_decls);
+        ncc_dict_free(&xdata.array_types);
+        ncc_dict_free(&xdata.list_types);
+        ncc_dict_free(&xdata.dict_types);
+        ncc_dict_free(&xdata.gc_aggregate_types);
+        ncc_dict_free(&xdata.gc_pointer_typedefs);
+        ncc_dict_free(&xdata.gc_function_pointer_typedefs);
+        free_gc_stack_roots(xdata.gc_stack_roots);
+        ncc_template_registry_free(&tmpl_reg);
+        ncc_xform_registry_free(&xreg);
+        ncc_pwz_free(parser);
+        ncc_token_stream_free(ts);
+        ncc_scanner_free(scanner);
+        ncc_grammar_free(g);
+        return 1;
+    }
+
+    ncc_ct_static_init_t *static_inits = nullptr;
+    int                   n_static_inits = 0;
+    bool static_inits_ok = ncc_collect_static_inits(xdata.symtab,
+                                                    &static_inits,
+                                                    &n_static_inits);
+    if (!static_inits_ok) {
+        ncc_symtab_free(xdata.symtab);
+        xdata.symtab = nullptr;
+        ncc_dict_free(&xdata.func_meta);
+        ncc_dict_free(&xdata.option_meta);
+        ncc_dict_free(&xdata.option_decls);
+        ncc_dict_free(&xdata.generic_struct_decls);
+        ncc_dict_free(&xdata.array_types);
+        ncc_dict_free(&xdata.list_types);
+        ncc_dict_free(&xdata.dict_types);
+        ncc_dict_free(&xdata.gc_aggregate_types);
+        ncc_dict_free(&xdata.gc_pointer_typedefs);
+        ncc_dict_free(&xdata.gc_function_pointer_typedefs);
+        free_gc_stack_roots(xdata.gc_stack_roots);
+        ncc_template_registry_free(&tmpl_reg);
+        ncc_xform_registry_free(&xreg);
+        ncc_pwz_free(parser);
+        ncc_token_stream_free(ts);
+        ncc_scanner_free(scanner);
+        ncc_grammar_free(g);
+        return 1;
+    }
+
     xctx.user_data = &xdata;
     ncc_verbose("applying transforms");
     tree = ncc_xform_apply(&xreg, &xctx);
@@ -2380,11 +3822,27 @@ compile_file(ncc_opts_t *opts)
     // pretty-printed output further down.
     char *gc_typemap_text = ncc_gc_typemap_emit(&xctx);
 
+    bool         has_comptime_main = ncc_has_function_definition_named(
+        tree, "comptime_main");
+    ncc_ct_sig_t comptime_sig = {
+        .argc     = 3,
+        .has_argv = true,
+        .has_envp = true,
+    };
+    uint8_t comptime_main_flags =
+        has_optional_comptime ? NCC_CT_MAIN_FLAG_OPTIONAL : 0;
+    ncc_ct_var_t *comptime_vars = nullptr;
+    int           n_comptime_vars = 0;
+    bool comptime_vars_ok = ncc_collect_comptime_vars(xdata.symtab,
+                                                      &comptime_vars,
+                                                      &n_comptime_vars);
+
     // The `[[n00b::noscan]]` per-field attribute is consumed above (it tells
     // ncc_gc_typemap_emit to omit a field from the GC typemap). Strip it from
     // the whole tree now — AFTER the typemap detection has read it, BEFORE the
     // tree is pretty-printed — so clang never sees this ncc-only attribute.
     ncc_xform_strip_n00b_named_attribute_specifiers(tree, "noscan");
+    ncc_xform_strip_n00b_named_attribute_specifiers(tree, "comptime");
 
 #ifdef NCC_MEM_DEBUG
     ncc_mem_report("after transform");
@@ -2408,6 +3866,16 @@ compile_file(ncc_opts_t *opts)
     ncc_template_registry_free(&tmpl_reg);
     ncc_xform_registry_free(&xreg);
 
+    if (!comptime_vars_ok || !static_inits_ok) {
+        ncc_free_comptime_vars(comptime_vars, n_comptime_vars);
+        ncc_free_static_inits(static_inits, n_static_inits);
+        ncc_pwz_free(parser);
+        ncc_token_stream_free(ts);
+        ncc_scanner_free(scanner);
+        ncc_grammar_free(g);
+        return 1;
+    }
+
     // Stage 7: Emit transformed C.
     ncc_pprint_opts_t pp_opts = {
         .line_width       = 100,
@@ -2423,6 +3891,8 @@ compile_file(ncc_opts_t *opts)
 
     if (!emitted.data) {
         fprintf(stderr, "ncc: emission produced no output\n");
+        ncc_free_comptime_vars(comptime_vars, n_comptime_vars);
+        ncc_free_static_inits(static_inits, n_static_inits);
         ncc_pwz_free(parser);
         ncc_token_stream_free(ts);
         ncc_scanner_free(scanner);
@@ -2444,6 +3914,27 @@ compile_file(ncc_opts_t *opts)
         emitted.u8_bytes = base + 1 + add;
     }
 
+    int rc = 0;
+    const char *comptime_meta_text = ncc_ct_emit_section_decl_ex(
+        opts, has_comptime_main ? &comptime_sig : nullptr,
+        comptime_main_flags, comptime_vars, n_comptime_vars,
+        static_inits, n_static_inits);
+    if (!comptime_meta_text
+        && (has_comptime_main || n_comptime_vars > 0
+            || n_static_inits > 0)) {
+        fprintf(stderr, "ncc: failed to emit comptime metadata section\n");
+        ncc_free_comptime_vars(comptime_vars, n_comptime_vars);
+        ncc_free_static_inits(static_inits, n_static_inits);
+        rc = 1;
+        goto cleanup;
+    }
+    if (comptime_meta_text) {
+        (void)ncc_append_fragment(&emitted, comptime_meta_text);
+        ncc_free((void *)comptime_meta_text);
+    }
+    ncc_free_comptime_vars(comptime_vars, n_comptime_vars);
+    ncc_free_static_inits(static_inits, n_static_inits);
+
     size_t emit_len = emitted.u8_bytes;
 
     ncc_verbose("emitted %zu bytes", emit_len);
@@ -2459,8 +3950,6 @@ compile_file(ncc_opts_t *opts)
     }
 
     // Stage 8: Route output.
-    int rc = 0;
-
     if (opts->has_E) {
         ncc_verbose("emit mode target=%s",
                     opts->output_file ? opts->output_file : "stdout");
@@ -2496,7 +3985,140 @@ compile_file(ncc_opts_t *opts)
 
         // Compile: pipe transformed C to compiler.
         ncc_verbose("handing transformed source to compiler");
-        rc = pipe_to_compiler(opts, emitted.data, emit_len);
+        if (ncc_is_link_invocation(opts)) {
+            ncc_link_inputs_t inputs = {0};
+            ncc_ct_rec_list_t records = {0};
+            ncc_ct_aggregate_t agg = {0};
+            char *err = nullptr;
+
+            ncc_collect_link_inputs_from_clang_args(opts, &inputs);
+
+            ncc_ct_aggregate_t source_guard_agg = {
+                .has_comptime_main = has_comptime_main,
+                .main_flags        = comptime_main_flags,
+            };
+            if (has_comptime_main
+                && !ncc_comptime_guard_check(opts, &source_guard_agg, &err)) {
+                print_process_message("comptime guard failed", err);
+                rc = 1;
+            }
+            else if (!ncc_read_comptime_metadata_inputs(opts,
+                                                        inputs.metadata_inputs,
+                                                        inputs.n_metadata_inputs,
+                                                        &records, &err)) {
+                print_process_message("failed to read comptime metadata", err);
+                rc = 1;
+            }
+            else if (has_comptime_main || n_comptime_vars > 0
+                     || n_static_inits > 0
+                     || records.n_records > 0) {
+                ncc_temp_workspace_t ct_workspace = {0};
+                char *tmp_err = nullptr;
+                char *source_object = nullptr;
+
+                if (!ncc_temp_workspace_create(&ct_workspace, "ncc_ct_src_",
+                                               &tmp_err)) {
+                    print_process_message("failed to create comptime source temp path",
+                                          tmp_err);
+                    ncc_free(tmp_err);
+                    rc = 1;
+                }
+                else {
+                    source_object = ncc_temp_workspace_join(&ct_workspace,
+                                                            "source.o");
+                    if (!source_object) {
+                        fprintf(stderr,
+                                "ncc: failed to create comptime source object path\n");
+                        rc = 1;
+                    }
+                    else if (!ncc_compile_transformed_object(opts, emitted.data,
+                                                             emit_len,
+                                                             source_object)) {
+                        rc = 1;
+                    }
+                    else {
+                        ncc_push_const_arg(&inputs.user_inputs,
+                                           &inputs.n_user_inputs,
+                                           source_object);
+                        ncc_insert_const_arg(&inputs.ordered_link_args,
+                                             &inputs.n_ordered_link_args,
+                                             0, source_object);
+                        if (has_comptime_main || n_comptime_vars > 0
+                            || n_static_inits > 0) {
+                            ncc_push_const_arg(&inputs.metadata_inputs,
+                                               &inputs.n_metadata_inputs,
+                                               source_object);
+                            if (!ncc_ct_read_object(opts, source_object,
+                                                    &records, &err)) {
+                                print_process_message("failed to read comptime metadata",
+                                                      err);
+                                rc = 1;
+                            }
+                        }
+                    }
+                }
+
+                if (rc == 0) {
+                    if (!ncc_aggregate_comptime_records(&records, &agg, &err)) {
+                        print_process_message("failed to aggregate comptime metadata",
+                                              err);
+                        rc = 1;
+                    }
+                    else if (!ncc_comptime_guard_check(opts, &agg, &err)) {
+                        print_process_message("comptime guard failed", err);
+                        rc = 1;
+                    }
+                    else {
+                        bool has_comptime_work = agg.has_comptime_main
+                                                 || agg.n_static_inits > 0;
+                        ncc_comptime_degrade_route_t degrade_route =
+                            ncc_comptime_degrade_route(opts, &agg);
+
+                        if ((degrade_route.static_init_degrade
+                             || degrade_route.comptime_main_degrade)
+                            && agg.n_static_inits > 0
+                            && !ncc_static_init_degrade_allowed(&agg, &err)) {
+                            print_process_message("static-init degrade failed",
+                                                  err);
+                            rc = 1;
+                        }
+                        else if (degrade_route.comptime_main_degrade
+                                 || degrade_route.static_init_degrade) {
+                            rc = ncc_degrade_comptime_link_plan(opts, &inputs,
+                                                                &agg);
+                        }
+                        else if (!has_comptime_work || opts->no_comptime) {
+                            rc = pipe_to_compiler(opts, emitted.data, emit_len);
+                            if (rc == 0) {
+                                rc = ncc_strip_comptime_output(opts);
+                            }
+                        }
+                        else {
+                            rc = ncc_run_comptime_link_plan(opts, &inputs,
+                                                            &agg);
+                        }
+                    }
+                }
+
+                ncc_free(source_object);
+                ncc_temp_workspace_cleanup(&ct_workspace);
+            }
+            else {
+                rc = pipe_to_compiler(opts, emitted.data, emit_len);
+            }
+
+            ncc_free(err);
+            ncc_ct_aggregate_free(&agg);
+            ncc_ct_rec_list_free(&records);
+            ncc_link_inputs_free(&inputs);
+        }
+        else {
+            rc = pipe_to_compiler(opts, emitted.data, emit_len);
+        }
+
+        if (rc == 0 && opts->no_comptime && ncc_is_link_invocation(opts)) {
+            rc = ncc_strip_comptime_output(opts);
+        }
     }
 
 cleanup:
@@ -2530,7 +4152,23 @@ main(int argc, char **argv)
         return compiler_passthrough(&opts, argc, (const char **)argv);
     }
 
+    if (opts.has_dep_only) {
+        return compiler_passthrough(&opts, argc, (const char **)argv);
+    }
+
     if (!opts.input_file) {
+        bool comptime_handled = false;
+        int comptime_rc = maybe_comptime_link_passthrough(&opts, argc,
+                                                          (const char **)argv,
+                                                          &comptime_handled);
+        if (comptime_handled) {
+            return comptime_rc;
+        }
+        if (opts.custom_entry && !opts.has_E && !opts.has_c && !opts.has_S
+            && !opts.has_fsyntax_only) {
+            return custom_entry_link_passthrough(&opts, argc,
+                                                 (const char **)argv);
+        }
         // No source file — passthrough to compiler (linking, etc.).
         return compiler_passthrough(&opts, argc, (const char **)argv);
     }

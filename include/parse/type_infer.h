@@ -21,6 +21,13 @@
 #include "parse/token.h"
 
 /**
+ * @brief Canonical declared type spelling of symbol @p sym, or nullptr if the
+ *        current type model cannot represent the declarator shape. Caller
+ *        frees.
+ */
+char *ncc_type_of_symbol(ncc_sym_entry_t *sym);
+
+/**
  * @brief Canonical type spelling of expression @p expr under symbol table
  *        @p st, or nullptr if the form is not yet typeable. Caller frees.
  */

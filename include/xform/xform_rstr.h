@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "xform/transform.h"
@@ -41,3 +42,11 @@ ncc_rstr_static_ref_t ncc_rstr_build_static_ref_ex(
     ncc_xform_ctx_t *ctx,
     ncc_parse_tree_t *node,
     const char *cached_hash_expr);
+
+typedef struct {
+    char *expr;
+    bool  has_style;
+} ncc_rstr_managed_expr_t;
+
+ncc_rstr_managed_expr_t ncc_rstr_build_plain_managed_expr(
+    ncc_parse_tree_t *node);

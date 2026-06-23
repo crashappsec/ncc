@@ -7,7 +7,9 @@
 #endif
 
 #define LARGE_SOURCE_SIZE (2u * 1024u * 1024u)
-#define FINAL_COMPILER_MESSAGE "fake final compiler closed stdin before read\n"
+#define FINAL_COMPILER_MESSAGE "fake final compiler received temp source file\n"
+#define FINAL_COMPILER_BAD_SOURCE \
+    "fake final compiler expected temp source file after -x c\n"
 #define FINAL_COMPILER_EXIT 42
 
 static void
@@ -61,6 +63,18 @@ run_preprocessor(void)
     return fflush(stdout) == 0 ? 0 : 3;
 }
 
+static const char *
+find_c_source_arg(int argc, char **argv)
+{
+    for (int i = 1; i + 2 < argc; i++) {
+        if (strcmp(argv[i], "-x") == 0 && strcmp(argv[i + 1], "c") == 0) {
+            return argv[i + 2];
+        }
+    }
+
+    return nullptr;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -69,6 +83,19 @@ main(int argc, char **argv)
     if (has_arg(argc, argv, "-E")) {
         return run_preprocessor();
     }
+
+    const char *source_arg = find_c_source_arg(argc, argv);
+    if (!source_arg || strcmp(source_arg, "-") == 0) {
+        fputs(FINAL_COMPILER_BAD_SOURCE, stderr);
+        return 43;
+    }
+
+    FILE *source = fopen(source_arg, "rb");
+    if (!source) {
+        fputs(FINAL_COMPILER_BAD_SOURCE, stderr);
+        return 44;
+    }
+    fclose(source);
 
     fputs(FINAL_COMPILER_MESSAGE, stderr);
     fflush(stderr);

@@ -1,8 +1,8 @@
 # ncc Static Objects Pipeline — User & Contributor Manual
 
 This document covers the static-objects work delivered by WP-003 through
-WP-012: every ncc language extension and toolchain feature that
-participates in the build-time static-image pipeline.
+WP-010: every ncc language extension and toolchain feature
+that participates in the build-time static-object pipeline.
 
 Audience split:
 - **Part 1 (User Guide)** — for developers writing n00b source that uses
@@ -127,13 +127,13 @@ Friendly type-name diagnostics use the user-spelled form:
 
 ```
 error: dict literal initializer for 'n00b_dict_t(int, int)' requires
-       --ncc-static-init-helper=PATH
+       a writable file-scope value target
 ```
 
 Not the post-mangle form:
 
 ```
-// PRE-WP-011 (no longer emitted):
+// OLD (no longer emitted):
 error: ... initializer for 'struct __JHk7Lxxxx' ...
 ```
 
@@ -184,31 +184,17 @@ Files that should bypass the ncc pipeline (e.g., generated
 unicode tables, vendored libraries) can use `--no-ncc` as a c_arg in
 their meson target. ncc will pass through unchanged.
 
-## The static-init helper
+## Generalized static initialization
 
-For every `r"..."`, `b"..."`, `l{...}`, `a{...}`, and nonempty
-`d{...}` or `{key:value}` literal, ncc invokes
-`n00b-static-init-helper` (a build-time subprocess) to construct the
-literal's static-image bytes. The helper:
+WP-010 retired the bootstrap static-init helper subprocess and the
+`--ncc-static-init-helper=PATH` flag. Supported static-object literals
+are now lowered in-process by ncc and, for writable file-scope roots,
+flow through the generalized comptime image path.
 
-1. Reads a request from stdin (typed text protocol).
-2. Builds the literal's static object in memory using libn00b APIs.
-3. Writes the resulting C source (declarations + descriptor + payload)
-   to stdout.
-
-ncc then splices the helper's output into the generated C source.
-
-You don't normally interact with the helper directly — ncc's invocation
-is automatic when `--ncc-static-init-helper=PATH` is in the c_args
-(which `build.sh` adds for all test executables and end-user binaries).
-
-If `--ncc-static-init-helper=PATH` is missing when ncc encounters a
-non-empty literal, compilation fails with a clear diagnostic:
-
-```
-error: dict literal initializer for 'n00b_dict_t(int, int)' requires
-       --ncc-static-init-helper=PATH
-```
+The supported migrated roots include file-scope `b"..."` buffers and
+writable value-root array/list/dict literals. Non-migrated literal
+shapes now receive targeted diagnostics instead of falling back to a
+helper request.
 
 ## GC typemaps for typed allocations
 
@@ -281,20 +267,23 @@ C emission             (generated C source)
 clang -c               (object file)
 ```
 
-### xform passes touched by WP-003 → WP-012
+### xform passes touched by WP-003 → WP-010
 
 | Pass | Location | Notes |
 |------|----------|-------|
 | Rich-string lowering | `src/xform/xform_rstr.c` | r-string template substitution + cached_hash emission (D-077). |
 | Buffer literal lowering | `src/xform/xform_array_literal.c` | `b"..."` lowering with cached_hash threading (D-078). |
 | Array/list/dict literal lowering | `src/xform/xform_array_literal.c` | The single TU containing array, list, and dict lowering. Big file. |
-| Static-image lowering | `src/xform/xform_static_image.c` | Drives the `__ncc_static_image(...)` declaration form. |
+| Buffer static-init lowering | `src/xform/xform_static_image.c` | Lowers file-scope `b"..."` buffer declarations into static-init roots. |
 | GC stack-map emission | `src/xform/xform_data.h` and others | WP-002 / WP-005 stack maps preserved across non-local exits. |
 
-### Helper protocol (text)
+### Retired helper protocol
 
-ncc emits requests as plain text to the helper's stdin. The protocol
-shape:
+The old helper protocol was removed from the active ncc path in WP-010.
+Do not add new code or tests that depend on `test/static_image_helper.c`,
+`test_helper_drift`, or `--ncc-static-init-helper=PATH`.
+
+Historical request shape:
 
 ```
 NCC_STATIC_INIT 1
@@ -305,17 +294,11 @@ arg <name> <type> <value>
 end
 ```
 
-Response:
+Historical response:
 ```
 NCC_STATIC_INIT_OK <object-expression>
 <C source declarations>
 ```
-
-The helper code lives in
-`/Users/viega/n00b/.workspaces/static-generated-objects/src/tools/n00b-static-init-helper.c`.
-ncc's `test/static_image_helper.c` is a simplified stub used by ncc's
-own tests; Phase 4 of WP-012 added `test_helper_drift` (138th test) to
-catch drift between the two.
 
 ### Cached_hash slot mechanics (D-066, D-077, D-078)
 
@@ -354,35 +337,22 @@ post-mangle `object_type` field is reserved for helper-protocol emission
 where the type hash matters; user-visible diagnostics use the friendly
 form.
 
-### Phase 5e gap closed
+### Diagnostic guidance
 
-WP-011 Phase 5e applied friendly names to array/list/dict missing-helper
-diagnostics. WP-012 Phase 1 audit confirmed no other diagnostic sites
-leak the mangled form. The friendly-name treatment can be extended to
-future diagnostic categories using the same helper pattern.
+Friendly names should be used for user-facing array/list/dict diagnostics
+rather than post-mangle type names. The same treatment can be extended to
+future diagnostic categories using the local helper pattern.
 
 ### Test fixtures
 
-ncc's `test/` directory contains fixtures for every literal form:
+ncc's `test/` directory contains fixtures for migrated literal forms:
 
-- `test_dict_literal.c` — positive cases (compile and run; lookups
-  succeed).
 - `err_dict_literal_*.c` — diagnostic cases (compile-time errors with
   specific text).
-- `test_list_literal.c`, `test_array_literal.c` — list and array
-  precedents.
-- `test_helper_drift.c` (WP-012 Phase 4) — drift gate between stub and
-  production helpers.
-
-Test stubs vs production helper:
-
-- `test/static_image_helper.c` — ncc's standalone test stub. Simplified
-  emission. Doesn't fully mirror production behavior (e.g., it skips
-  identity emission, uses a simpler descriptor shape). Phase 5e added
-  buffer cached_hash emission; the drift test (WP-012 Phase 4) catches
-  future divergence.
-- `n00b-static-init-helper` (built from libn00b) — production. Used by
-  every test executable and end-user binary.
+- `test_array_literal.c` — array literal precedents that lower without
+  the helper.
+- `test_*_static_migrated.c` and `test_*_baking_no_helper.c` —
+  comptime-image E2E coverage for migrated buffer/list/array/dict roots.
 
 ### Vendored xxhash
 
@@ -399,12 +369,11 @@ pipeline. When running focused tests after a partial rebuild, use
 
 ## Project workplans (handoff context)
 
-The static-objects pipeline was built across WP-003 → WP-012. Audit
+The static-objects pipeline was built across WP-003 → WP-010. Audit
 documents and completion notes for each WP live in
-`.agents/work-plans/wp-NNN-*/`. Design decisions are recorded as D-001
-through D-078 in `.agents/DECISIONS.md`. See `docs/dict_literals.md` in
-the n00b workspace for the dict literal user reference and the libn00b
-migration recipe.
+`.agents/work-plans/wp-NNN-*/`. Design decisions are recorded in
+`.agents/DECISIONS.md`. See the n00b workspace documentation for runtime-side
+user references and migration notes.
 
 Known deferrals carried forward past the project end:
 
@@ -416,7 +385,5 @@ Known deferrals carried forward past the project end:
 - **cstring static descriptors + cached_hash** — future WP. Plain C
   string literals don't currently get descriptors; making them so
   would let `n00b_hash(cstring)` short-circuit.
-- **Drift test CI gating** — `test_helper_drift` skips when the
-  production helper binary isn't available.
 - **Arbitrary constructor-image object literals** — generalize beyond
   list/array/dict/buffer/r-string. Substantial future work.

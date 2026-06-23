@@ -115,6 +115,9 @@ ncc_process_result_free(ncc_process_result_t *out)
     out->stderr_data = nullptr;
     out->stderr_len  = 0;
     out->exit_code   = 0;
+    out->term_kind   = NCC_PROCESS_TERM_UNKNOWN;
+    out->signal_number = 0;
+    out->exception_code = 0;
 }
 
 static void
@@ -129,6 +132,9 @@ process_result_init(ncc_process_result_t *out)
     out->stdout_len  = 0;
     out->stderr_data = nullptr;
     out->stderr_len  = 0;
+    out->term_kind   = NCC_PROCESS_TERM_LAUNCH;
+    out->signal_number = 0;
+    out->exception_code = 0;
 }
 
 static bool
@@ -1197,6 +1203,12 @@ close_process_info(PROCESS_INFORMATION *pi)
     pi->dwThreadId  = 0;
 }
 
+static bool
+windows_exit_code_is_exception(DWORD exit_code)
+{
+    return (exit_code & 0xc0000000UL) == 0xc0000000UL;
+}
+
 bool
 ncc_process_run(const ncc_process_spec_t *spec, ncc_process_result_t *out)
 {
@@ -1390,6 +1402,13 @@ ncc_process_run(const ncc_process_spec_t *spec, ncc_process_result_t *out)
 
     if (out) {
         out->exit_code = (int)exit_code;
+        if (windows_exit_code_is_exception(exit_code)) {
+            out->term_kind = NCC_PROCESS_TERM_EXCEPTION;
+            out->exception_code = (unsigned long)exit_code;
+        }
+        else {
+            out->term_kind = NCC_PROCESS_TERM_EXITED;
+        }
         if (stdout_buf) {
             out->stdout_len  = stdout_len;
             out->stdout_data = ncc_buffer_take(stdout_buf);
@@ -1678,9 +1697,47 @@ close_process_pipes(int stdin_pipe[2], int stdout_pipe[2], int stderr_pipe[2],
     close_fd_if_open(&exec_pipe[1]);
 }
 
+static bool
+close_child_fds_from_dir(const char *path, int keep_fd)
+{
+    DIR *dir = opendir(path);
+
+    if (!dir) {
+        return false;
+    }
+
+    int scan_fd = dirfd(dir);
+
+    for (;;) {
+        errno = 0;
+        struct dirent *ent = readdir(dir);
+        if (!ent) {
+            break;
+        }
+
+        char *end = nullptr;
+        long  fd  = strtol(ent->d_name, &end, 10);
+
+        if (end == ent->d_name || *end != '\0' || fd <= STDERR_FILENO
+            || fd == keep_fd || fd == scan_fd) {
+            continue;
+        }
+
+        close((int)fd);
+    }
+
+    closedir(dir);
+    return true;
+}
+
 static void
 close_unintended_child_fds(int keep_fd)
 {
+    if (close_child_fds_from_dir("/proc/self/fd", keep_fd)
+        || close_child_fds_from_dir("/dev/fd", keep_fd)) {
+        return;
+    }
+
     long max_fd = sysconf(_SC_OPEN_MAX);
 
     if (max_fd < 0) {
@@ -2122,10 +2179,15 @@ ncc_process_run(const ncc_process_spec_t *spec, ncc_process_result_t *out)
     }
 
     int exit_code = 1;
+    ncc_process_term_kind_t term_kind = NCC_PROCESS_TERM_UNKNOWN;
+    int signal_number = 0;
     if (WIFEXITED(status)) {
         exit_code = WEXITSTATUS(status);
+        term_kind = NCC_PROCESS_TERM_EXITED;
     } else if (WIFSIGNALED(status)) {
-        exit_code = 128 + WTERMSIG(status);
+        signal_number = WTERMSIG(status);
+        exit_code = 128 + signal_number;
+        term_kind = NCC_PROCESS_TERM_SIGNALED;
     }
 
     size_t stdout_len = stdout_buf ? stdout_buf->byte_len : 0;
@@ -2135,6 +2197,8 @@ ncc_process_run(const ncc_process_spec_t *spec, ncc_process_result_t *out)
 
     if (out) {
         out->exit_code = exit_code;
+        out->term_kind = term_kind;
+        out->signal_number = signal_number;
         if (stdout_buf) {
             out->stdout_len  = stdout_len;
             out->stdout_data = ncc_buffer_take(stdout_buf);
