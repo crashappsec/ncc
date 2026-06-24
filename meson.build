@@ -1376,6 +1376,108 @@ test('ncc_gc_typemap_noscan_attribute_stripped', test_runner,
   depends : ncc_exe,
 )
 
+# --- WP-001: [[n00b::transient]] field attribute --------------------------
+
+# A transient table descriptor type is emitted.
+test('ncc_transient_table_emitted', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_transient.c',
+          'n00b_transient_layout_t']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# The trmap section entry is emitted.
+test('ncc_transient_section_emitted', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_transient.c',
+          'n00b_trmap']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# A trailing-transient sub-word scalar emits a BYTE size expression.
+test('ncc_transient_trailing_scalar_byte_size', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_transient.c',
+          'sizeof(((trans_trailing_t *)0)->fd)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# ...and a raw byte offset -- NOT divided by sizeof(void*) (byte-granular).
+test('ncc_transient_trailing_scalar_not_word_divided', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_transient.c',
+          '__builtin_offsetof(trans_trailing_t,fd)/sizeof(void*)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# A non-transient pointer sibling stays OUT of the transient table...
+test('ncc_transient_sibling_absent_from_table', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_transient.c',
+          'sizeof(((trans_trailing_t *)0)->keep_ptr)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# ...but is still scanned by the GC pointer map.
+test('ncc_transient_sibling_still_gc_scanned', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_transient.c',
+          '(__builtin_offsetof(trans_trailing_t,keep_ptr)/sizeof(void*))']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# A prefix-transient pointer is in the transient table...
+test('ncc_transient_prefix_pointer_in_table', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_transient.c',
+          'sizeof(((trans_prefix_t *)0)->handle)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# ...AND still GC-scanned (transient is not noscan).
+test('ncc_transient_pointer_still_gc_scanned', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_transient.c',
+          '(__builtin_offsetof(trans_prefix_t,handle)/sizeof(void*))']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# A plain scalar in a transient-free type appears in neither table.
+test('ncc_transient_plain_scalar_absent', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_transient.c',
+          'sizeof(((trans_none_t *)0)->plain)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# The ncc-only attribute is stripped before C is emitted (upstream auto-strip).
+test('ncc_transient_attribute_stripped', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_transient.c',
+          'n00b::transient']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 test('ncc_gc_typemap_static_assert_c23', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap.c',
