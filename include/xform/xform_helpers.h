@@ -26,7 +26,9 @@ bool ncc_xform_subtree_carries_n00b_named_attr(ncc_parse_tree_t *node,
                                                const char       *name);
 
 // Recursively remove every <attribute_specifier> carrying `[[n00b::<name>]]`
-// from `parent` so the attribute never reaches the C emitter.
+// from `parent` so the attribute never reaches the C emitter. When `name` is
+// NULL, removes EVERY `[[n00b::*]]` attribute (used as the final pre-emit sweep
+// so no ncc-only attribute leaks to clang).
 void ncc_xform_strip_n00b_named_attribute_specifiers(ncc_parse_tree_t *parent,
                                                      const char       *name);
 

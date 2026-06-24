@@ -63,13 +63,33 @@ typedef _generic_struct typeid("n00b_variant", n00b_string_t *, uint64_t) {
     } value;
 } vmap_generic_variant_t;
 
+// A variant with a by-value AGGREGATE alternative: a struct carrying two heap
+// pointers plus a scalar. ncc must describe this arm precisely -- an arm table
+// (n00b_gc_variant_arm_t) whose live alternative marks value.field_0.a and
+// value.field_0.b -- instead of falling back to a conservative scan, which is
+// what a by-value aggregate alternative used to force.
+typedef struct vmap_agg_arm_t {
+    n00b_string_t *a;
+    n00b_string_t *b;
+    uint64_t       n;
+} vmap_agg_arm_t;
+
+typedef struct vmap_agg_variant_t {
+    uint64_t selector;
+    union {
+        vmap_agg_arm_t field_0;
+        uint64_t       field_1;
+    } value;
+} vmap_agg_variant_t;
+
 static uint64_t h_variant = typehash(vmap_variant_t *);
 static uint64_t h_holder  = typehash(vmap_holder_t *);
 static uint64_t h_scalar  = typehash(vmap_scalar_variant_t *);
 static uint64_t h_generic = typehash(vmap_generic_variant_t *);
+static uint64_t h_agg     = typehash(vmap_agg_variant_t *);
 
 int
 main(void)
 {
-    return (int)((h_variant ^ h_holder ^ h_scalar ^ h_generic) == 0);
+    return (int)((h_variant ^ h_holder ^ h_scalar ^ h_generic ^ h_agg) == 0);
 }

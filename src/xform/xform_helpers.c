@@ -546,10 +546,12 @@ ncc_string_t ncc_xform_node_to_text(ncc_parse_tree_t *node) {
 // declared in the header; the two inner helpers are static here.
 // ============================================================================
 
-// Does a single <attribute> node spell `[[n00b::<name>]]`?
+// Does a single <attribute> node spell `[[n00b::<name>]]`? When `name` is NULL,
+// matches ANY `[[n00b::<something>]]` attribute (used to strip every ncc-only
+// attribute before the tree is handed to clang).
 static bool ncc_xform_attribute_is_n00b_named(ncc_parse_tree_t *attr_node,
                                               const char       *name) {
-  if (!attr_node || !name || ncc_tree_is_leaf(attr_node)) {
+  if (!attr_node || ncc_tree_is_leaf(attr_node)) {
     return false;
   }
 
@@ -588,7 +590,7 @@ static bool ncc_xform_attribute_is_n00b_named(ncc_parse_tree_t *attr_node,
       saw_n00b = true;
       continue;
     }
-    if (saw_n00b && !saw_name && strcmp(text, name) == 0) {
+    if (saw_n00b && !saw_name && (name == nullptr || strcmp(text, name) == 0)) {
       saw_name = true;
     }
   }
@@ -599,7 +601,7 @@ static bool ncc_xform_attribute_is_n00b_named(ncc_parse_tree_t *attr_node,
 // Does an <attribute_specifier_sequence> contain `[[n00b::<name>]]`?
 static bool ncc_xform_attribute_seq_contains_n00b_named(
     ncc_parse_tree_t *attr_seq, const char *name) {
-  if (!attr_seq || !name || ncc_tree_is_leaf(attr_seq)) {
+  if (!attr_seq || ncc_tree_is_leaf(attr_seq)) {
     return false;
   }
 
@@ -636,9 +638,10 @@ bool ncc_xform_subtree_carries_n00b_named_attr(ncc_parse_tree_t *node,
   return false;
 }
 
+// When `name` is NULL, strips EVERY `[[n00b::*]]` attribute specifier.
 void ncc_xform_strip_n00b_named_attribute_specifiers(ncc_parse_tree_t *parent,
                                                      const char       *name) {
-  if (!parent || !name || ncc_tree_is_leaf(parent)) {
+  if (!parent || ncc_tree_is_leaf(parent)) {
     return;
   }
 

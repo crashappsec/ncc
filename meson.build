@@ -207,6 +207,7 @@ src_xform = files(
   'src/xform/xform_nullable.c',
   'src/xform/nullability.c',
   'src/xform/nodiscard.c',
+  'src/xform/union_deprecation.c',
   'src/xform/xform_generic_struct.c',
   'src/xform/xform_gc_globals.c',
   'src/xform/xform_gc_stack_maps.c',
@@ -1491,7 +1492,8 @@ test('ncc_gc_typemap_variant_descriptor_emitted', test_runner,
   depends : ncc_exe,
 )
 
-# The descriptor records the selector and value word offsets.
+# The descriptor records the selector offset and, per alternative, the
+# element-relative pointer offsets that are live when that selector is active.
 test('ncc_gc_typemap_variant_selector_offset', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap_variant.c',
@@ -1501,10 +1503,34 @@ test('ncc_gc_typemap_variant_selector_offset', test_runner,
   depends : ncc_exe,
 )
 
-test('ncc_gc_typemap_variant_value_offset', test_runner,
+# A single-pointer alternative's pointer is the value word, addressed through
+# its named union field (value.field_0), not a bare `value` word.
+test('ncc_gc_typemap_variant_value_ptr_offset', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap_variant.c',
-          '__builtin_offsetof(vmap_variant_t,value)']
+          '__builtin_offsetof(vmap_variant_t,value.field_0)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# A by-value AGGREGATE alternative is described precisely: an arm table
+# (n00b_gc_variant_arm_t) carries the pointer offsets of the struct's fields,
+# addressed through value.<field>.<member>. (Previously this fell back to a
+# conservative scan.)
+test('ncc_gc_typemap_variant_aggregate_arm', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap_variant.c',
+          'n00b_gc_variant_arm_t']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_variant_aggregate_arm_field_offset', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap_variant.c',
+          '__builtin_offsetof(vmap_agg_variant_t,value.field_0.a)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
   suite : 'ncc',
   depends : ncc_exe,
@@ -1550,6 +1576,53 @@ test('ncc_gc_typemap_variant_generic_struct', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap_variant.c',
           '__builtin_offsetof(vmap_generic_variant_t,selector)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# Traditional-union deprecation: a bare (non-variant) union is steered toward
+# n00b_variant_t.
+
+# A hand-rolled tagged union warns.
+test('ncc_union_deprecation_warn', test_runner,
+  args : [ncc_exe, 'preprocess_stderr_contains',
+          test_dir / 'test_union_deprecation.c',
+          'traditional C union is discouraged']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# --ncc-allow-unions suppresses the warning entirely.
+test('ncc_union_deprecation_allow', test_runner,
+  args : [ncc_exe, 'preprocess_stderr_omits',
+          test_dir / 'test_union_deprecation.c',
+          'traditional C union']
+         + ncc_test_flags
+         + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots',
+            '--ncc-allow-unions'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# --ncc-error-on-union makes it a hard error (non-zero exit).
+test('ncc_union_deprecation_error', test_runner,
+  args : [ncc_exe, 'expect_error_contains',
+          test_dir / 'test_union_deprecation.c',
+          'traditional C union is discouraged']
+         + ncc_test_flags
+         + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots',
+            '--ncc-error-on-union'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# An n00b_variant_t value-union and a [[n00b::raw_union]] union are NOT flagged.
+test('ncc_union_deprecation_excluded', test_runner,
+  args : [ncc_exe, 'preprocess_stderr_omits',
+          test_dir / 'test_union_deprecation_excluded.c',
+          'traditional C union']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
   suite : 'ncc',
   depends : ncc_exe,

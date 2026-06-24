@@ -27,6 +27,8 @@ typedef struct {
     bool         auto_gc_roots;
     bool         custom_entry;
     bool         no_comptime;
+    bool         allow_unions;    // suppress the traditional-union deprecation
+    bool         error_on_union;  // escalate the deprecation to a hard error
     bool         static_identity_generate_namespace;
 
     // Dependency file generation (handled separately from compilation).

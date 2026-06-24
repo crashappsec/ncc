@@ -51,6 +51,7 @@
 #include "parse/comptime_meta.h"
 #include "parse/crt_entry.h"
 #include "parse/emit.h"
+#include "parse/union_deprecation.h"
 #include "xform/xform_gc_typemap.h"
 #include "xform/xform_helpers.h"
 #include "parse/tree_dump.h"
@@ -517,6 +518,14 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
             opts->auto_gc_roots = false;
             continue;
         }
+        if (strcmp(arg, "--ncc-allow-unions") == 0) {
+            opts->allow_unions = true;
+            continue;
+        }
+        if (strcmp(arg, "--ncc-error-on-union") == 0) {
+            opts->error_on_union = true;
+            continue;
+        }
         if (strcmp(arg, "--ncc-custom-entry") == 0) {
             opts->custom_entry = true;
             continue;
@@ -823,6 +832,10 @@ print_help(void)
         "                       as libn00b GC roots\n"
         "  --ncc-no-auto-gc-roots\n"
         "                       Disable auto-registration of TU-scope GC roots\n"
+        "  --ncc-allow-unions   Suppress the traditional-union deprecation\n"
+        "                       warning (e.g. when not targeting n00b)\n"
+        "  --ncc-error-on-union Make the traditional-union deprecation a hard\n"
+        "                       error (opt in ahead of the future default)\n"
         "  --ncc-custom-entry   Link with ncc's generated libc-less n00b entry\n"
         "  --ncc-comptime-arg=VAL\n"
         "                       Pass VAL as an argv element to comptime_main\n"
@@ -3747,6 +3760,19 @@ compile_file(ncc_opts_t *opts)
     // skipped by the discard check.
     ncc_nodiscard_check(g, tree, xdata.symtab);
 
+    // Traditional-union deprecation. Runs PRE-transform (here, alongside the
+    // other read-only lint passes) so n00b_variant_t value-unions are still in
+    // their `_generic_struct typeid("n00b_variant", ...)` source form and are
+    // excluded by that marker — after _generic_struct lowering they become
+    // synthesized, file-less, parent-less nodes that no type query can resolve.
+    // `union_error` gates the final exit code when --ncc-error-on-union is set
+    // and a bare union was found (the diagnostics are emitted at error severity
+    // above), avoiding a mid-pipeline teardown.
+    int n_union_diags = ncc_union_deprecation_check(tree,
+                                                    opts->allow_unions,
+                                                    opts->error_on_union);
+    bool union_error = opts->error_on_union && n_union_diags > 0;
+
     bool has_optional_comptime = false;
     if (ncc_comptime_check(g, tree, xdata.symtab, &has_optional_comptime) > 0) {
         ncc_symtab_free(xdata.symtab);
@@ -3837,12 +3863,18 @@ compile_file(ncc_opts_t *opts)
                                                       &comptime_vars,
                                                       &n_comptime_vars);
 
-    // The `[[n00b::noscan]]` per-field attribute is consumed above (it tells
-    // ncc_gc_typemap_emit to omit a field from the GC typemap). Strip it from
-    // the whole tree now — AFTER the typemap detection has read it, BEFORE the
-    // tree is pretty-printed — so clang never sees this ncc-only attribute.
-    ncc_xform_strip_n00b_named_attribute_specifiers(tree, "noscan");
-    ncc_xform_strip_n00b_named_attribute_specifiers(tree, "comptime");
+    // (The traditional-union deprecation check runs pre-transform, above, where
+    // the [[n00b::raw_union]] escape hatch is still present — before the strip
+    // below removes every ncc-only attribute.)
+
+    // Strip EVERY remaining `[[n00b::*]]` attribute now — AFTER every pass that
+    // consumes one has read it (noscan by the GC typemap above; comptime by
+    // comptime-check; raw_union by the union-deprecation check above; nogc is
+    // already stripped inside the GC stack-map xform) and BEFORE the tree is
+    // pretty-printed — so clang never sees an ncc-dialect attribute (and never
+    // warns "unknown attribute"). A blanket strip means new ncc-only attributes
+    // are handled automatically.
+    ncc_xform_strip_n00b_named_attribute_specifiers(tree, nullptr);
 
 #ifdef NCC_MEM_DEBUG
     ncc_mem_report("after transform");
@@ -4128,6 +4160,11 @@ cleanup:
     ncc_scanner_free(scanner);
     ncc_grammar_free(g);
 
+    // --ncc-error-on-union: a traditional union was found and reported at error
+    // severity above; fail the compile (without disturbing a real error rc).
+    if (union_error && rc == 0) {
+        rc = 1;
+    }
     return rc;
 }
 
