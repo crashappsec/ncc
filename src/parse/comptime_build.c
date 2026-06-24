@@ -6,6 +6,8 @@
 #include "parse/crt_entry.h"
 #include "parse/comptime_image_emit.h"
 #include "parse/static_init_degrade.h"
+#include "parse/comptime_meta.h"
+#include "parse/gcmap_prelink.h"
 #include "util/platform.h"
 
 #include <stdarg.h>
@@ -801,6 +803,218 @@ run_comptime_executable(const char *program, const char *const *argv,
     }
 
     return 0;
+}
+
+static bool
+gcmap_compile_dict_source(const ncc_opts_t     *opts,
+                          ncc_temp_workspace_t *tmp,
+                          const char           *src,
+                          const char           *object_path,
+                          char                **err_out);
+
+// Aggregate n00b_gcraw records from the link-input objects, generate the typed
+// GC type-map dictionary TU, compile it, and return its object path (allocated
+// in `tmp`, which the caller owns and cleans up after linking). Sets
+// *object_path_out=NULL and returns true when no records were found.
+//
+// Currently scans `.o` inputs directly. TODO: expand `.a` archives (notably
+// libn00b.a) via the read_archive/extract_archive_members pattern so the final
+// executable link sees every translation unit's records.
+bool
+ncc_gcmap_prelink_build_object(const ncc_opts_t     *opts,
+                               const char *const    *objects,
+                               int                   n_objects,
+                               ncc_temp_workspace_t *tmp,
+                               char                **object_path_out,
+                               char                **err_out)
+{
+    *object_path_out = nullptr;
+
+#if defined(__APPLE__)
+    const char *section = "__DATA,n00b_gcraw";
+#else
+    const char *section = "n00b_gcraw";
+#endif
+
+    ncc_gcraw_set_t set = {0};
+    for (int i = 0; i < n_objects; i++) {
+        uint8_t *bytes = nullptr;
+        size_t   n     = 0;
+        char    *rerr  = nullptr;
+        // Handles both .o objects and .a archives (libn00b.a); other inputs
+        // contribute nothing.
+        if (!ncc_ct_read_input_section(objects[i], section, &bytes, &n, &rerr)) {
+            set_err(err_out, "gcmap-prelink: %s",
+                    rerr ? rerr : "section read failed");
+            ncc_free(rerr);
+            ncc_gcraw_set_free(&set);
+            return false;
+        }
+        if (bytes && n) {
+            if (!ncc_gcraw_parse(bytes, n, &set, err_out)) {
+                ncc_free(bytes);
+                ncc_gcraw_set_free(&set);
+                return false;
+            }
+        }
+        ncc_free(bytes);
+    }
+
+    if (set.len == 0) {
+        ncc_gcraw_set_free(&set);
+        return true; // nothing to generate
+    }
+
+    char *src = ncc_gcraw_generate_c(&set);
+    ncc_gcraw_set_free(&set);
+
+    char *object_path = ncc_temp_workspace_join(tmp, "n00b_gcmap_generated.o");
+    if (!object_path) {
+        set_err(err_out, "gcmap-prelink: failed to create temp object path");
+        ncc_free(src);
+        return false;
+    }
+    if (!gcmap_compile_dict_source(opts, tmp, src, object_path, err_out)) {
+        ncc_free(src);
+        ncc_free(object_path);
+        return false;
+    }
+    ncc_free(src);
+    *object_path_out = object_path;
+    return true;
+}
+
+// Compile a generated GC type-map dictionary TU (`src`, owned by the caller) to
+// `object_path` using the configured compiler + the gcmap include dirs. The
+// generated TU does `#include "core/codegen_abi.h"`, so the include dirs (passed
+// via --ncc-gcmap-include) must reach it. Returns false (and sets *err_out) on
+// any failure.
+static bool
+gcmap_compile_dict_source(const ncc_opts_t     *opts,
+                          ncc_temp_workspace_t *tmp,
+                          const char           *src,
+                          const char           *object_path,
+                          char                **err_out)
+{
+    char *source_path = ncc_temp_workspace_join(tmp, "n00b_gcmap_generated.c");
+    if (!source_path) {
+        set_err(err_out, "gcmap-prelink: failed to create temp source path");
+        return false;
+    }
+
+    char *write_err = nullptr;
+    if (!ncc_platform_write_file(source_path, src, strlen(src), &write_err)) {
+        set_err(err_out, "gcmap-prelink: dict write failed: %s",
+                write_err ? write_err : "(no detail)");
+        ncc_free(write_err);
+        ncc_free(source_path);
+        return false;
+    }
+
+    int max_args = 10 + (opts ? opts->n_clang_args : 0)
+                 + 2 * (opts ? opts->n_gcmap_includes : 0);
+    const char **argv = ncc_alloc_array(const char *, (size_t)max_args + 1);
+    int          ai   = 0;
+    argv[ai++] = opts->compiler;
+    ai         = append_compile_target_args(opts, argv, ai);
+    argv[ai++] = "-std=gnu23";
+    for (int i = 0; opts && i < opts->n_gcmap_includes; i++) {
+        argv[ai++] = "-I";
+        argv[ai++] = opts->gcmap_includes[i];
+    }
+    argv[ai++] = "-c";
+    argv[ai++] = source_path;
+    argv[ai++] = "-o";
+    argv[ai++] = object_path;
+    argv[ai]   = nullptr;
+
+    ncc_process_spec_t spec = {
+        .program        = opts->compiler,
+        .argv           = argv,
+        .capture_stdout = true,
+        .capture_stderr = true,
+    };
+    ncc_process_result_t proc     = {0};
+    bool                 launched = ncc_process_run(&spec, &proc);
+    bool                 ok       = launched && proc.exit_code == 0;
+    if (!ok) {
+        char *stderr_text = process_stderr_string(&proc);
+        set_err(err_out, "gcmap-prelink: dict compile failed: %s", stderr_text);
+        ncc_free(stderr_text);
+    }
+    ncc_process_result_free(&proc);
+    ncc_free(argv);
+    ncc_free(source_path);
+    return ok;
+}
+
+// Standalone aggregation for build systems where ncc is NOT the final link
+// driver (e.g. an ObjC linker links the executable). Reads n00b_gcraw from the
+// given objects/archives, generates+compiles the typed dictionary TU, and
+// writes the object directly to `out_path`. When no records are found anywhere,
+// emits a valid object defining EMPTY weak-compatible dictionary symbols, so the
+// build always has a concrete file to link and the runtime sees count==0 (and
+// falls back to conservative scanning, which is GC-safe). Returns false on error.
+bool
+ncc_gcmap_emit_to_path(const ncc_opts_t  *opts,
+                       const char *const *objects,
+                       int                n_objects,
+                       const char        *out_path,
+                       char             **err_out)
+{
+    if (err_out) {
+        *err_out = nullptr;
+    }
+
+#if defined(__APPLE__)
+    const char *section = "__DATA,n00b_gcraw";
+#else
+    const char *section = "n00b_gcraw";
+#endif
+
+    ncc_gcraw_set_t set = {0};
+    for (int i = 0; i < n_objects; i++) {
+        uint8_t *bytes = nullptr;
+        size_t   n     = 0;
+        char    *rerr  = nullptr;
+        if (!ncc_ct_read_input_section(objects[i], section, &bytes, &n, &rerr)) {
+            set_err(err_out, "gcmap-emit: %s",
+                    rerr ? rerr : "section read failed");
+            ncc_free(rerr);
+            ncc_gcraw_set_free(&set);
+            return false;
+        }
+        if (bytes && n) {
+            if (!ncc_gcraw_parse(bytes, n, &set, err_out)) {
+                ncc_free(bytes);
+                ncc_gcraw_set_free(&set);
+                return false;
+            }
+        }
+        ncc_free(bytes);
+    }
+
+    // Generate the dictionary TU. On an empty set this still emits valid
+    // definitions for n00b_gcmap_table/_count (count==0), so the runtime falls
+    // back to the conservative scan (GC-safe) and the build always has an object
+    // to link.
+    char *src = ncc_gcraw_generate_c(&set);
+    ncc_gcraw_set_free(&set);
+
+    ncc_temp_workspace_t tmp     = {0};
+    char                *tmp_err = nullptr;
+    if (!ncc_temp_workspace_create(&tmp, "ncc_gcmap_emit_", &tmp_err)) {
+        set_err(err_out, "gcmap-emit: temp workspace failed: %s",
+                tmp_err ? tmp_err : "(no detail)");
+        ncc_free(tmp_err);
+        ncc_free(src);
+        return false;
+    }
+
+    bool ok = gcmap_compile_dict_source(opts, &tmp, src, out_path, err_out);
+    ncc_free(src);
+    ncc_temp_workspace_cleanup(&tmp);
+    return ok;
 }
 
 int

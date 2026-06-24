@@ -280,6 +280,20 @@ add_comptime_arg(ncc_opts_t *opts, const char *arg)
     opts->comptime_args[opts->n_comptime_args++] = arg;
 }
 
+static void
+add_gcmap_include(ncc_opts_t *opts, const char *dir)
+{
+    if (opts->n_gcmap_includes >= opts->gcmap_includes_cap) {
+        opts->gcmap_includes_cap = opts->gcmap_includes_cap
+                                       ? opts->gcmap_includes_cap * 2
+                                       : 4;
+        opts->gcmap_includes = ncc_realloc(
+            opts->gcmap_includes,
+            sizeof(char *) * (size_t)opts->gcmap_includes_cap);
+    }
+    opts->gcmap_includes[opts->n_gcmap_includes++] = dir;
+}
+
 // Forward declaration — defined below.
 static char *get_exe_path(void);
 static bool ncc_arg_is_ncc_only_with_value(const char *arg);
@@ -404,6 +418,8 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
     opts->auto_gc_roots = true;
 #endif
     opts->gc_typemaps = true;
+    opts->gcmap_prelink = false;
+    opts->gcmap_emit_out = nullptr;
 
     opts->compiler = getenv("NCC_COMPILER");
     if (opts->compiler) {
@@ -516,6 +532,25 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
         }
         if (strcmp(arg, "--ncc-no-auto-gc-roots") == 0) {
             opts->auto_gc_roots = false;
+            continue;
+        }
+        if (strcmp(arg, "--ncc-gcmap-prelink") == 0) {
+            opts->gcmap_prelink = true;
+            continue;
+        }
+        if (strcmp(arg, "--ncc-no-gcmap-prelink") == 0) {
+            opts->gcmap_prelink = false;
+            continue;
+        }
+        if (strncmp(arg, "--ncc-gcmap-include=", 20) == 0) {
+            add_gcmap_include(opts, arg + 20);
+            continue;
+        }
+        if (strncmp(arg, "--ncc-gcmap-emit=", 17) == 0) {
+            opts->gcmap_emit_out = arg + 17;
+            // Implies the aggregation machinery; mark prelink so the orchestrator
+            // path is consistent (the emit mode does its own collection below).
+            opts->gcmap_prelink = true;
             continue;
         }
         if (strcmp(arg, "--ncc-allow-unions") == 0) {
@@ -3719,6 +3754,7 @@ compile_file(ncc_opts_t *opts)
         .gc_stack_maps_relaxed       = opts->gc_stack_maps_relaxed,
         .gc_typemaps                 = opts->gc_typemaps,
         .auto_gc_roots               = opts->auto_gc_roots,
+        .gcmap_prelink               = opts->gcmap_prelink,
     };
     ncc_dict_init(&xdata.func_meta,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
@@ -4193,21 +4229,85 @@ main(int argc, char **argv)
         return compiler_passthrough(&opts, argc, (const char **)argv);
     }
 
+    if (opts.gcmap_emit_out) {
+        // Standalone aggregation: read n00b_gcraw from the link-input objects /
+        // archives on the command line, generate+compile the typed dictionary
+        // TU, and write it to the requested output path. No link is performed.
+        // For build systems where ncc does not drive the final executable link.
+        const char **objs   = ncc_alloc_array(const char *, argc);
+        int          n_objs = 0;
+        for (int i = 1; i < argc; i++) {
+            if (is_linker_input(argv[i])) {
+                objs[n_objs++] = argv[i];
+            }
+        }
+        char *gc_err = nullptr;
+        bool  ok     = ncc_gcmap_emit_to_path(&opts, objs, n_objs,
+                                          opts.gcmap_emit_out, &gc_err);
+        ncc_free(objs);
+        if (!ok) {
+            print_process_message("gcmap-emit failed", gc_err);
+            ncc_free(gc_err);
+            return 1;
+        }
+        return 0;
+    }
+
     if (!opts.input_file) {
+        // gcmap-prelink: aggregate the n00b_gcraw records from the link inputs
+        // into one generated dictionary object and add it to the link. Done at
+        // this single chokepoint so it covers every link path below. Gated on
+        // the flag; the n00b build does not set it until the runtime reads the
+        // dictionary (until then raw mode is GC-safe — conservative fallback).
+        int          link_argc = argc;
+        const char **link_argv = (const char **)argv;
+        ncc_temp_workspace_t gc_tmp = {0};
+        if (opts.gcmap_prelink) {
+            const char **objs   = ncc_alloc_array(const char *, argc);
+            int          n_objs = 0;
+            for (int i = 1; i < argc; i++) {
+                if (is_linker_input(argv[i])) {
+                    objs[n_objs++] = argv[i];
+                }
+            }
+            char *gc_obj = nullptr;
+            char *gc_err = nullptr;
+            char *tmp_err = nullptr;
+            if (!ncc_temp_workspace_create(&gc_tmp, "ncc_gcmap_link_", &tmp_err)) {
+                print_process_message("gcmap-prelink temp workspace failed",
+                                      tmp_err);
+                return 1;
+            }
+            if (!ncc_gcmap_prelink_build_object(&opts, objs, n_objs, &gc_tmp,
+                                                &gc_obj, &gc_err)) {
+                print_process_message("gcmap-prelink failed", gc_err);
+                return 1;
+            }
+            ncc_free(objs);
+            if (gc_obj) {
+                link_argv = ncc_alloc_array(const char *, (size_t)argc + 2);
+                for (int i = 0; i < argc; i++) {
+                    link_argv[i] = (const char *)argv[i];
+                }
+                link_argv[argc]     = gc_obj;
+                link_argv[argc + 1] = nullptr;
+                link_argc           = argc + 1;
+            }
+        }
+
         bool comptime_handled = false;
-        int comptime_rc = maybe_comptime_link_passthrough(&opts, argc,
-                                                          (const char **)argv,
+        int  comptime_rc = maybe_comptime_link_passthrough(&opts, link_argc,
+                                                          link_argv,
                                                           &comptime_handled);
         if (comptime_handled) {
             return comptime_rc;
         }
         if (opts.custom_entry && !opts.has_E && !opts.has_c && !opts.has_S
             && !opts.has_fsyntax_only) {
-            return custom_entry_link_passthrough(&opts, argc,
-                                                 (const char **)argv);
+            return custom_entry_link_passthrough(&opts, link_argc, link_argv);
         }
         // No source file — passthrough to compiler (linking, etc.).
-        return compiler_passthrough(&opts, argc, (const char **)argv);
+        return compiler_passthrough(&opts, link_argc, link_argv);
     }
 
     return compile_file(&opts);

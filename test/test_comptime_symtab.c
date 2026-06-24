@@ -138,10 +138,15 @@ main(void)
     assert(plain_addr && plain_addr->kind == NCC_SYM_VARIABLE);
     assert(!plain_addr->is_comptime);
     assert(!plain_addr->is_static_init);
+    // A general function-call initializer is NOT baked: the legacy
+    // "bake any call-bearing static initializer" path was removed. Such a
+    // declaration is left as ordinary C static storage (and the C compiler
+    // rejects it if it isn't constant); compile-time init must use a
+    // recognized literal or [[n00b::comptime]].
     assert(baked && baked->kind == NCC_SYM_VARIABLE);
     assert(!baked->is_comptime);
-    assert(baked->is_static_init);
-    assert(baked->static_init_needs_host_exec);
+    assert(!baked->is_static_init);
+    assert(!baked->static_init_needs_host_exec);
     assert(folded && folded->kind == NCC_SYM_VARIABLE);
     assert(!folded->is_comptime);
     assert(!folded->is_static_init);
