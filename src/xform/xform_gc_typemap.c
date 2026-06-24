@@ -1397,6 +1397,183 @@ derive_gcidx_attr(const char *stobj_attr)
     return derive_gc_section_attr(stobj_attr, "n00b_gcidx");
 }
 
+static char *
+derive_trmap_attr(const char *stobj_attr)
+{
+    return derive_gc_section_attr(stobj_attr, "n00b_trmap");
+}
+
+static char *
+derive_tridx_attr(const char *stobj_attr)
+{
+    return derive_gc_section_attr(stobj_attr, "n00b_tridx");
+}
+
+// ---------------------------------------------------------------------------
+// [[n00b::transient]] walk (WP-001). Collects the fields the programmer marked
+// as raw BYTE offset + BYTE size pairs. Unlike gc_walk this is NOT coupled to
+// pointer conservatism: it records exactly the marked fields, of any type and
+// any width — a transient field may be a sub-word scalar such as an `int` fd —
+// so it assumes NO word alignment (no /sizeof(void*), no alignment assert).
+// Marshal zeroes these byte ranges on the content-hash / store path.
+// ---------------------------------------------------------------------------
+
+static void
+tr_emit_field(const char *elem_type, const char *path,
+              ncc_buffer_t *offs, ncc_buffer_t *sizes, int *count)
+{
+    char *oe = ncc_layout_format_cstr("__builtin_offsetof(%s,%s)", elem_type,
+                                      path);
+    char *se = ncc_layout_format_cstr("sizeof(((%s *)0)->%s)", elem_type, path);
+    if (*count > 0) {
+        ncc_buffer_puts(offs, ",");
+        ncc_buffer_puts(sizes, ",");
+    }
+    ncc_buffer_puts(offs, oe);
+    ncc_buffer_puts(sizes, se);
+    (*count)++;
+    ncc_free(oe);
+    ncc_free(se);
+}
+
+// A *prefix* `[[n00b::transient]]` (before the type) applies to every
+// declarator in the member_declaration; a *trailing* one is per-declarator.
+// Mirrors member_decl_has_prefix_noscan.
+static bool
+member_decl_has_prefix_transient(ncc_parse_tree_t *member)
+{
+    if (!member || ncc_tree_is_leaf(member)) {
+        return false;
+    }
+    ncc_parse_tree_t *prefix_seq = ncc_xform_find_child_nt(
+        member, "attribute_specifier_sequence");
+    return prefix_seq
+        && ncc_xform_subtree_carries_n00b_named_attr(prefix_seq, "transient");
+}
+
+static void
+tr_walk(ncc_xform_ctx_t *ctx, const char *elem_type, ncc_parse_tree_t *spec,
+        const char *base, ncc_buffer_t *offs, ncc_buffer_t *sizes, int *count,
+        int depth);
+
+static void
+tr_walk_member(ncc_xform_ctx_t *ctx, const char *elem_type,
+               ncc_parse_tree_t *member, const char *base, ncc_buffer_t *offs,
+               ncc_buffer_t *sizes, int *count, int depth)
+{
+    ncc_parse_tree_t *member_specs = ncc_xform_find_child_nt(
+        member, "specifier_qualifier_list");
+    if (!member_specs) {
+        return;
+    }
+    bool prefix_transient = member_decl_has_prefix_transient(member);
+
+    ncc_parse_tree_t *member_list = ncc_xform_find_child_nt(
+        member, "member_declarator_list");
+
+    if (!member_list) {
+        // Anonymous by-value aggregate: recurse with the base unchanged (its
+        // members are accessed by their own name in offsetof). A prefix mark on
+        // a whole anonymous aggregate is not a v1 case.
+        ncc_parse_tree_t *nspec = ncc_layout_aggregate_spec_from_specs(
+            ctx, member_specs);
+        if (nspec) {
+            tr_walk(ctx, elem_type, nspec, base, offs, sizes, count, depth + 1);
+            return;
+        }
+        // Single declarator with no list wrapper (e.g. a typedef-pointer
+        // member): mark it if prefix- or (member-local) trailing-transient.
+        if (prefix_transient
+            || ncc_xform_subtree_carries_n00b_named_attr(member, "transient")) {
+            char *field = ncc_layout_implicit_member_field_name(member,
+                                                                member_specs);
+            if (field) {
+                char *path = path_join(base, field);
+                tr_emit_field(elem_type, path, offs, sizes, count);
+                ncc_free(path);
+                ncc_free(field);
+            }
+        }
+        return;
+    }
+
+    ncc_layout_parse_tree_list_t decls = {0};
+    ncc_layout_collect_nt_children(member_list, "member_declarator", &decls);
+    for (size_t i = 0; i < decls.len; i++) {
+        ncc_parse_tree_t *declarator = ncc_xform_find_child_nt(decls.data[i],
+                                                              "declarator");
+        if (!declarator) {
+            continue;
+        }
+        char *name = ncc_layout_declarator_name(declarator);
+        if (!name) {
+            continue;
+        }
+        bool marked = prefix_transient
+                   || ncc_xform_subtree_carries_n00b_named_attr(decls.data[i],
+                                                                "transient");
+        if (marked) {
+            // The whole field is transient — zero its bytes. Works for a
+            // scalar, a pointer, an array, or an entire by-value sub-aggregate.
+            char *path = path_join(base, name);
+            tr_emit_field(elem_type, path, offs, sizes, count);
+            ncc_free(path);
+        }
+        else {
+            // Unmarked: descend into a NAMED by-value aggregate member to find
+            // nested transient leaves (offsetof path: base.name).
+            bool is_ptr = ncc_layout_pointer_depth_for_declarator(
+                              ctx, member_specs, declarator)
+                       > 0;
+            bool is_array = ncc_layout_first_descendant_nt(declarator,
+                                                          "array_declarator")
+                         != nullptr;
+            if (!is_ptr && !is_array) {
+                ncc_parse_tree_t *nspec = ncc_layout_aggregate_spec_from_specs(
+                    ctx, member_specs);
+                if (nspec) {
+                    char *path = path_join(base, name);
+                    tr_walk(ctx, elem_type, nspec, path, offs, sizes, count,
+                            depth + 1);
+                    ncc_free(path);
+                }
+            }
+        }
+        ncc_free(name);
+    }
+    if (decls.data) {
+        ncc_free(decls.data);
+    }
+}
+
+static void
+tr_walk(ncc_xform_ctx_t *ctx, const char *elem_type, ncc_parse_tree_t *spec,
+        const char *base, ncc_buffer_t *offs, ncc_buffer_t *sizes, int *count,
+        int depth)
+{
+    if (depth > 64 || *count > NCC_GCMAP_MAX_OFFSETS) {
+        return;
+    }
+    spec = ncc_layout_resolve_aggregate_specifier(ctx, spec);
+    if (!spec) {
+        return;
+    }
+    ncc_parse_tree_t *members = ncc_xform_find_child_nt(
+        spec, "member_declaration_list");
+    if (!members) {
+        return;
+    }
+    ncc_layout_parse_tree_list_t mlist = {0};
+    ncc_layout_collect_nt_children(members, "member_declaration", &mlist);
+    for (size_t i = 0; i < mlist.len; i++) {
+        tr_walk_member(ctx, elem_type, mlist.data[i], base, offs, sizes, count,
+                       depth);
+    }
+    if (mlist.data) {
+        ncc_free(mlist.data);
+    }
+}
+
 char *
 ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
 {
@@ -1411,6 +1588,8 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
     const char   *stobj_attr = data ? data->static_object_entry_attr : nullptr;
     char         *gcmap_attr = derive_gcmap_attr(stobj_attr);
     char         *gcidx_attr = derive_gcidx_attr(stobj_attr);
+    char         *trmap_attr = derive_trmap_attr(stobj_attr);
+    char         *tridx_attr = derive_tridx_attr(stobj_attr);
 
     for (size_t i = 0; i < record_len; i++) {
         // Skip only source-level generic macro spellings such as
@@ -1451,9 +1630,18 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
                   .rec    = i,
         };
 
+        // [[n00b::transient]] (WP-001): collected independently of the GC
+        // pointer walk — a type can carry transient fields even when its
+        // precise pointer map bails (ok=false). Byte offsets + sizes.
+        ncc_buffer_t *tr_offs  = ncc_buffer_empty();
+        ncc_buffer_t *tr_sizes = ncc_buffer_empty();
+        int           tr_count = 0;
+
         if (!scalar_no_ptr) {
             gc_walk(ctx, records[i].elem_type, spec, "", offs, asserts,
                     &count, &vacc, &ok, 0);
+            tr_walk(ctx, records[i].elem_type, spec, "", tr_offs, tr_sizes,
+                    &tr_count, 0);
         }
 
         if (ok) {
@@ -1521,10 +1709,54 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
             ncc_free(ncc_buffer_take(vacc.arrays));
             ncc_free(ncc_buffer_take(vacc.inits));
         }
+
+        // Transient table for this type — emitted whether or not the GC
+        // pointer map succeeded (ok). The trmap ENTRY carries the real
+        // type_hash, so the marshal reader can scan n00b_trmap directly; the
+        // tridx placeholder is a post-link-fillable acceleration index that
+        // mirrors n00b_gcidx.
+        if (tr_count > 0) {
+            char *tr_off_csv = ncc_buffer_take(tr_offs);
+            char *tr_sz_csv  = ncc_buffer_take(tr_sizes);
+            ncc_buffer_printf(
+                out,
+                "static const uint64_t __ncc_trmap_off_%zu[]={%s};",
+                i, tr_off_csv);
+            ncc_buffer_printf(
+                out,
+                "static const uint64_t __ncc_trmap_sz_%zu[]={%s};",
+                i, tr_sz_csv);
+            ncc_buffer_printf(
+                out,
+                "static const n00b_transient_layout_t __ncc_trmap_lay_%zu="
+                "{.field_count=%dULL,.byte_offsets=__ncc_trmap_off_%zu,"
+                ".byte_sizes=__ncc_trmap_sz_%zu};",
+                i, tr_count, i, i);
+            ncc_buffer_printf(
+                out,
+                "%s static const n00b_transient_map_entry_t "
+                "__ncc_trmap_ent_%zu={.type_hash=%lluULL,.layout="
+                "&__ncc_trmap_lay_%zu};",
+                trmap_attr, i, (unsigned long long)records[i].hash, i);
+            ncc_buffer_printf(
+                out,
+                "%s static const n00b_transient_map_index_entry_t "
+                "__ncc_tridx_ent_%zu={.type_hash=0ULL,.entry_index=%zuULL};",
+                tridx_attr, i, i);
+            ncc_free(tr_off_csv);
+            ncc_free(tr_sz_csv);
+            n_emitted++;
+        }
+        else {
+            ncc_free(ncc_buffer_take(tr_offs));
+            ncc_free(ncc_buffer_take(tr_sizes));
+        }
     }
 
     ncc_free(gcmap_attr);
     ncc_free(gcidx_attr);
+    ncc_free(trmap_attr);
+    ncc_free(tridx_attr);
 
     // Drain the accumulator (per-TU state).
     for (size_t i = 0; i < record_len; i++) {
