@@ -56,8 +56,9 @@
 #   comptime_var_object_link_strip — var-only object link strips final D-028 metadata
 #   comptime_image_e2e — link against staged n00b runtime and assert real image
 #                        capture/emit/relocate for pointer-root comptime vars;
-#                        N00B_WP005_ROOT is preferred, N00B_WP003_ROOT falls back
-#                        and NCC_TEST_N00B_BUILD_DIR overrides root/build_debug
+#                        NCC_TEST_N00B_ROOT overrides auto-discovery, legacy
+#                        N00B_WP005_ROOT/N00B_WP003_ROOT still work, and
+#                        NCC_TEST_N00B_BUILD_DIR overrides root/build_debug
 #   static_init_mutation_error — staged n00b link must fail D-024 when
 #                                comptime_main mutates a static-init root
 #   static_init_no_comptime_degrade — staged static-init links lower
@@ -77,6 +78,8 @@ fi
 
 TMPDIR="${MESON_BUILD_ROOT:-/tmp}"
 OUTBIN="$TMPDIR/ncc_test_$$"
+TEST_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+NCC_SOURCE_ROOT=$(CDPATH= cd -- "$TEST_DIR/.." && pwd -P)
 
 cleanup() {
     if [ "${NCC_TEST_KEEP:-0}" != "0" ]; then
@@ -318,23 +321,67 @@ skip_test() {
     exit 77
 }
 
-n00b_runtime_root() {
-    if [ -n "$N00B_WP005_ROOT" ]; then
-        printf '%s\n' "$N00B_WP005_ROOT"
-        return
+n00b_runtime_root_is_staged() {
+    root="$1"
+    [ -n "$root" ] || return 1
+    [ -f "$root/include/n00b.h" ] || return 1
+
+    build=$(n00b_runtime_build "$root")
+    [ -f "$build/libn00b.a" ] || return 1
+    [ -f "$build/build.ninja" ] || return 1
+}
+
+n00b_runtime_root_try() {
+    root="$1"
+    if n00b_runtime_root_is_staged "$root"; then
+        printf '%s\n' "$root"
+        return 0
+    fi
+    return 1
+}
+
+n00b_runtime_root_try_tree() {
+    base="$1"
+    n00b_runtime_root_try "$base/.workspaces/wax-tui" && return 0
+
+    n00b_runtime_root_try "$base" && return 0
+
+    if [ -d "$base/.workspaces" ]; then
+        for root in "$base/.workspaces"/*; do
+            [ -d "$root" ] || continue
+            n00b_runtime_root_try "$root" && return 0
+        done
     fi
 
-    if [ -n "$N00B_WP003_ROOT" ]; then
-        printf '%s\n' "$N00B_WP003_ROOT"
-        return
-    fi
+    return 1
+}
+
+n00b_runtime_root() {
+    for root in "$NCC_TEST_N00B_ROOT" "$N00B_WP005_ROOT" "$N00B_WP003_ROOT"; do
+        [ -n "$root" ] || continue
+        n00b_runtime_root_try "$root" && return 0
+        echo "FAIL: configured n00b runtime root is not staged: $root" >&2
+        exit 1
+    done
+
+    n00b_runtime_root_try "$NCC_SOURCE_ROOT/subprojects/libn00b" && return 0
+
+    search="$NCC_SOURCE_ROOT"
+    while :; do
+        n00b_runtime_root_try_tree "$search/n00b" && return 0
+        n00b_runtime_root_try_tree "$search/../n00b" && return 0
+
+        parent=$(dirname -- "$search")
+        [ "$parent" != "$search" ] || break
+        search="$parent"
+    done
 
     if [ "${NCC_TEST_ALLOW_MISSING_N00B_RUNTIME:-0}" != "0" ] \
         || [ "${NCC_TEST_ALLOW_MISSING_N00B_WP003:-0}" != "0" ]; then
-        skip_test "N00B_WP005_ROOT/N00B_WP003_ROOT is not set"
+        skip_test "staged n00b runtime was not found"
     fi
 
-    echo "FAIL: N00B_WP005_ROOT or N00B_WP003_ROOT must name a staged n00b workspace" >&2
+    echo "FAIL: could not find a staged n00b runtime; set NCC_TEST_N00B_ROOT if it is not adjacent to ncc" >&2
     exit 1
 }
 
