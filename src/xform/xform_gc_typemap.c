@@ -334,11 +334,42 @@ offset_assert(const char *elem_type, const char *path)
 
 // Accumulates the emitted variant descriptors for one element type.
 typedef struct {
-    ncc_buffer_t *arrays; // file-scope ptr-hash arrays + offset asserts
-    ncc_buffer_t *inits;  // CSV of n00b_gc_variant_field_t initializers
-    int           count;  // number of variant fields recorded
-    size_t        rec;    // owning record index (for unique array names)
+    ncc_buffer_t *arrays;    // file-scope typed ptr-hash arrays (typed path)
+    ncc_buffer_t *asserts;   // alignment static_asserts (emitted in BOTH paths)
+    ncc_buffer_t *inits;     // CSV of n00b_gc_variant_field_t initializers
+    ncc_buffer_t *raw;       // CSV of flat n00b_gcraw variant words (prelink path)
+    size_t        raw_words; // number of words accumulated in `raw`
+    int           count;     // number of variant fields recorded
+    size_t        rec;       // owning record index (for unique array names)
 } variant_acc_t;
+
+// Append one already-formatted word token (e.g. an offsetof expression) to the
+// flat n00b_gcraw variant buffer, with a comma separator iff non-first. `nwords`
+// is how many words the token expands to (1 for a scalar; the element count for
+// a comma-joined offset CSV).
+static void
+raw_push_str(variant_acc_t *vacc, const char *s, int nwords)
+{
+    if (!s || !s[0]) {
+        return;
+    }
+    if (vacc->raw_words > 0) {
+        ncc_buffer_puts(vacc->raw, ",");
+    }
+    ncc_buffer_puts(vacc->raw, s);
+    vacc->raw_words += (size_t)(nwords <= 0 ? 1 : nwords);
+}
+
+// Append one literal uint64 word to the flat n00b_gcraw variant buffer.
+static void
+raw_push_u64(variant_acc_t *vacc, unsigned long long v)
+{
+    if (vacc->raw_words > 0) {
+        ncc_buffer_puts(vacc->raw, ",");
+    }
+    ncc_buffer_printf(vacc->raw, "%lluULL", v);
+    vacc->raw_words++;
+}
 
 typedef enum {
     ALT_PTR,        // a heap pointer; its typehash joins the discriminant set
@@ -673,7 +704,7 @@ walk_variant(ncc_xform_ctx_t *ctx, const char *elem_type,
 
         if (cls == ALT_PTR) {
             // The value word itself is the heap pointer.
-            emit_pointer(elem_type, armbase, aoffs, vacc->arrays, &acount);
+            emit_pointer(elem_type, armbase, aoffs, vacc->asserts, &acount);
         }
         else { // ALT_AGGREGATE: walk the by-value struct's pointer fields.
             ncc_parse_tree_t *aspec = ncc_layout_aggregate_spec_from_specs(
@@ -683,21 +714,27 @@ walk_variant(ncc_xform_ctx_t *ctx, const char *elem_type,
             // to the conservative fallback. A throwaway vacc catches a nested
             // variant via its non-zero count.
             variant_acc_t inner = {
-                .arrays = ncc_buffer_empty(),
-                .inits  = ncc_buffer_empty(),
-                .count  = 0,
-                .rec    = vacc->rec,
+                .arrays  = ncc_buffer_empty(),
+                .asserts = ncc_buffer_empty(),
+                .inits   = ncc_buffer_empty(),
+                .raw     = ncc_buffer_empty(),
+                .count   = 0,
+                .rec     = vacc->rec,
             };
             bool aok = true;
             if (aspec) {
-                gc_walk(ctx, elem_type, aspec, armbase, aoffs, vacc->arrays,
+                gc_walk(ctx, elem_type, aspec, armbase, aoffs, vacc->asserts,
                         &acount, &inner, &aok, depth + 1);
             }
             bool inner_variant = inner.count != 0;
             ncc_free(inner.arrays->data);
             ncc_free(inner.arrays);
+            ncc_free(inner.asserts->data);
+            ncc_free(inner.asserts);
             ncc_free(inner.inits->data);
             ncc_free(inner.inits);
+            ncc_free(inner.raw->data);
+            ncc_free(inner.raw);
             if (!aspec || !aok || inner_variant) {
                 ncc_free(armbase);
                 ncc_free(aoffs->data);
@@ -757,7 +794,7 @@ walk_variant(ncc_xform_ctx_t *ctx, const char *elem_type,
     char *sel_off  = offset_expr(elem_type, sel_path);
     int   k        = vacc->count;
 
-    ncc_buffer_puts(vacc->arrays, sel_as);
+    ncc_buffer_puts(vacc->asserts, sel_as);
     for (size_t a = 0; a < narms; a++) {
         ncc_buffer_printf(
             vacc->arrays,
@@ -785,6 +822,18 @@ walk_variant(ncc_xform_ctx_t *ctx, const char *elem_type,
                       ".arms=__ncc_gcvararms_%zu_%d}",
                       sel_off, narms, vacc->rec, k);
     vacc->count++;
+
+    // Flat n00b_gcraw encoding of this variant field (untyped words; the
+    // link-time aggregator reconstructs the typed descriptor). Layout:
+    //   selector_offset, arm_count, then per arm: selector, ptr_offset_count,
+    //   <ptr_offsets...>. Offsets are word offsets, matching the typed path.
+    raw_push_str(vacc, sel_off, 1);
+    raw_push_u64(vacc, (unsigned long long)narms);
+    for (size_t a = 0; a < narms; a++) {
+        raw_push_u64(vacc, (unsigned long long)arms[a].selector);
+        raw_push_u64(vacc, (unsigned long long)arms[a].count);
+        raw_push_str(vacc, arms[a].offs->data, arms[a].count);
+    }
 
     ncc_free(sel_path);
     ncc_free(sel_as);
@@ -1381,8 +1430,17 @@ derive_gc_section_attr(const char *stobj_attr, const char *section_name)
                 p + strlen("n00b_stobj"));
         }
     }
+    // No static-object attribute to derive a segment from. Spell the section
+    // platform-correctly anyway: Mach-O requires a `__SEGMENT,__section`
+    // form, so default GC-map/raw sections to the `__DATA` segment (matching
+    // the `N00B_*_SECTION` macros); ELF/PE take the bare name.
+#if defined(__APPLE__)
+    return ncc_layout_format_cstr(
+        "[[gnu::section(\"__DATA,%s\"), gnu::used]]", section_name);
+#else
     return ncc_layout_format_cstr("[[gnu::section(\"%s\"), gnu::used]]",
                                   section_name);
+#endif
 }
 
 static char *
@@ -1574,6 +1632,12 @@ tr_walk(ncc_xform_ctx_t *ctx, const char *elem_type, ncc_parse_tree_t *spec,
     }
 }
 
+static char *
+derive_gcraw_attr(const char *stobj_attr)
+{
+    return derive_gc_section_attr(stobj_attr, "n00b_gcraw");
+}
+
 char *
 ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
 {
@@ -1590,6 +1654,8 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
     char         *gcidx_attr = derive_gcidx_attr(stobj_attr);
     char         *trmap_attr = derive_trmap_attr(stobj_attr);
     char         *tridx_attr = derive_tridx_attr(stobj_attr);
+    char         *gcraw_attr = derive_gcraw_attr(stobj_attr);
+    bool          prelink    = data && data->gcmap_prelink;
 
     for (size_t i = 0; i < record_len; i++) {
         // Skip only source-level generic macro spellings such as
@@ -1624,10 +1690,12 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
         int           count   = 0;
         bool          ok      = true;
         variant_acc_t vacc    = {
-                  .arrays = ncc_buffer_empty(),
-                  .inits  = ncc_buffer_empty(),
-                  .count  = 0,
-                  .rec    = i,
+                  .arrays  = ncc_buffer_empty(),
+                  .asserts = ncc_buffer_empty(),
+                  .inits   = ncc_buffer_empty(),
+                  .raw     = ncc_buffer_empty(),
+                  .count   = 0,
+                  .rec     = i,
         };
 
         // [[n00b::transient]] (WP-001): collected independently of the GC
@@ -1646,68 +1714,100 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
 
         if (ok) {
             char *asserts_str = ncc_buffer_take(asserts);
+            char *var_asserts = ncc_buffer_take(vacc.asserts);
             char *var_arrays  = ncc_buffer_take(vacc.arrays);
             char *var_inits   = ncc_buffer_take(vacc.inits);
+            char *var_raw     = ncc_buffer_take(vacc.raw);
+            char *offs_csv    = ncc_buffer_take(offs);
 
-            // Asserts + per-variant ptr-hash arrays first (file scope), then the
-            // descriptor + section entry.
+            // Alignment static_asserts guard both encodings; emit them first.
             ncc_buffer_printf(out, "%s", asserts_str);
-            ncc_buffer_printf(out, "%s", var_arrays);
-            if (count > 0) {
-                char *offs_csv = ncc_buffer_take(offs);
+            ncc_buffer_printf(out, "%s", var_asserts);
+
+            if (prelink) {
+                // One flat, untyped record into n00b_gcraw. No n00b_gc_* type is
+                // named, so the TU does not depend on the codegen ABI; the
+                // link-time aggregator reconstructs the typed dictionary. Words:
+                //   [record_words, kind=1, type_hash, stride, n_fixed,
+                //    <fixed offsets...>, n_variants, <variant words...>]
+                // record_words counts every element, including itself.
+                size_t record_words = 6 + (size_t)count + vacc.raw_words;
                 ncc_buffer_printf(
                     out,
-                    "static const uint64_t __ncc_gcmap_off_%zu[]={%s};",
-                    i, offs_csv);
-                ncc_free(offs_csv);
+                    "%s static const uint64_t __ncc_gcraw_%zu[]={"
+                    "%zuULL,1ULL,%lluULL,(sizeof(%s)/sizeof(void*)),%dULL",
+                    gcraw_attr, i, record_words,
+                    (unsigned long long)records[i].hash,
+                    records[i].elem_type, count);
+                if (count > 0) {
+                    ncc_buffer_printf(out, ",%s", offs_csv);
+                }
+                ncc_buffer_printf(out, ",%dULL", vacc.count);
+                if (vacc.raw_words > 0) {
+                    ncc_buffer_printf(out, ",%s", var_raw);
+                }
+                ncc_buffer_puts(out, "};");
+                n_emitted++;
             }
             else {
-                ncc_free(ncc_buffer_take(offs));
-            }
-            if (vacc.count > 0) {
+                // Typed n00b_gcmap path: per-variant arrays + layout + entry.
+                ncc_buffer_printf(out, "%s", var_arrays);
+                if (count > 0) {
+                    ncc_buffer_printf(
+                        out,
+                        "static const uint64_t __ncc_gcmap_off_%zu[]={%s};",
+                        i, offs_csv);
+                }
+                if (vacc.count > 0) {
+                    ncc_buffer_printf(
+                        out,
+                        "static const n00b_gc_variant_field_t "
+                        "__ncc_gcmap_var_%zu[]={%s};",
+                        i, var_inits);
+                }
+                char *offsets_expr = count > 0
+                                   ? ncc_layout_format_cstr("__ncc_gcmap_off_%zu", i)
+                                   : ncc_layout_copy_cstr("nullptr");
+                char *variants_expr = vacc.count > 0
+                                    ? ncc_layout_format_cstr("__ncc_gcmap_var_%zu", i)
+                                    : ncc_layout_copy_cstr("nullptr");
                 ncc_buffer_printf(
                     out,
-                    "static const n00b_gc_variant_field_t "
-                    "__ncc_gcmap_var_%zu[]={%s};",
-                    i, var_inits);
+                    "static const n00b_gc_struct_layout_t __ncc_gcmap_lay_%zu="
+                    "{.stride=(sizeof(%s)/sizeof(void*)),.count=1,.offset_count=%d,"
+                    ".offsets=%s,.variant_count=%dULL,.variants=%s};",
+                    i, records[i].elem_type, count, offsets_expr, vacc.count,
+                    variants_expr);
+                ncc_buffer_printf(
+                    out,
+                    "%s static const n00b_gc_type_map_entry_t "
+                    "__ncc_gcmap_ent_%zu={.type_hash=%lluULL,.layout="
+                    "&__ncc_gcmap_lay_%zu};",
+                    gcmap_attr, i, (unsigned long long)records[i].hash, i);
+                ncc_buffer_printf(
+                    out,
+                    "%s static const n00b_gc_type_map_index_entry_t "
+                    "__ncc_gcidx_ent_%zu={.type_hash=0ULL,.entry_index=%zuULL};",
+                    gcidx_attr, i, i);
+                n_emitted++;
+                ncc_free(offsets_expr);
+                ncc_free(variants_expr);
             }
-            char *offsets_expr = count > 0
-                               ? ncc_layout_format_cstr("__ncc_gcmap_off_%zu", i)
-                               : ncc_layout_copy_cstr("nullptr");
-            char *variants_expr = vacc.count > 0
-                                ? ncc_layout_format_cstr("__ncc_gcmap_var_%zu", i)
-                                : ncc_layout_copy_cstr("nullptr");
-            ncc_buffer_printf(
-                out,
-                "static const n00b_gc_struct_layout_t __ncc_gcmap_lay_%zu="
-                "{.stride=(sizeof(%s)/sizeof(void*)),.count=1,.offset_count=%d,"
-                ".offsets=%s,.variant_count=%dULL,.variants=%s};",
-                i, records[i].elem_type, count, offsets_expr, vacc.count,
-                variants_expr);
-            ncc_free(variants_expr);
+
+            ncc_free(offs_csv);
+            ncc_free(var_raw);
             ncc_free(var_arrays);
             ncc_free(var_inits);
-            ncc_buffer_printf(
-                out,
-                "%s static const n00b_gc_type_map_entry_t "
-                "__ncc_gcmap_ent_%zu={.type_hash=%lluULL,.layout="
-                "&__ncc_gcmap_lay_%zu};",
-                gcmap_attr, i, (unsigned long long)records[i].hash, i);
-            ncc_buffer_printf(
-                out,
-                "%s static const n00b_gc_type_map_index_entry_t "
-                "__ncc_gcidx_ent_%zu={.type_hash=0ULL,.entry_index=%zuULL};",
-                gcidx_attr, i, i);
-            n_emitted++;
-
-            ncc_free(offsets_expr);
+            ncc_free(var_asserts);
             ncc_free(asserts_str);
         }
         else {
             ncc_free(ncc_buffer_take(offs));
             ncc_free(ncc_buffer_take(asserts));
             ncc_free(ncc_buffer_take(vacc.arrays));
+            ncc_free(ncc_buffer_take(vacc.asserts));
             ncc_free(ncc_buffer_take(vacc.inits));
+            ncc_free(ncc_buffer_take(vacc.raw));
         }
 
         // Transient table for this type — emitted whether or not the GC
@@ -1726,21 +1826,29 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
                 out,
                 "static const uint64_t __ncc_trmap_sz_%zu[]={%s};",
                 i, tr_sz_csv);
+            // Type-name-free: anonymous structs whose layouts match
+            // n00b_transient_layout_t / n00b_transient_map_entry_t /
+            // n00b_transient_map_index_entry_t exactly (the n00b-side layout
+            // guard TU _Static_asserts this). The entry's `layout` is a
+            // `const void *` (byte-identical to the typed pointer). The TU
+            // needs no codegen-ABI header.
             ncc_buffer_printf(
                 out,
-                "static const n00b_transient_layout_t __ncc_trmap_lay_%zu="
+                "static const struct{uint64_t field_count;"
+                "const uint64_t*byte_offsets;const uint64_t*byte_sizes;} "
+                "__ncc_trmap_lay_%zu="
                 "{.field_count=%dULL,.byte_offsets=__ncc_trmap_off_%zu,"
                 ".byte_sizes=__ncc_trmap_sz_%zu};",
                 i, tr_count, i, i);
             ncc_buffer_printf(
                 out,
-                "%s static const n00b_transient_map_entry_t "
+                "%s static const struct{uint64_t type_hash;const void*layout;} "
                 "__ncc_trmap_ent_%zu={.type_hash=%lluULL,.layout="
-                "&__ncc_trmap_lay_%zu};",
+                "(const void*)&__ncc_trmap_lay_%zu};",
                 trmap_attr, i, (unsigned long long)records[i].hash, i);
             ncc_buffer_printf(
                 out,
-                "%s static const n00b_transient_map_index_entry_t "
+                "%s static const struct{uint64_t type_hash;uint64_t entry_index;} "
                 "__ncc_tridx_ent_%zu={.type_hash=0ULL,.entry_index=%zuULL};",
                 tridx_attr, i, i);
             ncc_free(tr_off_csv);
@@ -1757,6 +1865,7 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
     ncc_free(gcidx_attr);
     ncc_free(trmap_attr);
     ncc_free(tridx_attr);
+    ncc_free(gcraw_attr);
 
     // Drain the accumulator (per-TU state).
     for (size_t i = 0; i < record_len; i++) {

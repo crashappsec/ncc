@@ -2,6 +2,7 @@
 
 #include "internal/ncc_opts.h"
 #include "parse/comptime_meta.h"
+#include "util/platform.h"
 
 #include <stdbool.h>
 
@@ -47,6 +48,33 @@ const char **ncc_collect_comptime_argv(const char *program,
 int ncc_comptime_run_and_link(const ncc_opts_t *opts,
                               const ncc_comptime_plan_t *plan,
                               char **err_out);
+
+/**
+ * gcmap-prelink: read n00b_gcraw records from the link-input objects, generate
+ * the typed GC type-map dictionary TU, compile it, and return its object path
+ * (allocated in `tmp`, owned by the caller). *object_path_out is NULL (and the
+ * call returns true) when no records were found. See gcmap_prelink.h.
+ */
+bool ncc_gcmap_prelink_build_object(const ncc_opts_t     *opts,
+                                    const char *const    *objects,
+                                    int                   n_objects,
+                                    ncc_temp_workspace_t *tmp,
+                                    char                **object_path_out,
+                                    char                **err_out);
+
+/**
+ * gcmap standalone emit (--ncc-gcmap-emit=OUT): read n00b_gcraw from the given
+ * objects/archives, generate+compile the typed dictionary TU, and write the
+ * object directly to `out_path`. When no records are found, writes a valid
+ * object defining EMPTY dictionary symbols (count==0), so the build always has a
+ * file to link. For build systems where ncc does not drive the final link.
+ * Returns false (sets *err_out) on error.
+ */
+bool ncc_gcmap_emit_to_path(const ncc_opts_t  *opts,
+                            const char *const *objects,
+                            int                n_objects,
+                            const char        *out_path,
+                            char             **err_out);
 
 /**
  * Link a runtime-degraded comptime program without executing comptime at build.

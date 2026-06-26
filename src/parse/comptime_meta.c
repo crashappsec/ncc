@@ -401,6 +401,181 @@ dump_section(const char *objcopy, const char *obj_path, const char *section,
     return ok;
 }
 
+// Public: dump `section` from a single object file and return its raw bytes
+// (caller frees with ncc_free). A missing section is not an error: sets
+// *bytes_out=NULL, *len_out=0, returns true. Reuses find_objcopy/dump_section.
+bool
+ncc_ct_read_object_section(const char *obj_path,
+                           const char *section,
+                           uint8_t   **bytes_out,
+                           size_t     *len_out,
+                           char      **err_out)
+{
+    *bytes_out = nullptr;
+    *len_out   = 0;
+
+    const char *objcopy = find_objcopy();
+    if (!objcopy) {
+        set_err(err_out, "llvm-objcopy or objcopy is required to read '%s'",
+                section);
+        return false;
+    }
+
+    ncc_temp_workspace_t tmp     = {0};
+    char                *tmp_err = nullptr;
+    if (!ncc_temp_workspace_create(&tmp, "ncc_gcraw_", &tmp_err)) {
+        set_err(err_out, "%s",
+                tmp_err ? tmp_err : "failed to create gcraw temp workspace");
+        ncc_free(tmp_err);
+        return false;
+    }
+
+    char *out_path = ncc_temp_workspace_join(&tmp, "section.bin");
+    bool  absent   = false;
+    char *dump_err = nullptr;
+    bool  ok = dump_section(objcopy, obj_path, section, out_path, &absent,
+                            &dump_err);
+    if (!ok) {
+        ncc_free(out_path);
+        ncc_temp_workspace_cleanup(&tmp);
+        if (absent) {
+            ncc_free(dump_err);
+            return true; // object simply has no such section
+        }
+        set_err(err_out, "%s", dump_err ? dump_err : "section dump failed");
+        ncc_free(dump_err);
+        return false;
+    }
+
+    size_t n    = 0;
+    char  *data = read_binary_file(out_path, &n, err_out);
+    ncc_free(out_path);
+    ncc_temp_workspace_cleanup(&tmp);
+    if (!data) {
+        return false;
+    }
+    *bytes_out = (uint8_t *)data;
+    *len_out   = n;
+    return true;
+}
+
+static char *join_dir_leaf(const char *dir, const char *leaf); // defined below
+static bool  list_archive_members(const char *ar, const char *archive_path,
+                                  ncc_process_result_t *proc, char **err_out);
+static bool  extract_archive_members(const char *ar, const char *archive_path,
+                                     const char *out_dir, char **err_out);
+
+// Public: read and concatenate `section` bytes from a link input — either a
+// single object (.o) or every object member of an archive (.a). The caller
+// frees *bytes_out via ncc_free. Inputs that are neither, or that lack the
+// section, contribute nothing (returns true, possibly with *len_out unchanged).
+// Records are self-delimiting, so concatenation across members is valid.
+bool
+ncc_ct_read_input_section(const char *input_path,
+                          const char *section,
+                          uint8_t   **bytes_out,
+                          size_t     *len_out,
+                          char      **err_out)
+{
+    *bytes_out = nullptr;
+    *len_out   = 0;
+
+    size_t plen = strlen(input_path);
+    if (plen >= 2 && strcmp(input_path + plen - 2, ".o") == 0) {
+        return ncc_ct_read_object_section(input_path, section, bytes_out,
+                                          len_out, err_out);
+    }
+    if (plen < 2 || strcmp(input_path + plen - 2, ".a") != 0) {
+        return true; // not an object/archive we scan
+    }
+
+    // Archive: extract members and read the section from each .o member.
+    const char *ar = find_ar();
+    if (!ar) {
+        set_err(err_out, "llvm-ar or ar is required to read archive '%s'",
+                input_path);
+        return false;
+    }
+    ncc_temp_workspace_t tmp     = {0};
+    char                *tmp_err = nullptr;
+    if (!ncc_temp_workspace_create(&tmp, "ncc_gcraw_ar_", &tmp_err)) {
+        set_err(err_out, "%s", tmp_err ? tmp_err : "archive temp workspace failed");
+        ncc_free(tmp_err);
+        return false;
+    }
+    const char *dir = ncc_temp_workspace_path(&tmp);
+
+    ncc_process_result_t list = {0};
+    bool ok = list_archive_members(ar, input_path, &list, err_out)
+           && extract_archive_members(ar, input_path, dir, err_out);
+    if (!ok) {
+        ncc_process_result_free(&list);
+        ncc_temp_workspace_cleanup(&tmp);
+        return false;
+    }
+
+    ncc_buffer_t *acc   = ncc_buffer_empty();
+    size_t        total = 0;
+    size_t        pos   = 0;
+    while (ok && pos < list.stdout_len) {
+        size_t start = pos;
+        while (pos < list.stdout_len && list.stdout_data[pos] != '\n') {
+            pos++;
+        }
+        size_t mlen = pos - start;
+        if (pos < list.stdout_len) {
+            pos++; // skip newline
+        }
+        while (mlen > 0
+               && (list.stdout_data[start + mlen - 1] == '\r'
+                   || list.stdout_data[start + mlen - 1] == ' ')) {
+            mlen--;
+        }
+        if (mlen < 2 || memcmp(list.stdout_data + start + mlen - 2, ".o", 2) != 0) {
+            continue;
+        }
+        char *name = ncc_alloc_array(char, mlen + 1);
+        memcpy(name, list.stdout_data + start, mlen);
+        name[mlen] = '\0';
+        char *member = join_dir_leaf(dir, name);
+        ncc_free(name);
+
+        uint8_t *mbytes = nullptr;
+        size_t   mlen_b = 0;
+        char    *merr   = nullptr;
+        if (!ncc_ct_read_object_section(member, section, &mbytes, &mlen_b,
+                                        &merr)) {
+            set_err(err_out, "gcraw: archive member '%s': %s", member,
+                    merr ? merr : "read failed");
+            ncc_free(merr);
+            ncc_free(member);
+            ok = false;
+            break;
+        }
+        if (mbytes && mlen_b) {
+            ncc_buffer_append(acc, (const char *)mbytes, mlen_b);
+            total += mlen_b;
+        }
+        ncc_free(mbytes);
+        ncc_free(member);
+    }
+
+    ncc_process_result_free(&list);
+    ncc_temp_workspace_cleanup(&tmp);
+
+    if (!ok) {
+        ncc_free(ncc_buffer_take(acc));
+        return false;
+    }
+    if (total == 0) {
+        ncc_free(ncc_buffer_take(acc));
+        return true;
+    }
+    *bytes_out = (uint8_t *)ncc_buffer_take(acc);
+    *len_out   = total;
+    return true;
+}
+
 static bool
 remove_section(const char *objcopy, const char *in_path, const char *section,
                const char *out_path, bool *absent, char **err_out)

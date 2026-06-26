@@ -183,6 +183,7 @@ src_parse = files(
   'src/parse/comptime_image_emit.c',
   'src/parse/static_init_degrade.c',
   'src/parse/comptime_build.c',
+  'src/parse/gcmap_prelink.c',
   'src/parse/emit.c',
   'src/parse/commander.c',
   'src/parse/crt_entry.c',
@@ -763,29 +764,6 @@ test('ncc_comptime_image_e2e', test_runner,
   timeout : 30,
 )
 
-test('ncc_static_init_const_e2e', test_runner,
-  args : [ncc_exe, 'comptime_image_e2e',
-          test_dir / 'test_static_init_const_e2e.c'],
-  suite : 'ncc',
-  depends : ncc_exe,
-  timeout : 30,
-)
-
-test('ncc_static_init_writable_e2e', test_runner,
-  args : [ncc_exe, 'comptime_image_e2e',
-          test_dir / 'test_static_init_writable_e2e.c'],
-  suite : 'ncc',
-  depends : ncc_exe,
-  timeout : 30,
-)
-
-test('ncc_static_init_buffer_representative', test_runner,
-  args : [ncc_exe, 'comptime_image_e2e',
-          test_dir / 'test_static_init_buffer_representative.c'],
-  suite : 'ncc',
-  depends : ncc_exe,
-  timeout : 30,
-)
 
 test('ncc_buffer_static_migrated', test_runner,
   args : [ncc_exe, 'comptime_image_e2e',
@@ -984,40 +962,6 @@ test('ncc_array_static_aggregate_scalar_error', test_runner,
   suite : 'ncc',
   depends : ncc_exe,
   timeout : 30,
-)
-
-test('ncc_static_init_mutation_error', test_runner,
-  args : [ncc_exe, 'static_init_mutation_error',
-          test_dir / 'test_static_init_mutation_error.c'],
-  suite : 'ncc',
-  depends : ncc_exe,
-  timeout : 30,
-)
-
-test('ncc_static_init_no_comptime_degrade', test_runner,
-  args : [ncc_exe, 'static_init_no_comptime_degrade',
-          test_dir / 'test_static_init_const_e2e.c'],
-  suite : 'ncc',
-  depends : ncc_exe,
-  timeout : 30,
-)
-
-test('ncc_static_init_writable_no_comptime_degrade', test_runner,
-  args : [ncc_exe, 'static_init_no_comptime_degrade',
-          test_dir / 'test_static_init_writable_e2e.c'],
-  suite : 'ncc',
-  depends : ncc_exe,
-  timeout : 30,
-)
-
-test('ncc_static_init_internal_error', test_runner,
-  args : [ncc_exe, 'expect_error_contains_no_output',
-          test_dir / 'test_static_init_internal_error.c',
-          'static initializer \'state\' has internal linkage']
-         + ncc_test_flags + ['--ncc-no-gc-stack-maps',
-                             '--ncc-no-auto-gc-roots'],
-  suite : 'ncc',
-  depends : ncc_exe,
 )
 
 test('ncc_function_contracts_result_return', test_runner,

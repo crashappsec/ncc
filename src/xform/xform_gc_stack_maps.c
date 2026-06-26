@@ -2850,8 +2850,15 @@ build_frame_source(gc_frame_group_t *group, ncc_gc_stack_root_t *roots)
     const char *slot_storage = runtime_sized ? "" : "static const ";
     const char *map_storage  = runtime_sized ? "" : "static const ";
 
+    // Type-name-free emission: the slot table, map, and frame are spelled as
+    // anonymous structs whose layouts match n00b_gc_stack_slot_t /
+    // n00b_gc_stack_map_t / n00b_gc_stack_frame_t exactly, and the runtime
+    // push/pop functions are forward-declared inline with (void *) signatures
+    // (the n00b header declares them the same way, and the n00b-side layout
+    // guard TU _Static_asserts the struct layouts). The emitting TU therefore
+    // needs no codegen-ABI header.
     ncc_buffer_printf(buf,
-                      "%sn00b_gc_stack_slot_t "
+                      "%sstruct{uint32_t root_index;uint32_t num_words;} "
                       "__ncc_gc_slots_%d[] = {",
                       slot_storage, group->id);
 
@@ -2869,9 +2876,12 @@ build_frame_source(gc_frame_group_t *group, ncc_gc_stack_root_t *roots)
 
     ncc_buffer_puts(buf, "};");
     ncc_buffer_printf(buf,
-                      "%sn00b_gc_stack_map_t __ncc_gc_map_%d="
+                      "%sstruct{uint32_t num_roots;uint32_t num_slots;"
+                      "uint32_t flags;const void*slots;"
+                      "const char*function_name;const char*file_name;"
+                      "uint32_t line;} __ncc_gc_map_%d="
                       "{.num_roots=%zu,.num_slots=%zu,"
-                      ".slots=__ncc_gc_slots_%d,"
+                      ".slots=(const void*)__ncc_gc_slots_%d,"
                       ".function_name=%s,.file_name=__FILE__,.line=%u};",
                       map_storage, group->id, count, count, group->id,
                       function_lit, line);
@@ -2886,8 +2896,17 @@ build_frame_source(gc_frame_group_t *group, ncc_gc_stack_root_t *roots)
     }
 
     ncc_buffer_puts(buf, "};");
+    // Forward-declare the runtime push/pop with (void *) signatures (matching
+    // the n00b header) so the frame's cleanup attribute and the push call
+    // resolve without naming n00b_gc_stack_frame_t/_map_t. The frame is an
+    // anonymous struct matching n00b_gc_stack_frame_t's layout
+    // (prev/map/roots pointers).
+    ncc_buffer_puts(buf,
+                    "extern void n00b_gc_stack_pop(void*);"
+                    "extern void n00b_gc_stack_push(void*,const void*,void**);");
     ncc_buffer_printf(buf,
-                      "n00b_gc_stack_frame_t __ncc_gc_frame_%d "
+                      "struct{void*prev;const void*map;void**roots;} "
+                      "__ncc_gc_frame_%d "
                       "__attribute__((cleanup(n00b_gc_stack_pop)));",
                       group->id);
     ncc_buffer_printf(buf,

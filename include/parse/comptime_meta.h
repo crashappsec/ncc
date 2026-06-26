@@ -152,6 +152,26 @@ bool ncc_ct_read_object(const ncc_opts_t *opts, const char *obj_path,
                         ncc_ct_rec_list_t *out, char **err_out);
 
 /**
+ * Dump a named section's raw bytes from a single object file (reusing the
+ * objcopy machinery). Caller frees *bytes_out with ncc_free. A missing section
+ * is not an error: yields *bytes_out=NULL, *len_out=0, returns true. Used by
+ * the gcmap-prelink link pass to read n00b_gcraw records.
+ */
+bool ncc_ct_read_object_section(const char *obj_path, const char *section,
+                                uint8_t **bytes_out, size_t *len_out,
+                                char **err_out);
+
+/**
+ * Like ncc_ct_read_object_section, but accepts a link input that is either an
+ * object (.o) or an archive (.a); for an archive it concatenates the section
+ * bytes of every .o member. Inputs that are neither, or lack the section,
+ * contribute nothing. Caller frees *bytes_out with ncc_free.
+ */
+bool ncc_ct_read_input_section(const char *input_path, const char *section,
+                               uint8_t **bytes_out, size_t *len_out,
+                               char **err_out);
+
+/**
  * Aggregate per-object comptime records into link-level metadata.
  *
  * @pre  recs and out are non-null; out is zero-initialized.

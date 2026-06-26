@@ -77,6 +77,7 @@ typedef struct {
     bool                       gc_stack_maps_relaxed;
     bool                       gc_typemaps;
     bool                       auto_gc_roots;
+    bool                       gcmap_prelink;
     ncc_gc_stack_root_t       *gc_stack_roots;
     size_t                     gc_stack_root_count;
     // Scoped symbol table for the TU (built post-parse by symbol_populate).

@@ -1533,9 +1533,14 @@ build_emit_source(ncc_xform_ctx_t *ctx, const char *tu_uniq, candvec_t *cands)
     const char   *stobj_attr = ncc_xform_get_data(ctx)->static_object_entry_attr;
     char         *root_attr  = derive_gc_root_section_attr(stobj_attr);
 
-    // Table.
+    // Table. Type-name-free: the entries are an anonymous struct whose layout
+    // matches n00b_gc_root_t exactly (void *addr; size_t num_words). size_t is
+    // spelled uint64_t (same width/alignment on supported targets); the n00b-side
+    // layout guard TU _Static_asserts the match. The TU needs no codegen-ABI
+    // header.
     ncc_buffer_printf(buf,
-        "static const n00b_gc_root_t __ncc_gc_root_table_%s[] = {\n",
+        "static const struct{void*addr;uint64_t num_words;} "
+        "__ncc_gc_root_table_%s[] = {\n",
         tu_uniq);
     for (size_t i = 0; i < cands->len; i++) {
         cand_t *c = &cands->items[i];
@@ -1569,10 +1574,13 @@ build_emit_source(ncc_xform_ctx_t *ctx, const char *tu_uniq, candvec_t *cands)
     }
     ncc_buffer_puts(buf, "};\n");
 
+    // Section entry, likewise anonymous; layout matches
+    // n00b_gc_root_section_entry_t (const n00b_gc_root_t *roots; size_t count).
+    // `roots` is `const void *` (byte-identical to the typed pointer).
     ncc_buffer_printf(buf,
-        "%s static const n00b_gc_root_section_entry_t "
+        "%s static const struct{const void*roots;uint64_t count;} "
         "__ncc_gc_root_section_entry_%s = {"
-        ".roots = __ncc_gc_root_table_%s,"
+        ".roots = (const void*)__ncc_gc_root_table_%s,"
         ".count = sizeof __ncc_gc_root_table_%s"
         " / sizeof __ncc_gc_root_table_%s[0]};\n",
         root_attr, tu_uniq, tu_uniq, tu_uniq, tu_uniq);

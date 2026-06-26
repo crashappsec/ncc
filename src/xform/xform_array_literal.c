@@ -3836,23 +3836,54 @@ array_static_object_descriptor_decl(ncc_xform_ctx_t *ctx,
                                  "N00B_STATIC_IDENTITY_NCC_ARRAY_DATA",
                                  "ncc-array-data", site, identity_len);
 
+    // Type-name-free emission: the descriptor is spelled as an anonymous struct
+    // whose field types/order/widths match n00b_static_object_desc_t exactly, so
+    // the TU needs no codegen-ABI header. The trailing cached_hash field is
+    // zero-filled by the partial designated initializer. The section-resident
+    // entry pointer is `const void *` (byte-identical to
+    // `const n00b_static_object_desc_t *`). The scan callback, when present, is
+    // forward-declared inline with a (void*, void*) signature matching the field
+    // type. The n00b-side layout guard TU _Static_asserts the real struct still
+    // matches this layout.
+    // The scan callback, when present, is forward-declared inline with the
+    // runtime's real (n00b_gc_map_t *, void *) signature — n00b_gc_map_t lives in
+    // the always-force-included n00b.h (NOT the codegen-ABI header), so naming it
+    // reintroduces no coupling, and the decl stays compatible with the header in
+    // the rare TU that also includes core/codegen_abi_inject.h. The value is cast
+    // to the descriptor field's structural (void*, void*) pointer type.
+    const char *scan_cb_extern = "";
+    char       *scan_cb_extern_owned = nullptr;
+    if (stobj.scan_cb && strcmp(stobj.scan_cb, "nullptr") != 0) {
+        ncc_buffer_t *e = ncc_buffer_empty();
+        ncc_buffer_printf(e, "extern void %s(n00b_gc_map_t*,void*);",
+                          stobj.scan_cb);
+        scan_cb_extern_owned = ncc_buffer_take(e);
+        scan_cb_extern       = scan_cb_extern_owned;
+    }
+
     ncc_buffer_t *buf = ncc_buffer_empty();
     ncc_buffer_printf(buf,
                       "%s"
-                      "static const n00b_static_object_desc_t %s={"
+                      "%s"
+                      "static const struct{const void*start;uint64_t len;"
+                      "uint64_t tinfo;unsigned char scan_kind;"
+                      "void(*scan_cb)(void*,void*);void*scan_user;"
+                      "uint64_t object_id;const char*file;const void*identity;"
+                      "uint32_t flags;unsigned _BitInt(128) cached_hash;} %s={"
                       ".start=(const void*)%s,"
                       ".len=(uint64_t)sizeof(%s),"
                       ".tinfo=%s,"
                       ".scan_kind=%s,"
-                      ".scan_cb=%s,"
+                      ".scan_cb=(void(*)(void*,void*))%s,"
                       ".scan_user=%s,"
                       ".object_id=%s,"
                       ".file=__FILE__,"
-                      ".identity=%s,"
+                      ".identity=(const void*)%s,"
                       ".flags=%s};"
-                      "static const n00b_static_object_desc_t * const %s "
-                      "%s=&%s;",
+                      "static const void * const %s "
+                      "%s=(const void*)&%s;",
                       stobj.identity_decl,
+                      scan_cb_extern,
                       stobj.desc_name,
                       data_name,
                       data_name,
@@ -3866,6 +3897,7 @@ array_static_object_descriptor_decl(ncc_xform_ctx_t *ctx,
                       stobj.entry_name,
                       stobj.entry_attr,
                       stobj.desc_name);
+    ncc_free(scan_cb_extern_owned);
     char *decl = ncc_buffer_take(buf);
     ncc_static_object_slots_cleanup(&stobj);
     ncc_free(typehash);

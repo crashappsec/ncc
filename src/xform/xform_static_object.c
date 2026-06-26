@@ -544,6 +544,40 @@ site_semantic_hash(ncc_parse_tree_t *site)
     return hash;
 }
 
+// Map a symbolic n00b_static_identity_kind_t constant to its numeric value.
+// The descriptor/identity structs are emitted type-name-free (anonymous structs,
+// no `#include` of the n00b codegen-ABI header), so the symbolic enum constants
+// from that header are not in scope in the emitting TU. The numeric values are a
+// frozen ABI (see core/codegen_abi_inject.h); the n00b-side layout guard TU
+// _Static_asserts they still match. Callers keep passing the symbolic name for
+// readability; unknown/already-numeric input is passed through unchanged.
+static const char *
+ncc_static_identity_kind_numeric(const char *kind_expr)
+{
+    if (!kind_expr) {
+        return "0u";
+    }
+    if (!strcmp(kind_expr, "N00B_STATIC_IDENTITY_NONE")) {
+        return "0u";
+    }
+    if (!strcmp(kind_expr, "N00B_STATIC_IDENTITY_NCC_RSTR")) {
+        return "1u";
+    }
+    if (!strcmp(kind_expr, "N00B_STATIC_IDENTITY_NCC_ARRAY_DATA")) {
+        return "2u";
+    }
+    if (!strcmp(kind_expr, "N00B_STATIC_IDENTITY_NCC_STATIC_IMAGE_OBJECT")) {
+        return "3u";
+    }
+    if (!strcmp(kind_expr, "N00B_STATIC_IDENTITY_NCC_STATIC_IMAGE_PAYLOAD")) {
+        return "4u";
+    }
+    if (!strcmp(kind_expr, "N00B_STATIC_IDENTITY_MANUAL")) {
+        return "5u";
+    }
+    return kind_expr;
+}
+
 char *
 ncc_static_object_identity_namespace(ncc_xform_ctx_t *ctx,
                                      ncc_parse_tree_t *site)
@@ -691,14 +725,20 @@ ncc_static_object_slots_init(ncc_static_object_slots_t *out,
     char *namespace_lit = c_string_literal(namespace_id);
     char *object_key_lit = c_string_literal(object_key);
 
+    // Type-name-free: spell the identity record as an anonymous struct whose
+    // field types/order/widths match n00b_static_identity_t exactly (uint32_t
+    // version; uint8_t kind; uint8_t reserved[3]; const char *namespace_id;
+    // const char *object_key). reserved[] is zero-filled by the partial
+    // designated initializer. The emitting TU thus needs no codegen-ABI header.
     ncc_buffer_t *decl = ncc_buffer_empty();
     ncc_buffer_printf(decl,
-                      "static const n00b_static_identity_t %s={"
+                      "static const struct{uint32_t version;unsigned char kind;"
+                      "unsigned char reserved[3];const char*namespace_id;"
+                      "const char*object_key;} %s={"
                       ".version=1u,"
                       ".kind=%s,.namespace_id=%s,.object_key=%s};",
                       names->identity_name,
-                      identity_kind_expr ? identity_kind_expr
-                                         : "N00B_STATIC_IDENTITY_NONE",
+                      ncc_static_identity_kind_numeric(identity_kind_expr),
                       namespace_lit, object_key_lit);
     ncc_buffer_t *expr = ncc_buffer_empty();
     ncc_buffer_printf(expr, "&%s", names->identity_name);

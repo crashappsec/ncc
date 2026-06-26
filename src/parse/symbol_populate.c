@@ -440,99 +440,16 @@ record_enum_constants(ncc_symtab_t *st, ncc_parse_tree_t *enum_spec,
     }
 }
 
-static bool
-leaf_text_is(ncc_parse_tree_t *node, const char *text)
-{
-    if (!node || !text || !ncc_tree_is_leaf(node)) {
-        return false;
-    }
-
-    ncc_token_info_t *tok = ncc_tree_leaf_value(node);
-    if (!tok || !ncc_option_is_set(tok->value)) {
-        return false;
-    }
-
-    ncc_string_t val = ncc_option_get(tok->value);
-    return val.data && strcmp(val.data, text) == 0;
-}
-
-static bool
-node_directly_has_leaf_text(ncc_parse_tree_t *node, const char *text)
-{
-    if (!node || ncc_tree_is_leaf(node)) {
-        return false;
-    }
-
-    size_t nc = ncc_tree_num_children(node);
-    for (size_t i = 0; i < nc; i++) {
-        if (leaf_text_is(ncc_tree_child(node, i), text)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool
-postfix_expression_is_call(ncc_parse_tree_t *node)
-{
-    if (!nt_is(node, "postfix_expression")
-        || !node_directly_has_leaf_text(node, "(")) {
-        return false;
-    }
-
-    size_t nc = ncc_tree_num_children(node);
-    for (size_t i = 0; i < nc; i++) {
-        if (nt_is(ncc_tree_child(node, i), "postfix_expression")) {
-            return true;
-        }
-    }
-    return false;
-}
-
+// Static-object classification for a file-scope initializer. Only the
+// recognized n00b literal forms (buffer image, array/list/dict literals) are
+// baked into static objects; everything else is left as ordinary C static
+// storage. (The former general "bake any initializer containing a function
+// call" fallthrough was removed — complex compile-time initialization must now
+// be expressed with a recognized literal or the [[n00b::comptime]] attribute.)
 typedef struct {
     bool needs_bake;
     bool needs_host_exec;
 } static_init_class_t;
-
-static static_init_class_t
-initializer_static_bake_class(ncc_parse_tree_t *init)
-{
-    static_init_class_t result = {0};
-
-    if (!init || ncc_tree_is_leaf(init)) {
-        return result;
-    }
-    if (subtree_has_token_prefix(init, "__ncc_")) {
-        return result;
-    }
-    if (nt_is(init, "unary_expression")) {
-        ncc_parse_tree_t *first = ncc_tree_num_children(init) > 0
-                                ? ncc_tree_child(init, 0)
-                                : nullptr;
-        if (leaf_text_is(first, "sizeof")
-            || leaf_text_is(first, "_Countof")
-            || leaf_text_is(first, "alignof")
-            || leaf_text_is(first, "_Alignof")) {
-            return result;
-        }
-    }
-
-    if (postfix_expression_is_call(init)) {
-        result.needs_bake = true;
-        result.needs_host_exec = true;
-        return result;
-    }
-
-    size_t nc = ncc_tree_num_children(init);
-    for (size_t i = 0; i < nc; i++) {
-        static_init_class_t child =
-            initializer_static_bake_class(ncc_tree_child(init, i));
-        result.needs_bake = result.needs_bake || child.needs_bake;
-        result.needs_host_exec = result.needs_host_exec
-                              || child.needs_host_exec;
-    }
-    return result;
-}
 
 static bool
 initializer_is_buffer_static_image(ncc_parse_tree_t *specs,
@@ -910,9 +827,10 @@ record_declaration(ncc_symtab_t *st, ncc_parse_tree_t *decl, int64_t id_tid)
                 init_class.needs_bake = true;
                 init_class.needs_host_exec = true;
             }
-            else {
-                init_class = initializer_static_bake_class(init);
-            }
+            // No general fallthrough: an unrecognized non-constant initializer
+            // is left as ordinary C static storage (the C compiler rejects it
+            // if it isn't a constant expression). Use a recognized literal or
+            // [[n00b::comptime]] for compile-time initialization.
             if (!name_is_ncc_generated(entry->name) && init_class.needs_bake) {
                 entry->is_static_init = true;
                 entry->static_init_needs_host_exec =
