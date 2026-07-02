@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "ncc_runtime.h"
+#include "test_rstr_header.h"
 
 static int
 bytes_eq(const void *a, const void *b, size_t n)
@@ -48,6 +49,20 @@ test_plain_string(void)
     CHECK(s->codepoints == 11, "wrong codepoint count");
     CHECK(s->styling == nullptr, "styling should be nullptr");
     CHECK(bytes_eq(s->data, "Hello world", 11), "wrong data");
+    PASS();
+}
+
+static void
+test_header_string(void)
+{
+    TEST("plain r-string in user header");
+
+    ncc_string_t *s = ncc_rstr_header_slash();
+
+    CHECK(s != nullptr, "null pointer");
+    CHECK(s->u8_bytes == 1, "wrong byte count");
+    CHECK(s->codepoints == 1, "wrong codepoint count");
+    CHECK(bytes_eq(s->data, "/", 1), "wrong data");
     PASS();
 }
 
@@ -239,6 +254,7 @@ main(void)
     printf("=== r-string transform tests ===\n");
 
     test_plain_string();
+    test_header_string();
     test_bold_markup();
     test_adjacent_concat();
     test_macro_expanded_string();

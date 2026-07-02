@@ -1863,6 +1863,9 @@ static ncc_parse_tree_t *xform_kw_func(ncc_xform_ctx_t *ctx,
   return replacement;
 }
 
+static void rewrite_nested_kargs_calls(ncc_xform_ctx_t *ctx,
+                                       ncc_parse_tree_t *node);
+
 static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
                                     ncc_parse_tree_t *node) {
   // postfix_expression ::= postfix_expression "(" argument_expression_list? ")"
@@ -2256,11 +2259,32 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
   ncc_free(kw_func_kargs_text.data);
 
   if (replacement) {
+    rewrite_nested_kargs_calls(ctx, replacement);
     ctx->nodes_replaced++;
     return replacement;
   }
 
   return nullptr;
+}
+
+static void rewrite_nested_kargs_calls(ncc_xform_ctx_t *ctx,
+                                       ncc_parse_tree_t *node) {
+  if (!node || ncc_tree_is_leaf(node)) {
+    return;
+  }
+
+  size_t nc = ncc_tree_num_children(node);
+  for (size_t i = 0; i < nc; i++) {
+    ncc_parse_tree_t *child = ncc_tree_child(node, i);
+    if (!child) {
+      continue;
+    }
+    rewrite_nested_kargs_calls(ctx, child);
+    ncc_parse_tree_t *new_child = xform_call(ctx, child);
+    if (new_child != nullptr && new_child != child) {
+      ncc_tree_set_child(node, i, new_child);
+    }
+  }
 }
 
 // ============================================================================

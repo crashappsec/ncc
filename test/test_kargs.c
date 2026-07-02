@@ -30,6 +30,14 @@ int default_once(int x) _kargs { int bias = next_plain_default(); } {
     return x + bias;
 }
 
+int nested_inner(int x) _kargs { int bias = 0; } {
+    return x + bias;
+}
+
+int nested_outer(int x) _kargs { int suffix = 0; } {
+    return x + suffix;
+}
+
 int main(void) {
     int r1 = add(1, 2);                             // defaults: bias=0, verbose=false
     int r2 = add(1, 2, .bias = 10);                 // override bias
@@ -70,6 +78,14 @@ int main(void) {
     }
     if (plain_default_counter != 0) {
         return 9;
+    }
+
+    if (nested_outer(nested_inner(7)) != 7) {
+        return 10;
+    }
+
+    if (nested_outer(nested_inner(7, .bias = 2), .suffix = 3) != 12) {
+        return 11;
     }
 
     return 0;

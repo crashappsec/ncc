@@ -1538,6 +1538,33 @@ test('ncc_gc_typemap_variant_descriptor_emitted', test_runner,
   depends : ncc_exe,
 )
 
+test('ncc_gc_typemap_variant_arm_descriptor_emitted', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap_variant.c',
+          'n00b_gc_variant_arm_t']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_variant_arm_count', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap_variant.c',
+          '.arm_count=']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_variant_arm_ptr_offsets', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap_variant.c',
+          '.ptr_offset_count=1ULL,.ptr_offsets=']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 # The descriptor records the selector offset and, per alternative, the
 # element-relative pointer offsets that are live when that selector is active.
 test('ncc_gc_typemap_variant_selector_offset', test_runner,
