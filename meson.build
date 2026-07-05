@@ -463,6 +463,8 @@ ncc_compile_tests = {
   'constexpr':    ['compile_run',  test_dir / 'test_constexpr.c'],
   'kargs':        ['compile_run',  test_dir / 'test_kargs.c'],
   'kargs_vargs':  ['compile_run',  test_dir / 'test_kargs_vargs.c'],
+  'vargs_nested_call': ['compile_run',
+                        test_dir / 'test_vargs_nested_call.c'],
   'kargs_vargs_default_omitted': ['compile_run',
                                   test_dir / 'test_kargs_vargs_default_omitted.c'],
   'kargs_void_params': ['compile_run',
