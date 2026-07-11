@@ -5,6 +5,11 @@
 #include "lib/array.h"
 #include "ncc_runtime.h"
 
+// ncc emits GC scan-callback forward-decls (and the runtime's own array /
+// descriptor scan_cb fields) in terms of n00b_gc_map_t. In this ncc-flavored
+// mock it aliases ncc_gc_map_t so the emitted extern, the mock cb defs below,
+// and the ncc_array_t scan_cb field all agree without casts.
+typedef ncc_gc_map_t n00b_gc_map_t;
 typedef ncc_gc_scan_cb_t n00b_static_scan_cb_t;
 
 typedef enum n00b_static_identity_kind_t : uint8_t {
@@ -47,14 +52,14 @@ typedef struct {
 } n00b_static_object_desc_t;
 
 static void
-n00b_gc_scan_cb_struct_field(ncc_gc_map_t *map, void *range)
+n00b_gc_scan_cb_struct_field(n00b_gc_map_t *map, void *range)
 {
     (void)map;
     (void)range;
 }
 
 static void
-n00b_gc_scan_cb_struct_layout(ncc_gc_map_t *map, void *range)
+n00b_gc_scan_cb_struct_layout(n00b_gc_map_t *map, void *range)
 {
     (void)map;
     (void)range;

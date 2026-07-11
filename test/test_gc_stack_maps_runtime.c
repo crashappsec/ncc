@@ -1,22 +1,30 @@
 #pragma ncc off
+#include <stdint.h>
+
+// Mock runtime whose struct layouts and (void *) push/pop signatures match
+// ncc's type-name-free stack-map emission exactly (slot/map/frame layouts are
+// mirrored by the n00b-side codegen_abi_guard.c). The frame is prev/map/roots
+// (no `active`): pop is driven by the cleanup attribute, so push/pop always
+// pair and simple counters suffice.
 typedef struct {
-    unsigned long root_index;
-    unsigned long num_words;
+    uint32_t root_index;
+    uint32_t num_words;
 } n00b_gc_stack_slot_t;
 
 typedef struct {
-    unsigned long                 num_roots;
-    unsigned long                 num_slots;
-    const n00b_gc_stack_slot_t   *slots;
-    const char                   *function_name;
-    const char                   *file_name;
-    unsigned int                  line;
+    uint32_t    num_roots;
+    uint32_t    num_slots;
+    uint32_t    flags;
+    const void *slots;
+    const char *function_name;
+    const char *file_name;
+    uint32_t    line;
 } n00b_gc_stack_map_t;
 
-typedef struct {
-    const n00b_gc_stack_map_t *map;
-    void                    **roots;
-    int                       active;
+typedef struct n00b_gc_stack_frame_t {
+    struct n00b_gc_stack_frame_t *prev;
+    const n00b_gc_stack_map_t    *map;
+    void                        **roots;
 } n00b_gc_stack_frame_t;
 
 static int pushed;
@@ -24,14 +32,15 @@ static int popped;
 static int bad_stack_map;
 
 void
-n00b_gc_stack_push(n00b_gc_stack_frame_t *frame,
-                   const n00b_gc_stack_map_t *map,
-                   void **roots)
+n00b_gc_stack_push(void *frame_v, const void *map_v, void **roots)
 {
+    n00b_gc_stack_frame_t     *frame = frame_v;
+    const n00b_gc_stack_map_t *map   = map_v;
+
     pushed++;
-    frame->map = map;
+    frame->prev  = (void *)0;
+    frame->map   = map;
     frame->roots = roots;
-    frame->active = 1;
 
     if (!map || !roots || map->num_roots == 0
         || map->num_roots != map->num_slots || !map->slots
@@ -40,23 +49,20 @@ n00b_gc_stack_push(n00b_gc_stack_frame_t *frame,
         return;
     }
 
-    for (unsigned long i = 0; i < map->num_roots; i++) {
-        if (!roots[i] || map->slots[i].root_index != i
-            || map->slots[i].num_words == 0) {
+    const n00b_gc_stack_slot_t *slots = map->slots;
+    for (uint32_t i = 0; i < map->num_roots; i++) {
+        if (!roots[i] || slots[i].root_index != i
+            || slots[i].num_words == 0) {
             bad_stack_map = 1;
         }
     }
 }
 
 void
-n00b_gc_stack_pop(n00b_gc_stack_frame_t *frame)
+n00b_gc_stack_pop(void *frame_v)
 {
+    (void)frame_v;
     popped++;
-    if (!frame || !frame->active) {
-        bad_stack_map = 1;
-        return;
-    }
-    frame->active = 0;
 }
 #pragma ncc on
 

@@ -1325,10 +1325,13 @@ test('ncc_gc_typemap_noscan_attribute_stripped', test_runner,
 # --- WP-001: [[n00b::transient]] field attribute --------------------------
 
 # A transient table descriptor type is emitted.
+# The transient LAYOUT descriptor is emitted. PR #42 made ncc emit this as a
+# type-name-free anonymous struct (was the named n00b_transient_layout_t), so
+# assert on the stable __ncc_trmap_lay_ variable + its field signature instead.
 test('ncc_transient_table_emitted', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_transient.c',
-          'n00b_transient_layout_t']
+          'field_count;const uint64_t*byte_offsets']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
   suite : 'ncc',
   depends : ncc_exe,
@@ -1442,10 +1445,18 @@ test('ncc_gc_typemap_no_legacy_static_assert', test_runner,
   depends : ncc_exe,
 )
 
+# With no static-object attribute to derive a segment from, ncc spells the
+# default GC-map section platform-correctly: Mach-O requires a __SEGMENT,__section
+# form (__DATA,n00b_gcmap), while ELF/PE take the bare name (n00b_gcmap).
+if host_machine.system() == 'darwin'
+  gcmap_default_section_attr = '[[gnu::section("__DATA,n00b_gcmap"), gnu::used]]'
+else
+  gcmap_default_section_attr = '[[gnu::section("n00b_gcmap"), gnu::used]]'
+endif
 test('ncc_gc_typemap_section_attr_c23', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap.c',
-          '[[gnu::section("n00b_gcmap"), gnu::used]]']
+          gcmap_default_section_attr]
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
   suite : 'ncc',
   depends : ncc_exe,
@@ -1534,7 +1545,7 @@ test('ncc_gc_typemap_union_mixed_skipped', test_runner,
 test('ncc_gc_typemap_variant_descriptor_emitted', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap_variant.c',
-          'n00b_gc_variant_field_t']
+          '__ncc_gcmap_var_']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
   suite : 'ncc',
   depends : ncc_exe,
@@ -1543,7 +1554,7 @@ test('ncc_gc_typemap_variant_descriptor_emitted', test_runner,
 test('ncc_gc_typemap_variant_arm_descriptor_emitted', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap_variant.c',
-          'n00b_gc_variant_arm_t']
+          '__ncc_gcvararms_']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
   suite : 'ncc',
   depends : ncc_exe,
@@ -1590,13 +1601,13 @@ test('ncc_gc_typemap_variant_value_ptr_offset', test_runner,
 )
 
 # A by-value AGGREGATE alternative is described precisely: an arm table
-# (n00b_gc_variant_arm_t) carries the pointer offsets of the struct's fields,
-# addressed through value.<field>.<member>. (Previously this fell back to a
-# conservative scan.)
+# (the anonymous __ncc_gcvararms_ struct) carries the pointer offsets of the
+# struct's fields, addressed through value.<field>.<member>. (Previously this
+# fell back to a conservative scan.)
 test('ncc_gc_typemap_variant_aggregate_arm', test_runner,
   args : [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap_variant.c',
-          'n00b_gc_variant_arm_t']
+          '__ncc_gcvararms_']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
   suite : 'ncc',
   depends : ncc_exe,
@@ -2819,6 +2830,17 @@ ncc_error_contains_tests = {
   'err_function_contract_declaration': [
     test_dir / 'err_function_contract_declaration.c',
     'parse FAILED',
+  ],
+  # The parse-failure diagnostic reports the furthest stuck token's real
+  # file:line:column (resolves into headers), not just a token dump.
+  'err_parse_got_stuck': [
+    test_dir / 'err_parse_got_stuck.c',
+    'err_parse_got_stuck.c:7:11',
+  ],
+  # ... and names unexpected end-of-input distinctly.
+  'err_parse_eof': [
+    test_dir / 'err_parse_eof.c',
+    'parse got stuck at end of input',
   ],
   'err_function_contract_once': [
     test_dir / 'err_function_contract_once.c',
