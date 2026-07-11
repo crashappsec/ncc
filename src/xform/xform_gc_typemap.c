@@ -302,20 +302,48 @@ member_is_runtime_infra(bool runtime_scan_shape, const char *name,
     return result;
 }
 
+// A pointer's byte offset within the element. `prefix` is an additive byte
+// offset accumulated when the walk crossed an _Atomic(struct) boundary (where a
+// single __builtin_offsetof through the atomic member is illegal); it is empty
+// for the common non-atomic case, giving byte-identical output to before.
 static char *
-offset_expr(const char *elem_type, const char *path)
+offset_expr(const char *elem_type, const char *path, const char *prefix)
 {
+    if (prefix && *prefix) {
+        return ncc_layout_format_cstr(
+            "((%s+__builtin_offsetof(%s,%s))/sizeof(void*))",
+            prefix, elem_type, path);
+    }
     return ncc_layout_format_cstr("(__builtin_offsetof(%s,%s)/sizeof(void*))",
                                   elem_type, path);
 }
 
 static char *
-offset_assert(const char *elem_type, const char *path)
+offset_assert(const char *elem_type, const char *path, const char *prefix)
 {
+    if (prefix && *prefix) {
+        return ncc_layout_format_cstr(
+            "static_assert(((%s+__builtin_offsetof(%s,%s))%%sizeof(void*))==0,"
+            "\"n00b gc-map: pointer field must be word-aligned\");",
+            prefix, elem_type, path);
+    }
     return ncc_layout_format_cstr(
         "static_assert((__builtin_offsetof(%s,%s)%%sizeof(void*))==0,"
         "\"n00b gc-map: pointer field must be word-aligned\");",
         elem_type, path);
+}
+
+// Extend an atomic-boundary byte-offset prefix with the offsetof of the atomic
+// aggregate member itself, so pointers inside it are addressed as
+// (offsetof(container, atomic_field) + offsetof(underlying_type, inner_field)).
+static char *
+combine_prefix(const char *prefix, const char *elem_type, const char *path)
+{
+    if (prefix && *prefix) {
+        return ncc_layout_format_cstr("%s+__builtin_offsetof(%s,%s)",
+                                      prefix, elem_type, path);
+    }
+    return ncc_layout_format_cstr("__builtin_offsetof(%s,%s)", elem_type, path);
 }
 
 // ---------------------------------------------------------------------------
@@ -614,12 +642,13 @@ variant_value_union(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *spec)
 // Forward declarations: walk_variant (below) drives these, which are defined
 // later in the file.
 static void
-emit_pointer(const char *elem_type, const char *path, ncc_buffer_t *offs,
-             ncc_buffer_t *asserts, int *count);
+emit_pointer(const char *elem_type, const char *path, const char *prefix,
+             ncc_buffer_t *offs, ncc_buffer_t *asserts, int *count);
 static void
 gc_walk(ncc_xform_ctx_t *ctx, const char *elem_type, ncc_parse_tree_t *spec,
-        const char *base, ncc_buffer_t *offs, ncc_buffer_t *asserts,
-        int *count, variant_acc_t *vacc, bool *ok, int depth);
+        const char *base, const char *prefix, ncc_buffer_t *offs,
+        ncc_buffer_t *asserts, int *count, variant_acc_t *vacc, bool *ok,
+        int depth);
 
 // One alternative's contribution to a variant descriptor: its selector
 // typehash and the element-relative pointer word offsets that are live when the
@@ -696,7 +725,7 @@ walk_variant(ncc_xform_ctx_t *ctx, const char *elem_type,
 
         if (cls == ALT_PTR) {
             // The value word itself is the heap pointer.
-            emit_pointer(elem_type, armbase, aoffs, vacc->asserts, &acount);
+            emit_pointer(elem_type, armbase, "", aoffs, vacc->asserts, &acount);
         }
         else { // ALT_AGGREGATE: walk the by-value struct's pointer fields.
             ncc_parse_tree_t *aspec = ncc_layout_aggregate_spec_from_specs(
@@ -715,8 +744,8 @@ walk_variant(ncc_xform_ctx_t *ctx, const char *elem_type,
             };
             bool aok = true;
             if (aspec) {
-                gc_walk(ctx, elem_type, aspec, armbase, aoffs, vacc->asserts,
-                        &acount, &inner, &aok, depth + 1);
+                gc_walk(ctx, elem_type, aspec, armbase, "", aoffs,
+                        vacc->asserts, &acount, &inner, &aok, depth + 1);
             }
             bool inner_variant = inner.count != 0;
             ncc_free(inner.arrays->data);
@@ -782,8 +811,8 @@ walk_variant(ncc_xform_ctx_t *ctx, const char *elem_type,
     qsort(arms, narms, sizeof(*arms), cmp_variant_arm);
 
     char *sel_path = path_join(base, "selector");
-    char *sel_as   = offset_assert(elem_type, sel_path);
-    char *sel_off  = offset_expr(elem_type, sel_path);
+    char *sel_as   = offset_assert(elem_type, sel_path, "");
+    char *sel_off  = offset_expr(elem_type, sel_path, "");
     int   k        = vacc->count;
 
     ncc_buffer_puts(vacc->asserts, sel_as);
@@ -847,6 +876,7 @@ gc_walk(ncc_xform_ctx_t *ctx,
         const char      *elem_type,
         ncc_parse_tree_t *spec,
         const char      *base,
+        const char      *prefix,
         ncc_buffer_t    *offs,
         ncc_buffer_t    *asserts,
         int             *count,
@@ -855,11 +885,11 @@ gc_walk(ncc_xform_ctx_t *ctx,
         int              depth);
 
 static void
-emit_pointer(const char *elem_type, const char *path,
+emit_pointer(const char *elem_type, const char *path, const char *prefix,
              ncc_buffer_t *offs, ncc_buffer_t *asserts, int *count)
 {
-    char *oe = offset_expr(elem_type, path);
-    char *as = offset_assert(elem_type, path);
+    char *oe = offset_expr(elem_type, path, prefix);
+    char *as = offset_assert(elem_type, path, prefix);
     if (*count > 0) {
         ncc_buffer_puts(offs, ",");
     }
@@ -900,9 +930,9 @@ member_decl_has_prefix_noscan(ncc_parse_tree_t *member)
 static void
 walk_struct_member(ncc_xform_ctx_t *ctx, const char *elem_type,
                    ncc_parse_tree_t *member, const char *base,
-                   bool runtime_scan_shape, ncc_buffer_t *offs,
-                   ncc_buffer_t *asserts, int *count, variant_acc_t *vacc,
-                   bool *ok, int depth)
+                   const char *prefix, bool runtime_scan_shape,
+                   ncc_buffer_t *offs, ncc_buffer_t *asserts, int *count,
+                   variant_acc_t *vacc, bool *ok, int depth)
 {
     ncc_parse_tree_t *member_specs = ncc_xform_find_child_nt(
         member, "specifier_qualifier_list");
@@ -931,8 +961,18 @@ walk_struct_member(ncc_xform_ctx_t *ctx, const char *elem_type,
                                                                 member_specs);
             char *nbase = field ? path_join(base, field)
                                 : ncc_layout_copy_cstr(base);
-            gc_walk(ctx, elem_type, nspec, nbase, offs, asserts, count, vacc,
-                    ok, depth + 1);
+            ncc_layout_aggregate_type_info_t *ainfo =
+                ncc_layout_aggregate_info_from_specs(ctx, member_specs);
+            if (ainfo && ainfo->is_atomic && ainfo->offset_type) {
+                char *nprefix = combine_prefix(prefix, elem_type, nbase);
+                gc_walk(ctx, ainfo->offset_type, nspec, "", nprefix,
+                        offs, asserts, count, vacc, ok, depth + 1);
+                ncc_free(nprefix);
+            }
+            else {
+                gc_walk(ctx, elem_type, nspec, nbase, prefix, offs, asserts,
+                        count, vacc, ok, depth + 1);
+            }
             ncc_free(nbase);
             if (field) {
                 ncc_free(field);
@@ -970,7 +1010,7 @@ walk_struct_member(ncc_xform_ctx_t *ctx, const char *elem_type,
                     && !member_is_runtime_infra(runtime_scan_shape, field,
                                                 member_specs)) {
                     char *path = path_join(base, field);
-                    emit_pointer(elem_type, path, offs, asserts, count);
+                    emit_pointer(elem_type, path, prefix, offs, asserts, count);
                     ncc_free(path);
                 }
                 ncc_free(field);
@@ -1029,7 +1069,7 @@ walk_struct_member(ncc_xform_ctx_t *ctx, const char *elem_type,
         }
         else if (ptr > 0) {
             if (!is_fnptr) {
-                emit_pointer(elem_type, path, offs, asserts, count);
+                emit_pointer(elem_type, path, prefix, offs, asserts, count);
             }
         }
         else {
@@ -1042,8 +1082,23 @@ walk_struct_member(ncc_xform_ctx_t *ctx, const char *elem_type,
             ncc_parse_tree_t *nspec = ncc_layout_aggregate_spec_from_specs(
                 ctx, member_specs);
             if (nspec) {
-                gc_walk(ctx, elem_type, nspec, path, offs, asserts, count,
-                        vacc, ok, depth + 1);
+                ncc_layout_aggregate_type_info_t *ainfo =
+                    ncc_layout_aggregate_info_from_specs(ctx, member_specs);
+                if (ainfo && ainfo->is_atomic && ainfo->offset_type) {
+                    // Crossing an _Atomic(struct) boundary (possibly via a
+                    // typedef like n00b_pinref_t): offsetof cannot descend
+                    // through the atomic member, so re-base the walk on the
+                    // underlying non-atomic type and fold this member's offset
+                    // into the additive prefix.
+                    char *nprefix = combine_prefix(prefix, elem_type, path);
+                    gc_walk(ctx, ainfo->offset_type, nspec, "", nprefix,
+                            offs, asserts, count, vacc, ok, depth + 1);
+                    ncc_free(nprefix);
+                }
+                else {
+                    gc_walk(ctx, elem_type, nspec, path, prefix, offs, asserts,
+                            count, vacc, ok, depth + 1);
+                }
             }
             else if (ncc_layout_pointer_depth_for_specs(ctx, member_specs) > 0) {
                 // No inline aggregate, but the SPECS still make this a pointer:
@@ -1056,7 +1111,7 @@ walk_struct_member(ncc_xform_ctx_t *ctx, const char *elem_type,
                     ncc_free(tdname);
                 }
                 if (!is_fnptr) {
-                    emit_pointer(elem_type, path, offs, asserts, count);
+                    emit_pointer(elem_type, path, prefix, offs, asserts, count);
                 }
                 // function pointer -> excluded (code, not a heap pointer)
             }
@@ -1078,8 +1133,9 @@ walk_struct_member(ncc_xform_ctx_t *ctx, const char *elem_type,
 // all-scalar union has no pointer words.
 static void
 walk_union(ncc_xform_ctx_t *ctx, const char *elem_type,
-           ncc_parse_tree_t *spec, const char *base, bool runtime_scan_shape,
-           ncc_buffer_t *offs, ncc_buffer_t *asserts, int *count, bool *ok)
+           ncc_parse_tree_t *spec, const char *base, const char *prefix,
+           bool runtime_scan_shape, ncc_buffer_t *offs, ncc_buffer_t *asserts,
+           int *count, bool *ok)
 {
     ncc_parse_tree_t *members = ncc_xform_find_child_nt(
         spec, "member_declaration_list");
@@ -1249,7 +1305,7 @@ walk_union(ncc_xform_ctx_t *ctx, const char *elem_type,
         *ok = false; // can't statically describe this union
     }
     else if (first_ptr && !any_scalar) {
-        emit_pointer(elem_type, first_ptr, offs, asserts, count); // all-pointer
+        emit_pointer(elem_type, first_ptr, prefix, offs, asserts, count); // all-pointer
     }
     // else: all-scalar union -> nothing.
 
@@ -1266,8 +1322,9 @@ walk_union(ncc_xform_ctx_t *ctx, const char *elem_type,
 
 static void
 gc_walk(ncc_xform_ctx_t *ctx, const char *elem_type, ncc_parse_tree_t *spec,
-        const char *base, ncc_buffer_t *offs, ncc_buffer_t *asserts,
-        int *count, variant_acc_t *vacc, bool *ok, int depth)
+        const char *base, const char *prefix, ncc_buffer_t *offs,
+        ncc_buffer_t *asserts, int *count, variant_acc_t *vacc, bool *ok,
+        int depth)
 {
     if (depth > 64 || *count > NCC_GCMAP_MAX_OFFSETS) {
         *ok = false;
@@ -1293,8 +1350,8 @@ gc_walk(ncc_xform_ctx_t *ctx, const char *elem_type, ncc_parse_tree_t *spec,
     bool runtime_scan_shape = aggregate_has_runtime_scan_shape(ctx, spec);
 
     if (ncc_layout_struct_or_union_is_union(spec)) {
-        walk_union(ctx, elem_type, spec, base, runtime_scan_shape, offs, asserts,
-                   count, ok);
+        walk_union(ctx, elem_type, spec, base, prefix, runtime_scan_shape, offs,
+                   asserts, count, ok);
         return;
     }
 
@@ -1308,7 +1365,7 @@ gc_walk(ncc_xform_ctx_t *ctx, const char *elem_type, ncc_parse_tree_t *spec,
     ncc_layout_parse_tree_list_t mlist = {0};
     ncc_layout_collect_nt_children(members, "member_declaration", &mlist);
     for (size_t i = 0; i < mlist.len && *ok; i++) {
-        walk_struct_member(ctx, elem_type, mlist.data[i], base,
+        walk_struct_member(ctx, elem_type, mlist.data[i], base, prefix,
                            runtime_scan_shape, offs, asserts, count, vacc, ok,
                            depth);
     }
@@ -1699,7 +1756,7 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
         int           tr_count = 0;
 
         if (!scalar_no_ptr) {
-            gc_walk(ctx, records[i].elem_type, spec, "", offs, asserts,
+            gc_walk(ctx, records[i].elem_type, spec, "", "", offs, asserts,
                     &count, &vacc, &ok, 0);
             tr_walk(ctx, records[i].elem_type, spec, "", tr_offs, tr_sizes,
                     &tr_count, 0);
