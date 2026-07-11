@@ -1,22 +1,28 @@
+#include <stdint.h>
+
+// Mock runtime whose struct layouts and (void *) push/pop signatures match
+// ncc's type-name-free stack-map emission exactly (mirrored by the n00b-side
+// codegen_abi_guard.c). The frame is prev/map/roots (no `active`); push/pop
+// maintain the top_frame chain via `prev`.
 typedef struct {
-    unsigned long root_index;
-    unsigned long num_words;
+    uint32_t root_index;
+    uint32_t num_words;
 } n00b_gc_stack_slot_t;
 
 typedef struct {
-    unsigned long               num_roots;
-    unsigned long               num_slots;
-    const n00b_gc_stack_slot_t *slots;
-    const char                 *function_name;
-    const char                 *file_name;
-    unsigned int                line;
+    uint32_t    num_roots;
+    uint32_t    num_slots;
+    uint32_t    flags;
+    const void *slots;
+    const char *function_name;
+    const char *file_name;
+    uint32_t    line;
 } n00b_gc_stack_map_t;
 
 typedef struct n00b_gc_stack_frame_t {
-    const n00b_gc_stack_map_t  *map;
-    void                      **roots;
     struct n00b_gc_stack_frame_t *prev;
-    int                         active;
+    const n00b_gc_stack_map_t    *map;
+    void                        **roots;
 } n00b_gc_stack_frame_t;
 
 static n00b_gc_stack_frame_t *top_frame;
@@ -60,16 +66,16 @@ struct gc_stack_maps_exact_outer {
 };
 
 void
-n00b_gc_stack_push(n00b_gc_stack_frame_t *frame,
-                   const n00b_gc_stack_map_t *map,
-                   void **roots)
+n00b_gc_stack_push(void *frame_v, const void *map_v, void **roots)
 {
+    n00b_gc_stack_frame_t     *frame = frame_v;
+    const n00b_gc_stack_map_t *map   = map_v;
+
     pushed++;
-    frame->map = map;
+    frame->prev  = top_frame;
+    frame->map   = map;
     frame->roots = roots;
-    frame->prev = top_frame;
-    frame->active = 1;
-    top_frame = frame;
+    top_frame    = frame;
     current_depth++;
 
     if (!map || !roots || map->num_roots == 0
@@ -79,16 +85,17 @@ n00b_gc_stack_push(n00b_gc_stack_frame_t *frame,
 }
 
 void
-n00b_gc_stack_pop(n00b_gc_stack_frame_t *frame)
+n00b_gc_stack_pop(void *frame_v)
 {
+    n00b_gc_stack_frame_t *frame = frame_v;
+
     popped++;
-    if (!frame || !frame->active || top_frame != frame) {
+    if (!frame || top_frame != frame) {
         bad_stack_map = 1;
         return;
     }
 
     top_frame = frame->prev;
-    frame->active = 0;
     current_depth--;
 }
 
@@ -102,10 +109,11 @@ int
 n00b_gc_stack_test_contains_expected(void)
 {
     for (n00b_gc_stack_frame_t *frame = top_frame; frame; frame = frame->prev) {
-        for (unsigned long i = 0; i < frame->map->num_slots; i++) {
-            const n00b_gc_stack_slot_t *slot = &frame->map->slots[i];
+        const n00b_gc_stack_slot_t *slots = frame->map->slots;
+        for (uint32_t i = 0; i < frame->map->num_slots; i++) {
+            const n00b_gc_stack_slot_t *slot = &slots[i];
             void **words = (void **)frame->roots[slot->root_index];
-            for (unsigned long w = 0; w < slot->num_words; w++) {
+            for (uint32_t w = 0; w < slot->num_words; w++) {
                 if (words[w] == expected) {
                     return 1;
                 }

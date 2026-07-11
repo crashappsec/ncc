@@ -11,42 +11,45 @@
 // test fails at compile time.
 
 #pragma ncc off
+#include <stdint.h>
+
+// Minimal mock matching ncc's type-name-free stack-map emission: (void *)
+// push/pop signatures and prev/map/roots frame layout. This test only checks
+// that the emitted VLA num_words expression compiles cleanly, so the bodies
+// are no-ops.
 typedef struct {
-    unsigned long root_index;
-    unsigned long num_words;
+    uint32_t root_index;
+    uint32_t num_words;
 } n00b_gc_stack_slot_t;
 
 typedef struct {
-    unsigned long                 num_roots;
-    unsigned long                 num_slots;
-    const n00b_gc_stack_slot_t   *slots;
-    const char                   *function_name;
-    const char                   *file_name;
-    unsigned int                  line;
+    uint32_t    num_roots;
+    uint32_t    num_slots;
+    uint32_t    flags;
+    const void *slots;
+    const char *function_name;
+    const char *file_name;
+    uint32_t    line;
 } n00b_gc_stack_map_t;
 
-typedef struct {
-    const n00b_gc_stack_map_t *map;
-    void                    **roots;
-    int                       active;
+typedef struct n00b_gc_stack_frame_t {
+    struct n00b_gc_stack_frame_t *prev;
+    const n00b_gc_stack_map_t    *map;
+    void                        **roots;
 } n00b_gc_stack_frame_t;
 
 void
-n00b_gc_stack_push(n00b_gc_stack_frame_t *frame,
-                   const n00b_gc_stack_map_t *map,
-                   void **roots)
+n00b_gc_stack_push(void *frame, const void *map, void **roots)
 {
-    frame->map    = map;
-    frame->roots  = roots;
-    frame->active = 1;
+    (void)frame;
+    (void)map;
+    (void)roots;
 }
 
 void
-n00b_gc_stack_pop(n00b_gc_stack_frame_t *frame)
+n00b_gc_stack_pop(void *frame)
 {
-    if (frame) {
-        frame->active = 0;
-    }
+    (void)frame;
 }
 #pragma ncc on
 

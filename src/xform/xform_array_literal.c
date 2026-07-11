@@ -3767,7 +3767,9 @@ array_scan_plan_init(array_scan_plan_t *plan, ncc_xform_ctx_t *ctx,
                     "static_assert((sizeof(%s)%%sizeof(void*))==0,"
                     "\"array literal aggregate element must be word-sized\");"
                     "static const uint64_t %s_offsets[]={%s};"
-                    "static n00b_gc_struct_layout_t %s={.stride=%s,"
+                    "static struct{uint64_t stride;uint64_t count;"
+                    "uint64_t offset_count;const uint64_t*offsets;"
+                    "uint64_t variant_count;const void*variants;} %s={.stride=%s,"
                     ".count=%d,.offset_count=%d,.offsets=%s_offsets};",
                     type->elem_type, plan->shape_name, offset_values,
                     plan->shape_name, plan->stride_words, count,

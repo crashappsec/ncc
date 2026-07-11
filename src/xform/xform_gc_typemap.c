@@ -795,7 +795,8 @@ walk_variant(ncc_xform_ctx_t *ctx, const char *elem_type,
     }
     ncc_buffer_printf(
         vacc->arrays,
-        "static const n00b_gc_variant_arm_t __ncc_gcvararms_%zu_%d[]={",
+        "static const struct{uint64_t selector;uint64_t ptr_offset_count;"
+        "const uint64_t*ptr_offsets;} __ncc_gcvararms_%zu_%d[]={",
         vacc->rec, k);
     for (size_t a = 0; a < narms; a++) {
         ncc_buffer_printf(vacc->arrays,
@@ -811,7 +812,7 @@ walk_variant(ncc_xform_ctx_t *ctx, const char *elem_type,
     }
     ncc_buffer_printf(vacc->inits,
                       "{.selector_offset=%s,.arm_count=%zuULL,"
-                      ".arms=__ncc_gcvararms_%zu_%d}",
+                      ".arms=(const void*)__ncc_gcvararms_%zu_%d}",
                       sel_off, narms, vacc->rec, k);
     vacc->count++;
 
@@ -1742,7 +1743,11 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
                 n_emitted++;
             }
             else {
-                // Typed n00b_gcmap path: per-variant arrays + layout + entry.
+                // Type-name-free n00b_gcmap path: per-variant arrays + layout +
+                // entry emitted as anonymous structs whose layout matches
+                // n00b_gc_variant_arm_t/_field_t/_struct_layout_t/
+                // _type_map_entry_t/_index_entry_t exactly (cross-type pointers
+                // spelled const void*; verified by codegen_abi_guard.c).
                 ncc_buffer_printf(out, "%s", var_arrays);
                 if (count > 0) {
                     ncc_buffer_printf(
@@ -1753,7 +1758,8 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
                 if (vacc.count > 0) {
                     ncc_buffer_printf(
                         out,
-                        "static const n00b_gc_variant_field_t "
+                        "static const struct{uint64_t selector_offset;"
+                        "uint64_t arm_count;const void*arms;} "
                         "__ncc_gcmap_var_%zu[]={%s};",
                         i, var_inits);
                 }
@@ -1765,20 +1771,25 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
                                     : ncc_layout_copy_cstr("nullptr");
                 ncc_buffer_printf(
                     out,
-                    "static const n00b_gc_struct_layout_t __ncc_gcmap_lay_%zu="
+                    "static const struct{uint64_t stride;uint64_t count;"
+                    "uint64_t offset_count;const uint64_t*offsets;"
+                    "uint64_t variant_count;const void*variants;} "
+                    "__ncc_gcmap_lay_%zu="
                     "{.stride=(sizeof(%s)/sizeof(void*)),.count=1,.offset_count=%d,"
-                    ".offsets=%s,.variant_count=%dULL,.variants=%s};",
+                    ".offsets=%s,.variant_count=%dULL,.variants=(const void*)%s};",
                     i, records[i].elem_type, count, offsets_expr, vacc.count,
                     variants_expr);
                 ncc_buffer_printf(
                     out,
-                    "%s static const n00b_gc_type_map_entry_t "
+                    "%s static const struct{uint64_t type_hash;"
+                    "const void*layout;} "
                     "__ncc_gcmap_ent_%zu={.type_hash=%lluULL,.layout="
-                    "&__ncc_gcmap_lay_%zu};",
+                    "(const void*)&__ncc_gcmap_lay_%zu};",
                     gcmap_attr, i, (unsigned long long)records[i].hash, i);
                 ncc_buffer_printf(
                     out,
-                    "%s static const n00b_gc_type_map_index_entry_t "
+                    "%s static const struct{uint64_t type_hash;"
+                    "uint64_t entry_index;} "
                     "__ncc_gcidx_ent_%zu={.type_hash=0ULL,.entry_index=%zuULL};",
                     gcidx_attr, i, i);
                 n_emitted++;
