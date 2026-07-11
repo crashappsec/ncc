@@ -531,7 +531,7 @@ helper_source(ncc_sym_entry_t *entry, const char *name, const char *init_expr)
         if (patches.len > 0) {
             ncc_buffer_printf(buf,
                 "    __n00b_internal_type_erased_store_t *__ncc_patch_store =\n"
-                "        (__n00b_internal_type_erased_store_t *)%s.store;\n",
+                "        (__n00b_internal_type_erased_store_t *)*(void *const *)&%s.store;\n",
                 name);
             for (size_t i = 0; i < patches.len; i++) {
                 ncc_buffer_printf(buf,

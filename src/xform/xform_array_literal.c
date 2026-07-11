@@ -4996,7 +4996,7 @@ build_static_init_dict_maker(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *site,
                       ".buckets=__ncc_buckets,"
                       ".keys=(void **)__ncc_keys,"
                       ".values=(void **)__ncc_values};"
-                      "(%s){.store=(void *)__ncc_store,"
+                      "%s __ncc_dict=(%s){"
                       ".fn=nullptr,.allocator=nullptr,"
                       ".insertion_epoch=0,.wait_ct=0,"
                       ".length=(int64_t)%zuULL,"
@@ -5006,9 +5006,11 @@ build_static_init_dict_maker(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *site,
                       ".scan_cb=nullptr,.scan_user=nullptr,"
                       ".key_scan_kind=%s,"
                       ".value_scan_kind=%s,"
-                      ".key_tid=%s,.value_tid=%s};})",
+                      ".key_tid=%s,.value_tid=%s};"
+                      "*(void **)&__ncc_dict.store=(void *)__ncc_store;"
+                      "__ncc_dict;})",
                       (unsigned int)(cap - 1), threshold, pair_count,
-                      type->object_type, pair_count, skip_obj_hash,
+                      type->object_type, type->object_type, pair_count, skip_obj_hash,
                       key_scan_kind, value_scan_kind,
                       key_type_hash, value_type_hash);
     ncc_free(key_ptr_type);
