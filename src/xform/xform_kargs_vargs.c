@@ -1936,8 +1936,14 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
   // If there are no keyword arguments, check whether the call has already
   // been transformed.  A transformed call has exactly the expected number
   // of positional args plus one synthesized arg per vargs/kargs parameter.
-  // Vargs-only functions are never skipped here because excess positional
-  // args need to be bundled into a vargs compound literal.
+  // Every case needs an idempotency check: a vargs call nested as an
+  // argument of another vargs/kargs call is transformed once by
+  // rewrite_nested_kargs_calls (inside the outer call's re-parsed
+  // replacement) and then visited AGAIN by the engine's traversal of the
+  // replacement subtree.  Without the check the second visit bundles the
+  // synthesized `&(n00b_vargs_t){...}` literal itself as a variadic
+  // argument, and the callee formats the inner vargs struct instead of the
+  // real argument (the crayon `<bad-string-arg>` login-banner regression).
   if (n_keyword == 0 && meta) {
     bool already_done = false;
 
@@ -1969,8 +1975,21 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
           already_done = true;
         }
       }
+    } else if (meta->va && !meta->kw) {
+      // vargs-only: expected = positional + 1 synthesized vargs literal.
+      // Count alone is not enough (`log(fmt, a)` matches when fmt is the
+      // only fixed positional parameter), so require the synthesized
+      // compound-literal shape in the vargs slot — the same test the
+      // vargs+kargs case uses.
+      int expected = meta->va->num_positional + 1;
+      if (n_positional == expected) {
+        ncc_parse_tree_t *vargs_arg =
+            nth_positional_arg(args, arg_count, expected);
+        if (is_ncc_vargs_literal(ctx, vargs_arg)) {
+          already_done = true;
+        }
+      }
     }
-    // vargs-only: never skip — excess args need bundling.
 
     if (already_done) {
       for (int i = 0; i < arg_count; i++) {
