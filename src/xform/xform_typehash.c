@@ -16,7 +16,7 @@
 // Transform callback
 // ============================================================================
 
-static ncc_parse_tree_t *
+ncc_parse_tree_t *
 xform_typehash(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *node)
 {
     // primary_expression has many alternatives. The typehash one is:

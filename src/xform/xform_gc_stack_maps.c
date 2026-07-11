@@ -1734,10 +1734,23 @@ static char *
 field_address_expr(const char *field_expr, const char *atomic_base_expr,
                    const char *atomic_type, const char *atomic_field_path)
 {
-    if (atomic_base_expr && atomic_type && atomic_field_path
-        && *atomic_field_path) {
-        return format_cstr("((char *)&%s + __builtin_offsetof(%s, %s))",
-                           atomic_base_expr, atomic_type, atomic_field_path);
+    if (atomic_base_expr && atomic_field_path && *atomic_field_path) {
+        if (atomic_type) {
+            // Nameable atomic aggregate (incl. the element type of an atomic
+            // array member, where typeof_unqual would yield an array, not a
+            // struct): offsetof against the type directly.
+            return format_cstr("((char *)&%s + __builtin_offsetof(%s, %s))",
+                               atomic_base_expr, atomic_type,
+                               atomic_field_path);
+        }
+        // Anonymous atomic aggregate member (e.g. a n00b_pinref's
+        // `_Atomic(struct{...})`): it has no nameable type for offsetof.
+        // typeof_unqual on the member expression names the type inline and
+        // strips the _Atomic qualifier that offsetof rejects, while the field
+        // stays a single identifier as the grammar requires.
+        return format_cstr(
+            "((char *)&%s + __builtin_offsetof(typeof_unqual(%s), %s))",
+            atomic_base_expr, atomic_base_expr, atomic_field_path);
     }
 
     return format_cstr("&%s", field_expr);
@@ -1772,7 +1785,8 @@ atomic_child_context_for_field(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *specs,
                                const char *parent_type,
                                const char *parent_path,
                                const char *field_expr,
-                               const char *field_path)
+                               const char *field_path,
+                               bool base_is_array)
 {
     atomic_child_context_t result = {
         .base_expr  = parent_base_expr,
@@ -1783,7 +1797,12 @@ atomic_child_context_for_field(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *specs,
 
     if (result.owned_type) {
         result.base_expr = field_expr;
-        result.type      = result.owned_type;
+        // A non-array atomic aggregate member threads a null type so the emit
+        // uses typeof_unqual(base), which names an anonymous _Atomic(struct)
+        // (e.g. n00b_pinref) inline and strips the _Atomic. An atomic ARRAY
+        // member keeps its nameable element type, since typeof_unqual of an
+        // array is not a struct.
+        result.type      = base_is_array ? result.owned_type : nullptr;
         result.path      = "";
     }
     else if (parent_base_expr) {
@@ -2136,7 +2155,7 @@ expand_member_declarator(ncc_xform_ctx_t *ctx, const char *function,
         if (nested) {
             atomic_child_context_t child = atomic_child_context_for_field(
                 ctx, member_specs, nested_info, atomic_base_expr, atomic_type,
-                atomic_path, field_expr, field_path);
+                atomic_path, field_expr, field_path, is_array);
 
             if (is_array) {
                 roots += expand_aggregate_array(ctx, function, root_name,
@@ -2235,7 +2254,7 @@ expand_member_declaration(ncc_xform_ctx_t *ctx, const char *function,
         char *field_path = append_offset_field(atomic_path, field_name);
         atomic_child_context_t child = atomic_child_context_for_field(
             ctx, member_specs, anonymous_info, atomic_base_expr, atomic_type,
-            atomic_path, field_expr, field_path);
+            atomic_path, field_expr, field_path, false);
 
         size_t roots = expand_aggregate_fields(ctx, function, root_name,
                                                field_expr, anonymous, kind,
