@@ -3058,6 +3058,41 @@ static char *lower_list_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                                 bool readonly, bool pointer_target,
                                 bool static_init_target);
 
+// HACK (expedience): xform_typehash is normally file-local to
+// xform_typehash.c and applied post-order to primary_expression nodes.  We
+// borrow it here to lower a typehash(T) dict-literal *key* in place; see the
+// long comment at its call site in lower_dict_literal for why and what the
+// proper fix is.
+extern ncc_parse_tree_t *xform_typehash(ncc_xform_ctx_t  *ctx,
+                                        ncc_parse_tree_t *node);
+
+// HACK (expedience): find and lower the first typehash(T) node in `node`'s
+// subtree, returning the lowered (integer-literal) replacement, or nullptr if
+// the subtree contains no typehash.  Used to resolve typehash-valued dict-
+// literal keys during pre-order dict lowering (see call site).
+static ncc_parse_tree_t *
+lower_first_typehash(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *node)
+{
+    if (!node) {
+        return nullptr;
+    }
+
+    ncc_parse_tree_t *lowered = xform_typehash(ctx, node);
+    if (lowered) {
+        return lowered;
+    }
+
+    size_t nch = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nch; i++) {
+        ncc_parse_tree_t *child = lower_first_typehash(ctx, ncc_tree_child(node, i));
+        if (child) {
+            return child;
+        }
+    }
+
+    return nullptr;
+}
+
 // WP-011 Phase 3c.i: full scalar/enum-keyed dict literal lowering and
 // a partial-stub branch for pointer-keyed dicts (Phase 3c.ii).
 // `dict_type_info_t` is defined near the top of this file alongside
@@ -5382,7 +5417,25 @@ lower_dict_literal(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
             key_expr = buf_expr;
         }
         else {
-            key_expr = node_text(key_init);
+            // HACK (expedience): this dict lowering runs PRE-order because the
+            // target-type detection above needs the raw `n00b_dict_t(K, V)`
+            // spelling of the declaration type (post-order would have already
+            // lowered it to an instantiated struct, which the detection does
+            // not recognize).  But pre-order means a typehash(T) key has NOT
+            // yet been lowered to an integer literal by xform_typehash (which
+            // runs post-order on primary_expression during the child walk), so
+            // parse_scalar_key_to_bytes would reject it.  Lower any typehash in
+            // the key subtree in place here so the scalar-key parser sees a
+            // literal.
+            //   PROPER FIX: split this pass so the two concerns get their
+            //   natural traversal order — do target-type detection in a
+            //   pre-order pass (raw type available) and key/value lowering in a
+            //   post-order pass (children, incl. typehash, already lowered); or
+            //   teach the dict/list target-type check to recognize the
+            //   instantiated (lowered) dict-generic struct as a valid target,
+            //   which would let the whole xform be post-order.
+            ncc_parse_tree_t *key_lowered = lower_first_typehash(ctx, key_init);
+            key_expr = node_text(key_lowered ? key_lowered : key_init);
             unsigned char key_bytes[16];
             if (!parse_scalar_key_to_bytes(key_expr, ksz, key_bytes)) {
                 ncc_free(key_expr);
