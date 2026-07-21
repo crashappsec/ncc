@@ -238,6 +238,7 @@ test_emit_shape_and_compile(void)
     assert_not_contains(ct_source, "extern int main");
     assert_not_contains(ct_source, "main(argc, argv)");
     assert_not_contains(ct_source, "n00b_shutdown_simple();");
+    compile_generated_source(ct_source);
 
     const char *degrade_source =
         ncc_crt_emit_entry(&opts, NCC_CRT_VARIANT_DEGRADE);
@@ -464,7 +465,6 @@ test_emit_shape_and_compile(void)
     assert(ncc_crt_emit_entry(&opts, NCC_CRT_VARIANT_DEGRADE) == nullptr);
 
     opts.has_c = false;
-    compile_generated_source(ct_source);
 }
 
 int

@@ -13,6 +13,7 @@
 //   --ncc-gc-typemaps      Emit n00b type-to-GC-map metadata
 //   --ncc-auto-gc-roots    Auto-register TU-scope pointer globals as GC roots
 //   --ncc-custom-entry     Link with ncc's generated libc-less n00b entry
+//   --ncc-system-entry     Let main initialize n00b when static inits degrade
 //   --ncc-comptime-arg=VAL Pass VAL as a comptime_main argument
 //   --ncc-no-comptime      Do not run comptime_main during this link
 //   -E                     Preprocess + transform, emit to stdout
@@ -382,6 +383,21 @@ path_is_sep(char c)
 }
 
 static const char *
+windows_link_output_arg(const char *arg)
+{
+#ifdef _WIN32
+    static const char prefix[] = "-Wl,/OUT:";
+
+    if (strncmp(arg, prefix, sizeof(prefix) - 1) == 0) {
+        return arg + sizeof(prefix) - 1;
+    }
+#else
+    (void)arg;
+#endif
+    return nullptr;
+}
+
+static const char *
 path_basename(const char *path)
 {
     const char *base = path;
@@ -638,6 +654,12 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
         }
         if (strcmp(arg, "--ncc-custom-entry") == 0) {
             opts->custom_entry = true;
+            opts->system_entry = false;
+            continue;
+        }
+        if (strcmp(arg, "--ncc-system-entry") == 0) {
+            opts->system_entry = true;
+            opts->custom_entry = false;
             continue;
         }
         if (strncmp(arg, "--ncc-comptime-arg=", 19) == 0) {
@@ -786,6 +808,12 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
             add_clang_arg(opts, arg);
             continue;
         }
+        const char *windows_link_output = windows_link_output_arg(arg);
+        if (windows_link_output) {
+            opts->output_file = windows_link_output;
+            add_clang_arg(opts, arg);
+            continue;
+        }
         if (strcmp(arg, "-o") == 0) {
             if (i + 1 < argc) {
                 opts->output_file = argv[++i];
@@ -891,13 +919,13 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
                                                                                                  : opts->has_dep_only ? "dependency-only"
                                                                                                                        : "compile-and-link",
                 opts->compiler, opts->n_clang_args);
-    ncc_verbose("flags: -E=%d -c=%d -S=%d syntax_only=%d dep_only=%d std=%d dep=%d dump_tokens=%d dump_tree=%d dump_output=%d gc_stack_maps=%d gc_typemaps=%d auto_gc_roots=%d custom_entry=%d no_comptime=%d comptime_args=%d",
+    ncc_verbose("flags: -E=%d -c=%d -S=%d syntax_only=%d dep_only=%d std=%d dep=%d dump_tokens=%d dump_tree=%d dump_output=%d gc_stack_maps=%d gc_typemaps=%d auto_gc_roots=%d custom_entry=%d system_entry=%d no_comptime=%d comptime_args=%d",
                 opts->has_E, opts->has_c, opts->has_S,
                 opts->has_fsyntax_only, opts->has_dep_only,
                 opts->has_std, opts->has_dep_flags,
                 opts->dump_tokens, opts->dump_tree, opts->dump_output,
                 opts->gc_stack_maps, opts->gc_typemaps, opts->auto_gc_roots,
-                opts->custom_entry, opts->no_comptime,
+                opts->custom_entry, opts->system_entry, opts->no_comptime,
                 opts->n_comptime_args);
     if (opts->constexpr_headers) {
         ncc_verbose("constexpr headers=%s", opts->constexpr_headers);
@@ -947,6 +975,8 @@ print_help(void)
         "  --ncc-error-on-union Make the traditional-union deprecation a hard\n"
         "                       error (opt in ahead of the future default)\n"
         "  --ncc-custom-entry   Link with ncc's generated libc-less n00b entry\n"
+        "  --ncc-system-entry   Use the platform CRT entry when static initializers\n"
+        "                       degrade; main must initialize the n00b runtime\n"
         "  --ncc-comptime-arg=VAL\n"
         "                       Pass VAL as an argv element to comptime_main\n"
         "  --ncc-no-comptime    Skip link-time comptime execution\n"
@@ -1033,6 +1063,84 @@ read_file(const char *path, size_t *out_len)
     }
     return buf;
 }
+
+#ifdef _WIN32
+static void
+expand_windows_response_file(int *argc, char ***argv)
+{
+    if (*argc != 2 || (*argv)[1][0] != '@' || (*argv)[1][1] == '\0') {
+        return;
+    }
+
+    size_t len  = 0;
+    char  *text = read_file((*argv)[1] + 1, &len);
+    if (!text) {
+        return;
+    }
+
+    int    cap      = 64;
+    int    expanded = 1;
+    char **args     = ncc_alloc_array(char *, (size_t)cap);
+    args[0]         = (*argv)[0];
+
+    const char *p   = text;
+    const char *end = text + len;
+    while (p < end) {
+        while (p < end && isspace((unsigned char)*p)) {
+            p++;
+        }
+        if (p == end) {
+            break;
+        }
+
+        char *arg       = ncc_alloc_size(1, (size_t)(end - p) + 1);
+        char *out       = arg;
+        bool  in_quotes = false;
+
+        while (p < end && (in_quotes || !isspace((unsigned char)*p))) {
+            size_t backslashes = 0;
+            while (p < end && *p == '\\') {
+                backslashes++;
+                p++;
+            }
+
+            if (p < end && *p == '"') {
+                for (size_t i = 0; i < backslashes / 2; i++) {
+                    *out++ = '\\';
+                }
+                if (backslashes % 2) {
+                    *out++ = '"';
+                }
+                else {
+                    in_quotes = !in_quotes;
+                }
+                p++;
+                continue;
+            }
+
+            while (backslashes--) {
+                *out++ = '\\';
+            }
+            if (p < end && (in_quotes || !isspace((unsigned char)*p))) {
+                *out++ = *p++;
+            }
+        }
+        *out = '\0';
+
+        if (expanded == cap) {
+            cap *= 2;
+            args = ncc_realloc(args, (size_t)cap * sizeof(char *));
+        }
+        args[expanded++] = arg;
+    }
+
+    args = ncc_realloc(args, (size_t)(expanded + 1) * sizeof(char *));
+    args[expanded] = nullptr;
+    ncc_free(text);
+    *argc = expanded;
+    *argv = args;
+}
+#endif
 
 // ============================================================================
 // Wrap system includes with #pragma ncc off/on
@@ -1775,6 +1883,7 @@ is_linker_input(const char *arg)
         const char *dot = strrchr(arg, '.');
         if (dot) {
             if (strcmp(dot, ".a") == 0 || strcmp(dot, ".o") == 0
+                || strcmp(dot, ".lib") == 0 || strcmp(dot, ".obj") == 0
                 || strcmp(dot, ".so") == 0 || strcmp(dot, ".dylib") == 0) {
                 return true;
             }
@@ -1792,7 +1901,9 @@ is_metadata_linker_input(const char *arg)
     }
 
     const char *dot = strrchr(arg, '.');
-    return dot && (strcmp(dot, ".o") == 0 || strcmp(dot, ".a") == 0);
+    return dot && (strcmp(dot, ".o") == 0 || strcmp(dot, ".a") == 0
+                   || strcmp(dot, ".obj") == 0
+                   || strcmp(dot, ".lib") == 0);
 }
 
 typedef struct {
@@ -1889,6 +2000,9 @@ ncc_collect_link_inputs_from_clang_args(const ncc_opts_t *opts,
         if (strncmp(arg, "-o", 2) == 0 && arg[2] != '\0') {
             continue;
         }
+        if (windows_link_output_arg(arg)) {
+            continue;
+        }
         if (strcmp(arg, "-c") == 0 || strcmp(arg, "-S") == 0
             || strcmp(arg, "-E") == 0 || strcmp(arg, "-fsyntax-only") == 0) {
             continue;
@@ -1939,6 +2053,9 @@ ncc_collect_link_inputs_from_argv(const ncc_opts_t *opts, int argc,
             continue;
         }
         if (strncmp(arg, "-o", 2) == 0 && arg[2] != '\0') {
+            continue;
+        }
+        if (windows_link_output_arg(arg)) {
             continue;
         }
 
@@ -2162,6 +2279,9 @@ ncc_compile_transformed_object(const ncc_opts_t *opts, const char *c_source,
         if (strncmp(arg, "-o", 2) == 0 && arg[2] != '\0') {
             continue;
         }
+        if (windows_link_output_arg(arg)) {
+            continue;
+        }
         if (strcmp(arg, "-c") == 0 || strcmp(arg, "-S") == 0
             || strcmp(arg, "-E") == 0 || strcmp(arg, "-fsyntax-only") == 0) {
             continue;
@@ -2278,6 +2398,7 @@ maybe_comptime_link_passthrough(const ncc_opts_t *opts, int argc,
     }
 
     bool has_comptime_work = agg.has_comptime_main || agg.n_static_inits > 0;
+
     ncc_comptime_degrade_route_t degrade_route =
         ncc_comptime_degrade_route(&link_opts, &agg);
 
@@ -4248,6 +4369,10 @@ int
 main(int argc, char **argv)
 {
     signal_setup();
+
+#ifdef _WIN32
+    expand_windows_response_file(&argc, &argv);
+#endif
 
     ncc_opts_t opts;
     parse_argv(&opts, argc, (const char **)argv);

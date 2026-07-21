@@ -17,7 +17,8 @@
 //                  per arm { selector, n_offsets, <offsets...> } } ]
 //
 // record_words counts every word in the record, including itself, so a reader
-// can walk a concatenated section linearly without external boundaries.
+// can walk a concatenated section linearly without external boundaries. Zero
+// words between records are alignment padding and are ignored.
 #pragma once
 
 #include <stddef.h>

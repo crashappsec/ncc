@@ -649,10 +649,11 @@ validate_comptime_image_roots(const ncc_comptime_plan_t *plan, char **err_out)
 }
 
 static bool
-link_with_entry(const ncc_opts_t *opts, const ncc_comptime_plan_t *plan,
-                const char *entry_object,
-                const char *const *extra_objects, int n_extra_objects,
-                const char *output_file, char **err_out)
+link_comptime_output(const ncc_opts_t *opts,
+                     const ncc_comptime_plan_t *plan,
+                     const char *entry_object,
+                     const char *const *extra_objects, int n_extra_objects,
+                     const char *output_file, char **err_out)
 {
     int max_args = 9 + plan->n_ordered_link_args + plan->n_user_inputs
                  + plan->n_runtime_inputs + plan->n_link_args
@@ -661,17 +662,21 @@ link_with_entry(const ncc_opts_t *opts, const ncc_comptime_plan_t *plan,
     int ai = 0;
 
     argv[ai++] = opts->compiler;
-    argv[ai++] = "-nostartfiles";
-    argv[ai++] = platform_entry_flag(opts);
-    const char *entry_force = platform_entry_force_undefined_flag(opts);
-    if (entry_force) {
-        argv[ai++] = entry_force;
+    if (entry_object) {
+        argv[ai++] = "-nostartfiles";
+        argv[ai++] = platform_entry_flag(opts);
+        const char *entry_force = platform_entry_force_undefined_flag(opts);
+        if (entry_force) {
+            argv[ai++] = entry_force;
+        }
     }
     argv[ai++] = "-o";
     argv[ai++] = output_file;
-    argv[ai++] = "-x";
-    argv[ai++] = "none";
-    argv[ai++] = entry_object;
+    if (entry_object) {
+        argv[ai++] = "-x";
+        argv[ai++] = "none";
+        argv[ai++] = entry_object;
+    }
 
     for (int i = 0; i < plan->n_ordered_link_args; i++) {
         argv[ai++] = plan->ordered_link_args[i];
@@ -1151,9 +1156,9 @@ ncc_comptime_run_and_link(const ncc_opts_t *opts,
     if (start_entry_obj) {
         run_extra_objects[n_run_extra_objects++] = start_entry_obj;
     }
-    if (!link_with_entry(opts, plan, run_entry_obj, run_extra_objects,
-                         n_run_extra_objects,
-                         comptime_exe, err_out)) {
+    if (!link_comptime_output(opts, plan, run_entry_obj, run_extra_objects,
+                              n_run_extra_objects,
+                              comptime_exe, err_out)) {
         goto cleanup;
     }
 
@@ -1250,8 +1255,8 @@ ncc_comptime_run_and_link(const ncc_opts_t *opts,
     if (writable_image_obj) {
         extra_objects[n_extra_objects++] = writable_image_obj;
     }
-    if (!link_with_entry(opts, plan, final_entry_obj, extra_objects,
-                         n_extra_objects, atomic_output, err_out)) {
+    if (!link_comptime_output(opts, plan, final_entry_obj, extra_objects,
+                              n_extra_objects, atomic_output, err_out)) {
         rc = 1;
         goto cleanup;
     }
@@ -1335,17 +1340,27 @@ ncc_comptime_degrade_and_link(const ncc_opts_t *opts,
     };
     char *atomic_output = nullptr;
     bool atomic_output_published = false;
+    bool use_custom_entry = !opts->system_entry;
 
-    ncc_crt_variant_t entry_variant = plan->meta->has_comptime_main
-                                    ? NCC_CRT_VARIANT_DEGRADE
-                                    : NCC_CRT_VARIANT_BASE;
-    if (!compile_entry_object(opts, entry_variant, &degrade_entry_ctx,
-                              &tmp, "degrade-entry", &degrade_entry_obj,
-                              err_out)) {
+    if (opts->system_entry && plan->meta->has_comptime_main) {
+        set_err(err_out,
+                "--ncc-system-entry cannot degrade comptime_main; "
+                "a custom entry is required");
         goto cleanup;
     }
-    if (!compile_start_object(opts, plan, &tmp, &start_entry_obj, err_out)) {
-        goto cleanup;
+
+    if (use_custom_entry) {
+        ncc_crt_variant_t entry_variant = plan->meta->has_comptime_main
+                                        ? NCC_CRT_VARIANT_DEGRADE
+                                        : NCC_CRT_VARIANT_BASE;
+        if (!compile_entry_object(opts, entry_variant, &degrade_entry_ctx,
+                                  &tmp, "degrade-entry", &degrade_entry_obj,
+                                  err_out)) {
+            goto cleanup;
+        }
+        if (!compile_start_object(opts, plan, &tmp, &start_entry_obj, err_out)) {
+            goto cleanup;
+        }
     }
 
     if (plan->meta->n_static_inits > 0
@@ -1378,8 +1393,8 @@ ncc_comptime_degrade_and_link(const ncc_opts_t *opts,
     if (static_init_degrade_obj) {
         extra_objects[n_extra_objects++] = static_init_degrade_obj;
     }
-    if (!link_with_entry(opts, plan, degrade_entry_obj, extra_objects,
-                         n_extra_objects, atomic_output, err_out)) {
+    if (!link_comptime_output(opts, plan, degrade_entry_obj, extra_objects,
+                              n_extra_objects, atomic_output, err_out)) {
         goto cleanup;
     }
 

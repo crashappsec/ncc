@@ -102,14 +102,15 @@ find_ar(void)
 }
 
 static void
-create_archive(const char *archive_path, const char *obj_a, const char *obj_b)
+create_archive(const char *archive_path, const char *obj_a, const char *obj_b,
+               bool thin)
 {
     const char *ar = find_ar();
     assert(ar);
 
     const char *argv[] = {
         ar,
-        "rcs",
+        thin ? "rcsT" : "rcs",
         archive_path,
         obj_a,
         obj_b,
@@ -290,7 +291,12 @@ test_static_init_object_io(const char *static_init_obj,
 
     ncc_ct_rec_list_t stripped = {0};
     assert_read_ok(static_init_obj, &stripped);
+#ifdef _WIN32
+    assert(has_static_init_record(&stripped, name, typehash, kind,
+                                  NCC_CT_STATIC_INIT_FLAG_POINTER_ROOT, 0));
+#else
     assert(stripped.n_records == 0);
+#endif
     assert(stripped.n_objects_scanned == 1);
     ncc_ct_rec_list_free(&stripped);
 }
@@ -356,7 +362,11 @@ test_read_aggregate_strip(const char *main_obj, const char *no_main_obj,
 
     ncc_ct_rec_list_t stripped = {0};
     assert_read_ok(var_obj, &stripped);
+#ifdef _WIN32
+    assert(has_answer_var(&stripped));
+#else
     assert(stripped.n_records == 0);
+#endif
     assert(stripped.n_objects_scanned == 1);
     ncc_ct_rec_list_free(&stripped);
 }
@@ -370,6 +380,27 @@ test_archive_read(const char *archive_path)
     assert(has_main_record(&records));
     assert(has_answer_var(&records));
     ncc_ct_rec_list_free(&records);
+}
+
+static void
+test_archive_section_read(const char *archive_path)
+{
+#if defined(_WIN32)
+    const char *section = NCC_CT_SECTION_PE;
+#elif defined(__APPLE__)
+    const char *section = NCC_CT_SECTION_MACHO;
+#else
+    const char *section = NCC_CT_SECTION_ELF;
+#endif
+    uint8_t *bytes = nullptr;
+    size_t   len   = 0;
+    char    *err   = nullptr;
+
+    assert(ncc_ct_read_input_section(archive_path, section, &bytes, &len, &err));
+    assert(err == nullptr);
+    assert(bytes != nullptr);
+    assert(len > 0);
+    ncc_free(bytes);
 }
 
 static void
@@ -678,6 +709,7 @@ main(int argc, char **argv)
     char *plain_address_obj =
         ncc_temp_workspace_join(&tmp, "plain-address-init.o");
     char *archive     = ncc_temp_workspace_join(&tmp, "libct.a");
+    char *thin_archive = ncc_temp_workspace_join(&tmp, "libct-thin.a");
     char *no_meta_archive = ncc_temp_workspace_join(&tmp, "libct-empty.a");
     char *bad_archive = ncc_temp_workspace_join(&tmp, "libct-bad.a");
     char *no_magic_input = ncc_temp_workspace_join(&tmp, "no-magic.o");
@@ -686,8 +718,9 @@ main(int argc, char **argv)
     compile_object(ncc, no_main_src, no_main_obj, false, n_flags, flags);
     compile_object(ncc, no_main_src, no_meta_obj, false, n_flags, flags);
     compile_object(ncc, var_src, var_obj, false, n_flags, flags);
-    create_archive(archive, main_obj, var_obj);
-    create_archive(no_meta_archive, no_main_obj, no_meta_obj);
+    create_archive(archive, main_obj, var_obj, false);
+    create_archive(thin_archive, main_obj, var_obj, true);
+    create_archive(no_meta_archive, no_main_obj, no_meta_obj, false);
     write_static_init_metadata_source(static_init_src);
     compile_object(ncc, static_init_src, static_init_obj, true, n_flags, flags);
     write_plain_address_init_source(plain_address_src);
@@ -699,6 +732,8 @@ main(int argc, char **argv)
                                NCC_CT_STATIC_INIT_CONST_RO);
     test_no_static_init_object_io(plain_address_obj);
     test_archive_read(archive);
+    test_archive_section_read(archive);
+    test_archive_section_read(thin_archive);
     test_archive_without_metadata_is_noop(no_meta_archive);
     test_no_magic_input_is_noop(no_magic_input);
     test_conflicts();
@@ -710,7 +745,7 @@ main(int argc, char **argv)
     test_rejects_unknown_main_flags(ncc, bad_flag_src, bad_flag_obj,
                                     n_flags, flags);
     test_aggregate_rejects_invalid_var_fields();
-    create_archive(bad_archive, main_obj, bad_obj);
+    create_archive(bad_archive, main_obj, bad_obj, false);
     test_archive_malformed_rolls_back(bad_archive);
 
     ncc_free(main_obj);
@@ -730,6 +765,7 @@ main(int argc, char **argv)
     ncc_free(plain_address_src);
     ncc_free(plain_address_obj);
     ncc_free(archive);
+    ncc_free(thin_archive);
     ncc_free(no_meta_archive);
     ncc_free(bad_archive);
     ncc_free(no_magic_input);
