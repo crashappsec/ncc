@@ -97,6 +97,12 @@ ncc_gcraw_parse(const uint8_t   *bytes,
     size_t          pos    = 0;
 
     while (pos < nwords) {
+        // COFF may align each emitted array within the section, leaving zero
+        // words between otherwise self-delimiting records.
+        if (w[pos] == 0) {
+            pos++;
+            continue;
+        }
         size_t   start     = pos;
         uint64_t rec_words = w[start];
         if (rec_words < 6 || (uint64_t)(nwords - start) < rec_words) {

@@ -1,4 +1,5 @@
 #include "parse/comptime_meta.h"
+#include "parse/gcmap_prelink.h"
 
 #include "lib/alloc.h"
 
@@ -268,6 +269,27 @@ test_aggregate_rejects_conflicting_main_flags(void)
     ncc_free(err);
 }
 
+static void
+test_gcraw_alignment_padding(void)
+{
+    const uint64_t words[] = {
+        0,
+        6, NCC_GCRAW_KIND_TYPEMAP, 0x1234, 2, 0, 0,
+        0, 0,
+        7, NCC_GCRAW_KIND_TYPEMAP, 0x5678, 3, 1, 2, 0,
+        0,
+    };
+    ncc_gcraw_set_t set = {0};
+    char *err = nullptr;
+
+    assert(ncc_gcraw_parse((const uint8_t *)words, sizeof(words), &set, &err));
+    assert(err == nullptr);
+    assert(set.len == 2);
+    assert(set.records[0].type_hash == 0x1234);
+    assert(set.records[1].type_hash == 0x5678);
+    ncc_gcraw_set_free(&set);
+}
+
 int
 main(void)
 {
@@ -281,6 +303,7 @@ main(void)
     test_static_init_record_rejects_unknown_fields();
     test_aggregate_static_init();
     test_aggregate_rejects_conflicting_main_flags();
+    test_gcraw_alignment_padding();
     puts("PASS: comptime metadata emitter");
     return 0;
 }

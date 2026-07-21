@@ -177,7 +177,7 @@ generated_image_source(const char *bytes, size_t len, bool writable)
     ncc_buffer_printf(buf, "[[gnu::section(\"%s\")]]\n", macho_section);
     ncc_buffer_puts(buf,
         "#elif defined(_WIN32)\n"
-        "[[gnu::used]] [[gnu::retain]] NCC_CT_IMAGE_VIS [[gnu::aligned(65536)]] ");
+        "[[gnu::used]] [[gnu::retain]] NCC_CT_IMAGE_VIS [[gnu::aligned(4096)]] ");
     ncc_buffer_printf(buf, "[[gnu::section(\"%s\")]]\n", pe_section);
     ncc_buffer_puts(buf,
         "#else\n"

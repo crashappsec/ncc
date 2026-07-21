@@ -606,6 +606,38 @@ static const char static_init_link_main_source[] =
     "    return 0;\n"
     "}\n";
 
+static const char static_init_system_main_source[] =
+    "extern int ncc_ct_entry_seen;\n"
+    "extern void n00b_init_simple(int argc, char **argv);\n"
+    "static int static_payload = 17;\n"
+    "static int prepare_count = 0;\n"
+    "void *ncc_ct_static_root_value = &static_payload;\n"
+    "const void *state = nullptr;\n"
+    "int __ncc_static_init_prepare_state(void) {\n"
+    "    prepare_count++;\n"
+    "    state = &static_payload;\n"
+    "    return 0;\n"
+    "}\n"
+    "typedef int (*__ncc_static_init_fn_state)(void);\n"
+    "#if defined(__APPLE__)\n"
+    "[[gnu::used]] [[gnu::retain]] [[gnu::section(\"__DATA,n00b_sinit\")]]\n"
+    "#elif defined(_WIN32)\n"
+    "[[gnu::used]] [[gnu::section(\".n00bsi$m\")]]\n"
+    "#else\n"
+    "[[gnu::used]] [[gnu::retain]] [[gnu::section(\"n00b_sinit\")]]\n"
+    "#endif\n"
+    "static __ncc_static_init_fn_state const "
+    "__ncc_static_init_degrade_entry_state = "
+    "__ncc_static_init_prepare_state;\n"
+    "int main(int argc, char **argv) {\n"
+    "    if (ncc_ct_entry_seen != 0) return 8;\n"
+    "    n00b_init_simple(argc, argv);\n"
+    "    if (ncc_ct_entry_seen != 1) return 9;\n"
+    "    if (state != &static_payload) return 10;\n"
+    "    if (prepare_count != 1) return 11;\n"
+    "    return 0;\n"
+    "}\n";
+
 static void
 assert_no_metadata_section(const char *path)
 {
@@ -693,6 +725,10 @@ main(int argc, char **argv)
     char *static_meta_o = ncc_temp_workspace_join(&tmp, "static-meta.o");
     char *static_main_c = ncc_temp_workspace_join(&tmp, "static-main.c");
     char *static_main_o = ncc_temp_workspace_join(&tmp, "static-main.o");
+    char *static_system_main_c =
+        ncc_temp_workspace_join(&tmp, "static-system-main.c");
+    char *static_system_main_o =
+        ncc_temp_workspace_join(&tmp, "static-system-main.o");
     char *image_bytes = ncc_temp_workspace_join(&tmp, "image.bin");
     char *direct_image_o = ncc_temp_workspace_join(&tmp, "direct-image.o");
     char *direct_writable_image_o =
@@ -705,6 +741,8 @@ main(int argc, char **argv)
     char *sentinel = ncc_temp_workspace_join(&tmp, "sentinel.txt");
     char *output = ncc_temp_workspace_join(&tmp, "final");
     char *static_output = ncc_temp_workspace_join(&tmp, "static-final");
+    char *static_system_output =
+        ncc_temp_workspace_join(&tmp, "static-system-final");
     char *fail_output = ncc_temp_workspace_join(&tmp, "final-fail");
 
     ncc_buffer_t *runtime_buf = ncc_buffer_empty();
@@ -718,12 +756,14 @@ main(int argc, char **argv)
     write_file_or_die(fail_c, fail_source);
     write_file_or_die(static_meta_c, static_init_meta_source);
     write_file_or_die(static_main_c, static_init_link_main_source);
+    write_file_or_die(static_system_main_c, static_init_system_main_source);
     write_file_or_die(image_bytes, "N00BCTIMG-PHASE2");
 
     compile_with_cc(cc, runtime_c, runtime_o);
     compile_with_cc(cc, start_s, start_o);
     compile_with_cc(cc, static_meta_c, static_meta_o);
     compile_with_cc(cc, static_main_c, static_main_o);
+    compile_with_cc(cc, static_system_main_c, static_system_main_o);
     assert_static_init_only_metadata(static_meta_o);
     compile_user_object(ncc, good_c, good_o, n_ncc_flags, ncc_flags);
     compile_user_object(ncc, fail_c, fail_o, n_ncc_flags, ncc_flags);
@@ -862,6 +902,26 @@ main(int argc, char **argv)
     assert_no_metadata_section(static_output);
     assert_image_section_present(static_output);
 
+    const char **system_flags = ncc_alloc_array(
+        const char *, (size_t)n_ncc_flags + 2);
+    for (int i = 0; i < n_ncc_flags; i++) {
+        system_flags[i] = ncc_flags[i];
+    }
+    system_flags[n_ncc_flags] = "--ncc-no-comptime";
+    system_flags[n_ncc_flags + 1] = "--ncc-system-entry";
+    const char *static_system_link_inputs[] = {
+        static_system_main_o,
+        static_meta_o,
+        runtime_o,
+    };
+    link_with_ncc(ncc, static_system_output, static_system_link_inputs, 3,
+                  n_ncc_flags + 2, (char **)system_flags);
+    const char *run_static_system_argv[] = { static_system_output, nullptr };
+    run_checked("system-entry static-init final binary", static_system_output,
+                run_static_system_argv);
+    assert_no_metadata_section(static_system_output);
+    ncc_free(system_flags);
+
     ncc_free(runtime_c);
     ncc_free(runtime_o);
     ncc_free(start_s);
@@ -874,6 +934,8 @@ main(int argc, char **argv)
     ncc_free(static_meta_o);
     ncc_free(static_main_c);
     ncc_free(static_main_o);
+    ncc_free(static_system_main_c);
+    ncc_free(static_system_main_o);
     ncc_free(image_bytes);
     ncc_free(direct_image_o);
     ncc_free(direct_writable_image_o);
@@ -883,6 +945,7 @@ main(int argc, char **argv)
     ncc_free(sentinel);
     ncc_free(output);
     ncc_free(static_output);
+    ncc_free(static_system_output);
     ncc_free(fail_output);
     ncc_temp_workspace_cleanup(&tmp);
 

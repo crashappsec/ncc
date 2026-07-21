@@ -37,6 +37,7 @@ typedef struct {
     // dictionary object can be produced as an explicit build step and linked in.
     const char  *gcmap_emit_out;
     bool         custom_entry;
+    bool         system_entry;
     bool         no_comptime;
     bool         allow_unions;    // suppress the traditional-union deprecation
     bool         error_on_union;  // escalate the deprecation to a hard error

@@ -464,9 +464,12 @@ static bool  list_archive_members(const char *ar, const char *archive_path,
                                   ncc_process_result_t *proc, char **err_out);
 static bool  extract_archive_members(const char *ar, const char *archive_path,
                                      const char *out_dir, char **err_out);
+static bool  is_thin_archive_bytes(const char *data, size_t len);
+static char *resolve_thin_archive_member(const char *archive_path,
+                                         const char *member);
 
 // Public: read and concatenate `section` bytes from a link input — either a
-// single object (.o) or every object member of an archive (.a). The caller
+// single object (.o/.obj) or every object member of an archive (.a/.lib). The caller
 // frees *bytes_out via ncc_free. Inputs that are neither, or that lack the
 // section, contribute nothing (returns true, possibly with *len_out unchanged).
 // Records are self-delimiting, so concatenation across members is valid.
@@ -480,16 +483,17 @@ ncc_ct_read_input_section(const char *input_path,
     *bytes_out = nullptr;
     *len_out   = 0;
 
-    size_t plen = strlen(input_path);
-    if (plen >= 2 && strcmp(input_path + plen - 2, ".o") == 0) {
+    const char *ext = strrchr(input_path, '.');
+    if (ext && (strcmp(ext, ".o") == 0 || strcmp(ext, ".obj") == 0)) {
         return ncc_ct_read_object_section(input_path, section, bytes_out,
                                           len_out, err_out);
     }
-    if (plen < 2 || strcmp(input_path + plen - 2, ".a") != 0) {
+    if (!ext || (strcmp(ext, ".a") != 0 && strcmp(ext, ".lib") != 0)) {
         return true; // not an object/archive we scan
     }
 
-    // Archive: extract members and read the section from each .o member.
+    // Archive: resolve thin members in place, or extract regular members, then
+    // read the requested section from each object.
     const char *ar = find_ar();
     if (!ar) {
         set_err(err_out, "llvm-ar or ar is required to read archive '%s'",
@@ -505,9 +509,18 @@ ncc_ct_read_input_section(const char *input_path,
     }
     const char *dir = ncc_temp_workspace_path(&tmp);
 
+    size_t archive_len = 0;
+    char  *archive_data = read_binary_file(input_path, &archive_len, err_out);
+    if (!archive_data) {
+        ncc_temp_workspace_cleanup(&tmp);
+        return false;
+    }
+    bool thin = is_thin_archive_bytes(archive_data, archive_len);
+    ncc_free(archive_data);
+
     ncc_process_result_t list = {0};
     bool ok = list_archive_members(ar, input_path, &list, err_out)
-           && extract_archive_members(ar, input_path, dir, err_out);
+           && (thin || extract_archive_members(ar, input_path, dir, err_out));
     if (!ok) {
         ncc_process_result_free(&list);
         ncc_temp_workspace_cleanup(&tmp);
@@ -531,13 +544,20 @@ ncc_ct_read_input_section(const char *input_path,
                    || list.stdout_data[start + mlen - 1] == ' ')) {
             mlen--;
         }
-        if (mlen < 2 || memcmp(list.stdout_data + start + mlen - 2, ".o", 2) != 0) {
+        bool object_member = (mlen >= 2
+                              && memcmp(list.stdout_data + start + mlen - 2,
+                                        ".o", 2) == 0)
+                          || (mlen >= 4
+                              && memcmp(list.stdout_data + start + mlen - 4,
+                                        ".obj", 4) == 0);
+        if (!object_member) {
             continue;
         }
         char *name = ncc_alloc_array(char, mlen + 1);
         memcpy(name, list.stdout_data + start, mlen);
         name[mlen] = '\0';
-        char *member = join_dir_leaf(dir, name);
+        char *member = thin ? resolve_thin_archive_member(input_path, name)
+                            : join_dir_leaf(dir, name);
         ncc_free(name);
 
         uint8_t *mbytes = nullptr;
@@ -1569,6 +1589,15 @@ ncc_ct_strip_section(const ncc_opts_t *opts, const char *binary_path,
         set_err(err_out, "ncc_ct_strip_section requires a path");
         return false;
     }
+
+#ifdef _WIN32
+    /*
+     * llvm-objcopy removes the PE section without removing base-relocation
+     * entries that target it. The Windows loader rejects that image with
+     * ERROR_BAD_EXE_FORMAT, so retain the inert metadata section on PE.
+     */
+    return true;
+#endif
 
     const char *objcopy = find_objcopy();
     if (!objcopy) {
