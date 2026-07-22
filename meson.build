@@ -1322,6 +1322,24 @@ test('ncc_gc_typemap_noscan_attribute_stripped', test_runner,
   depends : ncc_exe,
 )
 
+test('ncc_gc_typemap_atomic_aggregate_split_offset', test_runner,
+  args : [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__builtin_offsetof(gcmap_atomic_holder_t,cell)+__builtin_offsetof(gcmap_atomic_cell_raw_t,payload)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_atomic_aggregate_no_atomic_offsetof', test_runner,
+  args : [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__builtin_offsetof(gcmap_atomic_cell_t,payload)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 # --- WP-001: [[n00b::transient]] field attribute --------------------------
 
 # A transient table descriptor type is emitted.

@@ -75,6 +75,18 @@ typedef struct gcmap_noscan_prefix_t {
     [[n00b::noscan]] gcmap_payload_t *noscan_ptr;
 } gcmap_noscan_prefix_t;
 
+typedef struct gcmap_atomic_cell_raw_t {
+    gcmap_payload_t *payload;
+    uint32_t         pins;
+} gcmap_atomic_cell_raw_t;
+
+typedef _Atomic gcmap_atomic_cell_raw_t gcmap_atomic_cell_t;
+
+typedef struct gcmap_atomic_holder_t {
+    uint64_t             head;
+    gcmap_atomic_cell_t  cell;
+} gcmap_atomic_holder_t;
+
 static uint64_t h_direct = typehash(gcmap_direct_fn_t *);
 static uint64_t h_typedef = typehash(gcmap_typedef_fn_t *);
 static uint64_t h_user    = typehash(gcmap_user_scan_field_t *);
@@ -84,11 +96,12 @@ static uint64_t h_array   = typehash(gcmap_pointer_array_t *);
 static uint64_t h_union   = typehash(gcmap_union_mixed_t *);
 static uint64_t h_nstrail = typehash(gcmap_noscan_trailing_t *);
 static uint64_t h_nspref  = typehash(gcmap_noscan_prefix_t *);
+static uint64_t h_atomic  = typehash(gcmap_atomic_holder_t *);
 
 int
 main(void)
 {
     return (int)((h_direct ^ h_typedef ^ h_user ^ h_runtime ^ h_near
-                  ^ h_array ^ h_union ^ h_nstrail ^ h_nspref)
+                  ^ h_array ^ h_union ^ h_nstrail ^ h_nspref ^ h_atomic)
                  == 0);
 }
