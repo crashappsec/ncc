@@ -2021,6 +2021,43 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
     }
   }
 
+  // Reject keyword args that name no declared kwarg. The kargs literal below
+  // is built by walking the declared params and looking for a matching
+  // call-site arg; without this check, an unmatched call-site keyword is
+  // dropped from the emitted struct and the callee silently sees its default.
+  if (meta->kw && !meta->kw->is_opaque) {
+    for (int i = 0; i < arg_count; i++) {
+      if (!args[i].name) {
+        continue;
+      }
+
+      bool found = false;
+      for (int j = 0; j < meta->kw->num_params; j++) {
+        if (strcmp(args[i].name, meta->kw->params[j].name.data) == 0) {
+          found = true;
+          break;
+        }
+      }
+
+      if (!found) {
+        uint32_t line, col;
+        ncc_xform_first_leaf_pos(node, &line, &col);
+        fprintf(stderr,
+                "ncc: error: unknown keyword argument '.%s' in call "
+                "to '%s' (line %u, col %u)\n",
+                args[i].name, callee, line, col);
+        exit(1);
+      }
+    }
+  } else if (!meta->kw && n_keyword > 0) {
+    uint32_t line, col;
+    ncc_xform_first_leaf_pos(node, &line, &col);
+    fprintf(stderr,
+            "ncc: error: '%s' takes no keyword arguments (line %u, col %u)\n",
+            callee, line, col);
+    exit(1);
+  }
+
   // Build new argument list text.
   char new_args[16384];
   size_t pos = 0;
