@@ -2831,6 +2831,18 @@ ncc_error_contains_tests = {
     test_dir / 'err_function_contract_declaration.c',
     'parse FAILED',
   ],
+  'err_kargs_duplicate_kwarg': [
+    test_dir / 'err_kargs_duplicate_kwarg.c',
+    'duplicate keyword argument',
+  ],
+  'err_kargs_unknown_kwarg': [
+    test_dir / 'err_kargs_unknown_kwarg.c',
+    'unknown keyword argument',
+  ],
+  'err_vargs_keyword_without_kargs': [
+    test_dir / 'err_vargs_keyword_without_kargs.c',
+    'takes no keyword arguments',
+  ],
   # The parse-failure diagnostic reports the furthest stuck token's real
   # file:line:column (resolves into headers), not just a token dump.
   'err_parse_got_stuck': [
