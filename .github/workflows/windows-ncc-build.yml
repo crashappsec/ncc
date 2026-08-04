@@ -1,11 +1,17 @@
-# Build the Windows-native ncc.exe (MSVC) and publish it so downstream bakes can
-# consume it. This is the bootstrap that unblocks racecar's Windows build+sign
-# runner (racecar#120): its packer bake stages ncc.exe from
-# `gh run download` (CI artifact) or `gh release download` (release asset,
-# ncc-*-windows-x64.exe). Builds on a GitHub-hosted windows-latest — hosted
-# runners CAN build ncc; the dedicated racecar runner is for the pinned toolchain
-# + ETW, not a build prerequisite — so this has no circular dependency on the box
-# it helps provision.
+# Build the Windows-native ncc.exe and publish it so downstream bakes can consume
+# it. This is the bootstrap that unblocks racecar's Windows build+sign runner
+# (racecar#120): its packer bake stages ncc.exe from `gh run download` (CI
+# artifact) or `gh release download` (release asset, ncc-*-windows-x64.exe).
+# Builds on a GitHub-hosted windows-latest — hosted runners CAN build ncc; the
+# dedicated racecar runner is for the pinned toolchain + ETW, not a build
+# prerequisite — so this has no circular dependency on the box it helps provision.
+#
+# COMPILER: ncc's meson.build hard-requires Clang (c_std=gnu23 + C23 #embed /
+# --embed-dir; it error()s on non-Clang). MSVC cl.exe is NOT usable. Per the repo
+# README + toolchains/windows-x86_64-clang.ini, the Windows build uses the
+# llvm-mingw Clang 22.1.0+ toolchain via `--cross-file`, invoking meson directly
+# (build.ps1 auto-injects -Db_vscrt=md, which is invalid for the windows-gnu
+# target).
 name: windows-ncc-build
 
 on:
@@ -19,17 +25,16 @@ on:
 permissions:
   contents: write   # attach the .exe to a release when one triggers this
 
+env:
+  # llvm-mingw 20260616 == Clang 22.1.8 (satisfies the >=22.1.0 toolchain gate).
+  LLVM_MINGW_TAG: "20260616"
+  LLVM_MINGW_ZIP: "llvm-mingw-20260616-ucrt-x86_64.zip"
+
 jobs:
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
-      # MSVC C/C++ toolchain (cl.exe) so meson auto-detects the native compiler.
-      - name: Set up MSVC developer environment
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -39,25 +44,43 @@ jobs:
       - name: Install meson + ninja
         run: python -m pip install --upgrade meson ninja
 
-      # build.ps1 is the repo's authoritative Windows entrypoint: meson setup
-      # (-Db_vscrt=md) + ninja ncc.exe → build-msvc\ncc.exe. Release build.
-      - name: Build ncc.exe (MSVC, release)
+      # llvm-mingw Clang (the toolchain the cross file + README require). Put its
+      # bin dir at the FRONT of PATH so meson picks this clang over any stock one.
+      - name: Install llvm-mingw Clang toolchain
         shell: pwsh
         run: |
-          .\build.ps1 -BuildDir build-msvc -BuildType release -Target ncc:executable -LogPath build-msvc\build.log
-          if (-not (Test-Path build-msvc\ncc.exe)) { throw "build-msvc\ncc.exe not produced" }
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$env:LLVM_MINGW_TAG/$env:LLVM_MINGW_ZIP"
+          Write-Host "Downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\llvm-mingw.zip"
+          Expand-Archive -Path "$env:RUNNER_TEMP\llvm-mingw.zip" -DestinationPath "C:\llvm-mingw" -Force
+          $bin = (Get-ChildItem "C:\llvm-mingw" -Directory | Select-Object -First 1).FullName + "\bin"
+          Write-Host "llvm-mingw bin: $bin"
+          # Prepend to PATH for all subsequent steps.
+          Add-Content -Path $env:GITHUB_PATH -Value $bin
+          & "$bin\clang.exe" --version
+
+      # meson setup + compile per README: CC=clang + the repo's cross file →
+      # build-win\ncc.exe. Release build.
+      - name: Build ncc.exe (llvm-mingw Clang, release)
+        shell: pwsh
+        env:
+          CC: clang
+        run: |
+          meson setup build-win --buildtype=release --cross-file toolchains/windows-x86_64-clang.ini
+          meson compile -C build-win
+          if (-not (Test-Path build-win\ncc.exe)) { throw "build-win\ncc.exe not produced" }
 
       - name: Smoke — ncc.exe runs
         shell: pwsh
         run: |
-          & .\build-msvc\ncc.exe --version
+          & .\build-win\ncc.exe --version
           if ($LASTEXITCODE -ne 0) { throw "ncc.exe --version exited $LASTEXITCODE" }
 
       - name: Stage named asset
         shell: pwsh
         run: |
           $sha = "${{ github.sha }}".Substring(0,8)
-          Copy-Item build-msvc\ncc.exe "ncc-$sha-windows-x64.exe"
+          Copy-Item build-win\ncc.exe "ncc-$sha-windows-x64.exe"
           "NCC_ASSET=ncc-$sha-windows-x64.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       # CI artifact — racecar's packer bake pulls this via `gh run download`
@@ -68,7 +91,7 @@ jobs:
           name: ncc-windows-x64
           path: |
             ${{ env.NCC_ASSET }}
-            build-msvc/build.log
+            build-win/meson-logs/meson-log.txt
           if-no-files-found: error
           retention-days: 90
 
