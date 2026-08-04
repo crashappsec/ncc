@@ -1199,6 +1199,7 @@ expand_windows_response_arg(char *response_arg, int depth, windows_argv_t *args)
             ncc_free(text);
             return false;
         }
+        decoded = ncc_realloc(decoded, (size_t)(out - decoded) + 1);
         if (!expand_windows_response_arg(decoded, depth + 1, args)) {
             ncc_free(text);
             return false;
