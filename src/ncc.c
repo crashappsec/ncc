@@ -26,6 +26,7 @@
 
 #include <assert.h>
 #include <errno.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1049,12 +1050,29 @@ read_file(const char *path, size_t *out_len)
         return nullptr;
     }
 
-    fseek(f, 0, SEEK_END);
+    if (fseek(f, 0, SEEK_END) != 0) {
+        int saved_errno = errno ? errno : EIO;
+        fclose(f);
+        errno = saved_errno;
+        return nullptr;
+    }
     long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
+    if (len < 0 || fseek(f, 0, SEEK_SET) != 0) {
+        int saved_errno = errno ? errno : EIO;
+        fclose(f);
+        errno = saved_errno;
+        return nullptr;
+    }
 
     char  *buf   = ncc_alloc_size(1, (size_t)len + 1);
     size_t nread = fread(buf, 1, (size_t)len, f);
+    if (ferror(f)) {
+        int saved_errno = errno ? errno : EIO;
+        fclose(f);
+        ncc_free(buf);
+        errno = saved_errno;
+        return nullptr;
+    }
     buf[nread]   = '\0';
     fclose(f);
 
@@ -1065,23 +1083,54 @@ read_file(const char *path, size_t *out_len)
 }
 
 #ifdef _WIN32
-static void
-expand_windows_response_file(int *argc, char ***argv)
+#define NCC_WINDOWS_RESPONSE_MAX_DEPTH 16
+
+typedef struct {
+    char **items;
+    int    len;
+    int    cap;
+} windows_argv_t;
+
+static bool
+windows_argv_push(windows_argv_t *args, char *arg)
 {
-    if (*argc != 2 || (*argv)[1][0] != '@' || (*argv)[1][1] == '\0') {
-        return;
+    if (args->len == INT_MAX) {
+        fprintf(stderr, "ncc: too many response-file arguments\n");
+        return false;
+    }
+    if (args->len == args->cap) {
+        if (args->cap > INT_MAX / 2) {
+            fprintf(stderr, "ncc: too many response-file arguments\n");
+            return false;
+        }
+        args->cap   = args->cap ? args->cap * 2 : 16;
+        args->items = ncc_realloc(args->items,
+                                  ((size_t)args->cap + 1) * sizeof(char *));
+    }
+    args->items[args->len++] = arg;
+    args->items[args->len]   = nullptr;
+    return true;
+}
+
+static bool
+expand_windows_response_arg(char *response_arg, int depth, windows_argv_t *args)
+{
+    if (response_arg[0] != '@' || response_arg[1] == '\0') {
+        return windows_argv_push(args, response_arg);
+    }
+    if (depth >= NCC_WINDOWS_RESPONSE_MAX_DEPTH) {
+        fprintf(stderr, "ncc: response-file nesting exceeds %d: %s\n",
+                NCC_WINDOWS_RESPONSE_MAX_DEPTH, response_arg + 1);
+        return false;
     }
 
     size_t len  = 0;
-    char  *text = read_file((*argv)[1] + 1, &len);
+    char  *text = read_file(response_arg + 1, &len);
     if (!text) {
-        return;
+        fprintf(stderr, "ncc: cannot read response file %s: %s\n",
+                response_arg + 1, strerror(errno));
+        return false;
     }
-
-    int    cap      = 64;
-    int    expanded = 1;
-    char **args     = ncc_alloc_array(char *, (size_t)cap);
-    args[0]         = (*argv)[0];
 
     const char *p   = text;
     const char *end = text + len;
@@ -1093,8 +1142,8 @@ expand_windows_response_file(int *argc, char ***argv)
             break;
         }
 
-        char *arg       = ncc_alloc_size(1, (size_t)(end - p) + 1);
-        char *out       = arg;
+        char *decoded   = ncc_alloc_size(1, (size_t)(end - p) + 1);
+        char *out       = decoded;
         bool  in_quotes = false;
 
         while (p < end && (in_quotes || !isspace((unsigned char)*p))) {
@@ -1127,18 +1176,38 @@ expand_windows_response_file(int *argc, char ***argv)
         }
         *out = '\0';
 
-        if (expanded == cap) {
-            cap *= 2;
-            args = ncc_realloc(args, (size_t)cap * sizeof(char *));
+        if (in_quotes) {
+            fprintf(stderr, "ncc: unterminated quote in response file %s\n",
+                    response_arg + 1);
+            ncc_free(decoded);
+            ncc_free(text);
+            return false;
         }
-        args[expanded++] = arg;
+        if (!expand_windows_response_arg(decoded, depth + 1, args)) {
+            ncc_free(text);
+            return false;
+        }
     }
 
-    args = ncc_realloc(args, (size_t)(expanded + 1) * sizeof(char *));
-    args[expanded] = nullptr;
     ncc_free(text);
-    *argc = expanded;
-    *argv = args;
+    return true;
+}
+
+static bool
+expand_windows_response_files(int *argc, char ***argv)
+{
+    windows_argv_t args = {0};
+    if (!windows_argv_push(&args, (*argv)[0])) {
+        return false;
+    }
+    for (int i = 1; i < *argc; i++) {
+        if (!expand_windows_response_arg((*argv)[i], 0, &args)) {
+            return false;
+        }
+    }
+    *argc = args.len;
+    *argv = args.items;
+    return true;
 }
 #endif
 
@@ -4371,7 +4440,9 @@ main(int argc, char **argv)
     signal_setup();
 
 #ifdef _WIN32
-    expand_windows_response_file(&argc, &argv);
+    if (!expand_windows_response_files(&argc, &argv)) {
+        return 1;
+    }
 #endif
 
     ncc_opts_t opts;

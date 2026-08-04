@@ -29,6 +29,12 @@ def write_binary_expected(path: Path) -> None:
     path.write_bytes(b"A\x00B")
 
 
+def write_response(path: Path, args: list[str | Path]) -> None:
+    path.write_text(
+        subprocess.list2cmdline([str(arg) for arg in args]), encoding="utf-8"
+    )
+
+
 def same_bytes(left: Path, right: Path) -> bool:
     return left.read_bytes() == right.read_bytes()
 
@@ -224,6 +230,162 @@ def main(argv: list[str]) -> int:
             run_cmd([ncc, *rest, "-c", "-o", outobj, src])
             if not outobj.exists() or outobj.stat().st_size == 0:
                 fail("expected non-empty object output")
+
+        elif mode == "windows_response_file":
+            if os.name != "nt":
+                skip("response-file normalization is Windows-specific")
+
+            metadata_src = pop_arg(rest, "metadata source is required")
+            response_cases = {
+                "direct": [
+                    ncc,
+                    *rest,
+                    "--ncc-error-on-union",
+                    src,
+                    "-c",
+                    "-o",
+                    work / "direct.obj",
+                ],
+                "lone": [ncc, f"@{work / 'lone.rsp'}"],
+                "mixed-before": [
+                    ncc,
+                    f"@{work / 'mixed-before.rsp'}",
+                    "--ncc-error-on-union",
+                ],
+                "mixed-after": [
+                    ncc,
+                    "--ncc-error-on-union",
+                    f"@{work / 'mixed-after.rsp'}",
+                ],
+                "nested": [ncc, f"@{work / 'outer.rsp'}"],
+            }
+            write_response(
+                work / "lone.rsp",
+                [
+                    *rest,
+                    "--ncc-error-on-union",
+                    src,
+                    "-c",
+                    "-o",
+                    work / "lone.obj",
+                ],
+            )
+            for name in ("mixed-before", "mixed-after"):
+                write_response(
+                    work / f"{name}.rsp",
+                    [*rest, src, "-c", "-o", work / f"{name}.obj"],
+                )
+            write_response(
+                work / "inner.rsp",
+                [*rest, src, "-c", "-o", work / "nested.obj"],
+            )
+            write_response(
+                work / "outer.rsp",
+                ["--ncc-error-on-union", f"@{work / 'inner.rsp'}"],
+            )
+
+            for name, command in response_cases.items():
+                diagnostic = work / f"{name}.stderr"
+                status = run_cmd(command, stderr_path=diagnostic, check=False)
+                if status == 0:
+                    fail(f"{name} response-file form bypassed NCC union policy")
+                check_contains(
+                    diagnostic,
+                    "traditional C union is discouraged",
+                    f"{name} response-file form did not reach NCC processing",
+                )
+
+            write_response(
+                work / "dump.rsp",
+                [*rest, src, "-c", "-o", work / "dump-response.obj"],
+            )
+            for name, command in {
+                "dump-direct": [
+                    ncc,
+                    *rest,
+                    "--ncc-dump-output",
+                    src,
+                    "-c",
+                    "-o",
+                    work / "dump-direct.obj",
+                ],
+                "dump-response": [
+                    ncc,
+                    "--ncc-dump-output",
+                    f"@{work / 'dump.rsp'}",
+                ],
+            }.items():
+                diagnostic = work / f"{name}.stderr"
+                run_cmd(command, stderr_path=diagnostic)
+                check_contains(
+                    diagnostic,
+                    "=== NCC EMITTED OUTPUT ===",
+                    f"{name} form omitted NCC dump output",
+                )
+
+            metadata_obj = work / "metadata.obj"
+            run_cmd([ncc, *rest, "-c", metadata_src, "-o", metadata_obj])
+            assert_comptime_metadata(metadata_obj, present=True)
+            direct_exe = work / "metadata-direct.exe"
+            response_exe = work / "metadata-response.exe"
+            write_response(work / "metadata.rsp", [*rest, metadata_obj])
+            for name, command in {
+                "metadata-direct": [
+                    ncc,
+                    *rest,
+                    "--ncc-no-comptime",
+                    metadata_obj,
+                    "-o",
+                    direct_exe,
+                ],
+                "metadata-response": [
+                    ncc,
+                    "--ncc-no-comptime",
+                    f"@{work / 'metadata.rsp'}",
+                    "-o",
+                    response_exe,
+                ],
+            }.items():
+                diagnostic = work / f"{name}.stderr"
+                run_cmd(
+                    command,
+                    stderr_path=diagnostic,
+                    env_set={"NCC_VERBOSE": "1"},
+                )
+                check_contains(
+                    diagnostic,
+                    "--dump-section=.n00bct=",
+                    f"{name} form skipped NCC metadata processing",
+                )
+
+            invalid_cases = {
+                "missing": work / "missing.rsp",
+                "malformed": work / "malformed.rsp",
+            }
+            invalid_cases["malformed"].write_text('"unterminated', encoding="utf-8")
+            for i in range(17):
+                write_response(
+                    work / f"depth-{i}.rsp",
+                    [f"@{work / f'depth-{i + 1}.rsp'}"] if i < 16 else [src],
+                )
+            invalid_cases["nested"] = work / "depth-0.rsp"
+            expected_diagnostics = {
+                "missing": "cannot read response file",
+                "malformed": "unterminated quote in response file",
+                "nested": "response-file nesting exceeds",
+            }
+            for name, response in invalid_cases.items():
+                diagnostic = work / f"invalid-{name}.stderr"
+                status = run_cmd(
+                    [ncc, f"@{response}"], stderr_path=diagnostic, check=False
+                )
+                if status == 0:
+                    fail(f"invalid {name} response file succeeded")
+                check_contains(
+                    diagnostic,
+                    expected_diagnostics[name],
+                    f"invalid {name} response file omitted its diagnostic",
+                )
 
         elif mode in {
             "comptime_section_present",

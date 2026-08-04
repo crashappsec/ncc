@@ -561,6 +561,17 @@ if host_machine.system() == 'windows'
     depends : ncc_exe,
     timeout : 300,
   )
+
+  test('ncc_windows_response_file', test_runner,
+    args : test_runner_args + [ncc_exe, 'windows_response_file',
+            test_dir / 'test_union_deprecation.c',
+            test_dir / 'test_comptime_var.c']
+           + ncc_test_flags + ['--ncc-no-gc-stack-maps',
+                               '--ncc-no-auto-gc-roots'],
+    suite : 'ncc',
+    depends : ncc_exe,
+    timeout : 300,
+  )
 endif
 
 test('ncc_function_contracts_helper_shape', test_runner,
