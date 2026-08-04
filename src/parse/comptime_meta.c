@@ -4,6 +4,7 @@
 #include "lib/buffer.h"
 #include "util/platform.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -16,6 +17,30 @@
 #define NCC_CT_STATIC_INIT_FIXED_PAYLOAD_BYTES (8 + 1 + 1 + 1 + 2)
 #define NCC_AR_MAGIC "!<arch>\n"
 #define NCC_THIN_AR_MAGIC "!<thin>\n"
+
+#ifdef _WIN32
+static bool
+ascii_strneq_ignore_case(const char *lhs, const char *rhs, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        if (tolower((unsigned char)lhs[i])
+            != tolower((unsigned char)rhs[i])) {
+            return false;
+        }
+        if (lhs[i] == '\0') {
+            return true;
+        }
+    }
+
+    return true;
+}
+
+static bool
+ascii_streq_ignore_case(const char *lhs, const char *rhs)
+{
+    return ascii_strneq_ignore_case(lhs, rhs, strlen(rhs) + 1);
+}
+#endif
 
 static void
 append_byte(ncc_buffer_t *buf, uint8_t byte)
@@ -484,11 +509,23 @@ ncc_ct_read_input_section(const char *input_path,
     *len_out   = 0;
 
     const char *ext = strrchr(input_path, '.');
-    if (ext && (strcmp(ext, ".o") == 0 || strcmp(ext, ".obj") == 0)) {
+    if (ext && (strcmp(ext, ".o") == 0
+#ifdef _WIN32
+                || ascii_streq_ignore_case(ext, ".obj")
+#else
+                || strcmp(ext, ".obj") == 0
+#endif
+    )) {
         return ncc_ct_read_object_section(input_path, section, bytes_out,
                                           len_out, err_out);
     }
-    if (!ext || (strcmp(ext, ".a") != 0 && strcmp(ext, ".lib") != 0)) {
+    if (!ext || (strcmp(ext, ".a") != 0
+#ifdef _WIN32
+                 && !ascii_streq_ignore_case(ext, ".lib")
+#else
+                 && strcmp(ext, ".lib") != 0
+#endif
+    )) {
         return true; // not an object/archive we scan
     }
 
@@ -548,8 +585,14 @@ ncc_ct_read_input_section(const char *input_path,
                               && memcmp(list.stdout_data + start + mlen - 2,
                                         ".o", 2) == 0)
                           || (mlen >= 4
+#ifdef _WIN32
+                              && ascii_strneq_ignore_case(
+                                  list.stdout_data + start + mlen - 4,
+                                  ".obj", 4));
+#else
                               && memcmp(list.stdout_data + start + mlen - 4,
                                         ".obj", 4) == 0);
+#endif
         if (!object_member) {
             continue;
         }

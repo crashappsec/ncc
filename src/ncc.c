@@ -383,13 +383,45 @@ path_is_sep(char c)
     return c == '/' || c == '\\';
 }
 
+#ifdef _WIN32
+static bool
+ascii_strneq_ignore_case(const char *lhs, const char *rhs, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        if (tolower((unsigned char)lhs[i])
+            != tolower((unsigned char)rhs[i])) {
+            return false;
+        }
+        if (lhs[i] == '\0') {
+            return true;
+        }
+    }
+
+    return true;
+}
+
+static bool
+ascii_streq_ignore_case(const char *lhs, const char *rhs)
+{
+    while (*lhs && *rhs) {
+        if (tolower((unsigned char)*lhs) != tolower((unsigned char)*rhs)) {
+            return false;
+        }
+        lhs++;
+        rhs++;
+    }
+
+    return *lhs == '\0' && *rhs == '\0';
+}
+#endif
+
 static const char *
 windows_link_output_arg(const char *arg)
 {
 #ifdef _WIN32
     static const char prefix[] = "-Wl,/OUT:";
 
-    if (strncmp(arg, prefix, sizeof(prefix) - 1) == 0) {
+    if (ascii_strneq_ignore_case(arg, prefix, sizeof(prefix) - 1)) {
         return arg + sizeof(prefix) - 1;
     }
 #else
@@ -411,22 +443,6 @@ path_basename(const char *path)
 
     return base;
 }
-
-#ifdef _WIN32
-static bool
-ascii_streq_ignore_case(const char *lhs, const char *rhs)
-{
-    while (*lhs && *rhs) {
-        if (tolower((unsigned char)*lhs) != tolower((unsigned char)*rhs)) {
-            return false;
-        }
-        lhs++;
-        rhs++;
-    }
-
-    return *lhs == '\0' && *rhs == '\0';
-}
-#endif
 
 static char *
 normalize_cpp_path(const char *path)
@@ -1952,7 +1968,12 @@ is_linker_input(const char *arg)
         const char *dot = strrchr(arg, '.');
         if (dot) {
             if (strcmp(dot, ".a") == 0 || strcmp(dot, ".o") == 0
+#ifdef _WIN32
+                || ascii_streq_ignore_case(dot, ".lib")
+                || ascii_streq_ignore_case(dot, ".obj")
+#else
                 || strcmp(dot, ".lib") == 0 || strcmp(dot, ".obj") == 0
+#endif
                 || strcmp(dot, ".so") == 0 || strcmp(dot, ".dylib") == 0) {
                 return true;
             }
@@ -1971,8 +1992,14 @@ is_metadata_linker_input(const char *arg)
 
     const char *dot = strrchr(arg, '.');
     return dot && (strcmp(dot, ".o") == 0 || strcmp(dot, ".a") == 0
+#ifdef _WIN32
+                   || ascii_streq_ignore_case(dot, ".obj")
+                   || ascii_streq_ignore_case(dot, ".lib")
+#else
                    || strcmp(dot, ".obj") == 0
-                   || strcmp(dot, ".lib") == 0);
+                   || strcmp(dot, ".lib") == 0
+#endif
+    );
 }
 
 typedef struct {

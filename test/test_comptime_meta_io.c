@@ -383,7 +383,7 @@ test_archive_read(const char *archive_path)
 }
 
 static void
-test_archive_section_read(const char *archive_path)
+test_input_section_read(const char *input_path)
 {
 #if defined(_WIN32)
     const char *section = NCC_CT_SECTION_PE;
@@ -396,7 +396,7 @@ test_archive_section_read(const char *archive_path)
     size_t   len   = 0;
     char    *err   = nullptr;
 
-    assert(ncc_ct_read_input_section(archive_path, section, &bytes, &len, &err));
+    assert(ncc_ct_read_input_section(input_path, section, &bytes, &len, &err));
     assert(err == nullptr);
     assert(bytes != nullptr);
     assert(len > 0);
@@ -690,10 +690,17 @@ main(int argc, char **argv)
     assert(ncc_temp_workspace_create(&tmp, "ncc_ct_meta_io_", &tmp_err));
     assert(tmp_err == nullptr);
 
+#ifdef _WIN32
+    char *main_obj    = ncc_temp_workspace_join(&tmp, "MAIN.OBJ");
+    char *no_main_obj = ncc_temp_workspace_join(&tmp, "NO-MAIN.OBJ");
+    char *no_meta_obj = ncc_temp_workspace_join(&tmp, "NO-META.OBJ");
+    char *var_obj     = ncc_temp_workspace_join(&tmp, "VAR.OBJ");
+#else
     char *main_obj    = ncc_temp_workspace_join(&tmp, "main.o");
     char *no_main_obj = ncc_temp_workspace_join(&tmp, "no-main.o");
     char *no_meta_obj = ncc_temp_workspace_join(&tmp, "no-meta.o");
     char *var_obj     = ncc_temp_workspace_join(&tmp, "var.o");
+#endif
     char *bad_src     = ncc_temp_workspace_join(&tmp, "bad.c");
     char *bad_obj     = ncc_temp_workspace_join(&tmp, "bad.o");
     char *bad_v1_src  = ncc_temp_workspace_join(&tmp, "bad-v1.c");
@@ -708,10 +715,17 @@ main(int argc, char **argv)
         ncc_temp_workspace_join(&tmp, "plain-address-init.c");
     char *plain_address_obj =
         ncc_temp_workspace_join(&tmp, "plain-address-init.o");
+#ifdef _WIN32
+    char *archive     = ncc_temp_workspace_join(&tmp, "LIBCT.LIB");
+    char *thin_archive = ncc_temp_workspace_join(&tmp, "LIBCT-THIN.LIB");
+    char *no_meta_archive = ncc_temp_workspace_join(&tmp, "LIBCT-EMPTY.LIB");
+    char *bad_archive = ncc_temp_workspace_join(&tmp, "LIBCT-BAD.LIB");
+#else
     char *archive     = ncc_temp_workspace_join(&tmp, "libct.a");
     char *thin_archive = ncc_temp_workspace_join(&tmp, "libct-thin.a");
     char *no_meta_archive = ncc_temp_workspace_join(&tmp, "libct-empty.a");
     char *bad_archive = ncc_temp_workspace_join(&tmp, "libct-bad.a");
+#endif
     char *no_magic_input = ncc_temp_workspace_join(&tmp, "no-magic.o");
 
     compile_object(ncc, main_src, main_obj, false, n_flags, flags);
@@ -732,8 +746,9 @@ main(int argc, char **argv)
                                NCC_CT_STATIC_INIT_CONST_RO);
     test_no_static_init_object_io(plain_address_obj);
     test_archive_read(archive);
-    test_archive_section_read(archive);
-    test_archive_section_read(thin_archive);
+    test_input_section_read(main_obj);
+    test_input_section_read(archive);
+    test_input_section_read(thin_archive);
     test_archive_without_metadata_is_noop(no_meta_archive);
     test_no_magic_input_is_noop(no_magic_input);
     test_conflicts();

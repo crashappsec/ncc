@@ -387,6 +387,106 @@ def main(argv: list[str]) -> int:
                     f"invalid {name} response file omitted its diagnostic",
                 )
 
+            link_case_src = work / "link-case.c"
+            link_case_src.write_text(
+                "int comptime_main(int argc, char **argv, char **envp) { "
+                "(void)argc; (void)argv; (void)envp; return 0; }\n"
+                "int main(void) { return 0; }\n",
+                encoding="utf-8",
+            )
+            failing_case_src = work / "link-case-fail.c"
+            failing_case_src.write_text(
+                "int comptime_main(int argc, char **argv, char **envp) { "
+                "(void)argc; (void)argv; (void)envp; return 7; }\n"
+                "int main(void) { return 0; }\n",
+                encoding="utf-8",
+            )
+            runtime_src = work / "runtime.c"
+            runtime_src.write_text(
+                "__declspec(dllimport) void __stdcall ExitProcess(unsigned int);\n"
+                "[[noreturn]] void n00b_crt_main(int, char **, char **);\n"
+                "void n00b_crt_run_init_array(void) {}\n"
+                "void n00b_init_core_simple(int argc, char **argv) "
+                "{ (void)argc; (void)argv; }\n"
+                "void n00b_init_late(void) {}\n"
+                "void *n00b_crt_apply_comptime_image(void) { return 0; }\n"
+                "int n00b_run_degraded_static_inits(void) { return 0; }\n"
+                "[[noreturn]] void exit(int rc) { ExitProcess((unsigned int)rc); }\n"
+                "[[noreturn]] void n00b_exit(int rc) "
+                "{ ExitProcess((unsigned int)rc); }\n"
+                "[[noreturn]] void n00b_start(void) { "
+                "char *argv[] = {\"test\", 0}; n00b_crt_main(1, argv, 0); }\n",
+                encoding="utf-8",
+            )
+
+            link_case_obj = work / "link-case.obj"
+            failing_case_obj = work / "link-case-fail.obj"
+            runtime_obj = work / "runtime.obj"
+            runtime_lib = work / "runtime.LIB"
+            run_cmd([ncc, *rest, "-c", link_case_src, "-o", link_case_obj])
+            run_cmd([ncc, *rest, "-c", failing_case_src, "-o", failing_case_obj])
+            run_cmd([ncc, "--no-ncc", "-c", runtime_src, "-o", runtime_obj])
+            archiver = shutil.which("llvm-ar") or shutil.which("ar")
+            if not archiver:
+                fail("llvm-ar or ar is required for Windows link case tests")
+            run_cmd([archiver, "rcs", runtime_lib, runtime_obj])
+
+            link_cases = {
+                "object-lower": [link_case_obj, runtime_obj],
+                "object-upper-metadata": [work / "LINK-CASE.OBJ", runtime_obj],
+                "object-upper-replay": [link_case_obj, work / "RUNTIME.OBJ"],
+                "library-lower": [link_case_obj, work / "runtime.lib"],
+                "library-upper": [link_case_obj, runtime_lib],
+            }
+            for name, inputs in link_cases.items():
+                output = work / f"{name}.exe"
+                diagnostic = work / f"{name}.stderr"
+                run_cmd(
+                    [ncc, *rest, *inputs, "-lkernel32", "-o", output],
+                    stderr_path=diagnostic,
+                    env_set={"NCC_VERBOSE": "1"},
+                )
+                check_contains(
+                    diagnostic,
+                    "--dump-section=.n00bct=",
+                    f"{name} skipped NCC metadata processing",
+                )
+                run_cmd([output])
+
+            for spelling in ("OUT", "out", "OuT"):
+                output = work / f"output-{spelling}.exe"
+                run_cmd(
+                    [
+                        ncc,
+                        *rest,
+                        link_case_obj,
+                        runtime_obj,
+                        "-lkernel32",
+                        f"-Wl,/{spelling}:{output}",
+                    ]
+                )
+                run_cmd([output])
+
+            sentinel = work / "atomic-sentinel.exe"
+            sentinel_bytes = b"preserve-existing-output"
+            sentinel.write_bytes(sentinel_bytes)
+            status = run_cmd(
+                [
+                    ncc,
+                    *rest,
+                    failing_case_obj,
+                    runtime_obj,
+                    "-lkernel32",
+                    f"-Wl,/out:{sentinel}",
+                ],
+                stderr_path=work / "atomic-sentinel.stderr",
+                check=False,
+            )
+            if status == 0:
+                fail("failing lowercase /out: comptime link succeeded")
+            if sentinel.read_bytes() != sentinel_bytes:
+                fail("failing lowercase /out: link modified existing output")
+
         elif mode in {
             "comptime_section_present",
             "comptime_section_absent",
