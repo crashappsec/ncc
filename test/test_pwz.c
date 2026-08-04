@@ -8,6 +8,7 @@
 #include "parse/pwz.h"
 #include "scanner/token_stream.h"
 #include "lib/alloc.h"
+#include "xform/xform_helpers.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -113,6 +114,40 @@ test_codepoint_parse(void)
 }
 
 static void
+test_repetition_group_flattening(void)
+{
+    ncc_grammar_t *g = ncc_grammar_new();
+    ncc_nonterm_t *S = ncc_nonterm(g, ncc_string_from_cstr("S"));
+
+    ncc_add_rule(g, S, ncc_plus_group(g, NCC_ANY()));
+    ncc_grammar_set_start(g, S);
+
+    ncc_token_stream_t *ts
+        = ncc_token_stream_from_codepoints(ncc_string_from_cstr("abcd"));
+    ncc_pwz_parser_t *p = ncc_pwz_new(g);
+    assert(ncc_pwz_parse(p, ts));
+
+    ncc_parse_tree_t *tree = ncc_pwz_get_tree(p);
+    assert(tree && ncc_tree_num_children(tree) == 1);
+
+    ncc_parse_tree_t *group = ncc_tree_child(tree, 0);
+    assert(group && !ncc_tree_is_leaf(group));
+    assert(ncc_tree_num_children(group) == 4);
+
+    for (size_t i = 0; i < 4; i++) {
+        const char *text
+            = ncc_xform_get_first_leaf_text(ncc_tree_child(group, i));
+        assert(text && text[0] == "abcd"[i] && text[1] == 0);
+    }
+
+    printf("PASS: ordered repetition group flattening\n");
+
+    ncc_pwz_free(p);
+    ncc_token_stream_free(ts);
+    ncc_grammar_free(g);
+}
+
+static void
 test_forest(void)
 {
     ncc_grammar_t *g = ncc_grammar_new();
@@ -144,6 +179,7 @@ main(void)
 {
     test_basic_parse();
     test_codepoint_parse();
+    test_repetition_group_flattening();
     test_forest();
 
     printf("\nAll PWZ smoke tests passed.\n");

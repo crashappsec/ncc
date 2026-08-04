@@ -1052,6 +1052,18 @@ add_child_flattening_same_group(ncc_parse_tree_t *parent,
     }
 
     if (same_group_node(parent, child)) {
+        if (parent->node.num_children == 0) {
+            ncc_free(parent->node.children);
+            parent->node.children     = child->node.children;
+            parent->node.num_children = child->node.num_children;
+            parent->node.capacity     = child->node.capacity;
+            child->node.children      = nullptr;
+            child->node.num_children  = 0;
+            child->node.capacity      = 0;
+            ncc_free(child);
+            return;
+        }
+
         size_t nch = ncc_tree_num_children(child);
 
         for (size_t i = 0; i < nch; i++) {
