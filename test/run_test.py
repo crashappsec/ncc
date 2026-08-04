@@ -89,7 +89,12 @@ def run_cmd(
             stderr_handle.close()
 
     if check and proc.returncode != 0:
-        fail(f"command failed with exit code {proc.returncode}: {argv[0]}")
+        detail = "\n".join(
+            read_text(path)
+            for path in (stderr_path, stdout_path)
+            if path is not None and path.stat().st_size
+        )
+        fail(f"command failed with exit code {proc.returncode}: {argv[0]}", detail)
     return proc.returncode
 
 
@@ -230,6 +235,31 @@ def main(argv: list[str]) -> int:
             run_cmd([ncc, *rest, "-c", "-o", outobj, src])
             if not outobj.exists() or outobj.stat().st_size == 0:
                 fail("expected non-empty object output")
+
+        elif mode == "runner_failure_diagnostics":
+            marker = "GROUPED005_RUNNER_STDERR_MARKER_4A12"
+            status = run_cmd(
+                [
+                    sys.executable,
+                    Path(__file__).resolve(),
+                    sys.executable,
+                    "preprocess_stderr_contains",
+                    src,
+                    marker,
+                    "GROUPED005_STDOUT_SENTINEL",
+                    "-c",
+                    f"import sys; print({marker!r}, file=sys.stderr); raise SystemExit(23)",
+                ],
+                stderr_path=stderr_file,
+                check=False,
+            )
+            if status == 0:
+                fail("expected nested runner failure")
+            check_contains(
+                stderr_file,
+                marker,
+                "checked command omitted redirected stderr",
+            )
 
         elif mode == "windows_response_file":
             if os.name != "nt":

@@ -294,6 +294,15 @@ else
 endif
 test_dir    = meson.current_source_dir() / 'test'
 
+if host_machine.system() == 'windows'
+  test('ncc_runner_failure_diagnostics', test_runner,
+    args : test_runner_args + [ncc_exe, 'runner_failure_diagnostics',
+            test_dir / 'test_union_deprecation.c'],
+    suite : 'ncc',
+    depends : ncc_exe,
+  )
+endif
+
 # Library-level tests (link against libncc directly)
 test_pwz = executable('test_pwz',
   'test/test_pwz.c',
