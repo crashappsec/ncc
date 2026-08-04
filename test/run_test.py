@@ -517,6 +517,35 @@ def main(argv: list[str]) -> int:
             if sentinel.read_bytes() != sentinel_bytes:
                 fail("failing lowercase /out: link modified existing output")
 
+        elif mode == "system_entry":
+            if os.name != "nt":
+                skip("system-entry fixture is Windows-specific")
+
+            denied_src = pop_arg(rest, "comptime_main source is required")
+            allowed_bin = work / "system-entry-allow.exe"
+            denied_bin = work / "system-entry-deny.exe"
+            system_flags = [*rest, "--ncc-no-comptime", "--ncc-system-entry"]
+
+            run_cmd([ncc, "--no-ncc", "-std=gnu23", "-c", src, "-o", outobj])
+            run_cmd([ncc, *system_flags, outobj, "-o", allowed_bin])
+            run_cmd([allowed_bin])
+
+            status = run_cmd(
+                [ncc, *system_flags, denied_src, "-o", denied_bin],
+                stderr_path=stderr_file,
+                check=False,
+            )
+            if status == 0:
+                fail("system-entry comptime_main link unexpectedly succeeded")
+            check_contains(
+                stderr_file,
+                "--ncc-system-entry cannot degrade comptime_main; "
+                "a custom entry is required",
+                "system-entry comptime_main link omitted its diagnostic",
+            )
+            if denied_bin.exists():
+                fail("system-entry comptime_main link produced requested output")
+
         elif mode in {
             "comptime_section_present",
             "comptime_section_absent",
