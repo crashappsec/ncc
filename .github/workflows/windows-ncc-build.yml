@@ -1,0 +1,81 @@
+# Build the Windows-native ncc.exe (MSVC) and publish it so downstream bakes can
+# consume it. This is the bootstrap that unblocks racecar's Windows build+sign
+# runner (racecar#120): its packer bake stages ncc.exe from
+# `gh run download` (CI artifact) or `gh release download` (release asset,
+# ncc-*-windows-x64.exe). Builds on a GitHub-hosted windows-latest — hosted
+# runners CAN build ncc; the dedicated racecar runner is for the pinned toolchain
+# + ETW, not a build prerequisite — so this has no circular dependency on the box
+# it helps provision.
+name: windows-ncc-build
+
+on:
+  push:
+    branches: [baron/windows]
+    paths-ignore: ["**/*.md", "docs/**"]
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write   # attach the .exe to a release when one triggers this
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # MSVC C/C++ toolchain (cl.exe) so meson auto-detects the native compiler.
+      - name: Set up MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install meson + ninja
+        run: python -m pip install --upgrade meson ninja
+
+      # build.ps1 is the repo's authoritative Windows entrypoint: meson setup
+      # (-Db_vscrt=md) + ninja ncc.exe → build-msvc\ncc.exe. Release build.
+      - name: Build ncc.exe (MSVC, release)
+        shell: pwsh
+        run: |
+          .\build.ps1 -BuildDir build-msvc -BuildType release -Target ncc:executable -LogPath build-msvc\build.log
+          if (-not (Test-Path build-msvc\ncc.exe)) { throw "build-msvc\ncc.exe not produced" }
+
+      - name: Smoke — ncc.exe runs
+        shell: pwsh
+        run: |
+          & .\build-msvc\ncc.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "ncc.exe --version exited $LASTEXITCODE" }
+
+      - name: Stage named asset
+        shell: pwsh
+        run: |
+          $sha = "${{ github.sha }}".Substring(0,8)
+          Copy-Item build-msvc\ncc.exe "ncc-$sha-windows-x64.exe"
+          "NCC_ASSET=ncc-$sha-windows-x64.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # CI artifact — racecar's packer bake pulls this via `gh run download`
+      # (default ncc_ref = latest successful baron/windows build).
+      - name: Upload ncc.exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ncc-windows-x64
+          path: |
+            ${{ env.NCC_ASSET }}
+            build-msvc/build.log
+          if-no-files-found: error
+          retention-days: 90
+
+      # Release asset — the documented `gh release download -p 'ncc-*-windows-x64.exe'` path.
+      - name: Attach to release
+        if: github.event_name == 'release'
+        shell: pwsh
+        run: gh release upload "${{ github.event.release.tag_name }}" "${{ env.NCC_ASSET }}" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
