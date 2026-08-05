@@ -504,7 +504,7 @@ ncc_xform_ctx_init(ncc_xform_ctx_t      *ctx,
 // ============================================================================
 
 static bool
-node_in_system_header(ncc_parse_tree_t *node)
+first_leaf_in_system_header(ncc_parse_tree_t *node)
 {
     if (!node) {
         return false;
@@ -515,13 +515,6 @@ node_in_system_header(ncc_parse_tree_t *node)
         return tok && tok->system_header;
     }
 
-    // Group nodes (from BNF +, *, ?) can span both system and user code.
-    // Don't skip them — let the walker descend and check each child.
-    ncc_nt_node_t pn = ncc_tree_node_value(node);
-    if (pn.group_top || pn.group_item) {
-        return false;
-    }
-
     // Walk to the first leaf descendant.
     size_t nch = ncc_tree_num_children(node);
 
@@ -529,11 +522,61 @@ node_in_system_header(ncc_parse_tree_t *node)
         ncc_parse_tree_t *c = ncc_tree_child(node, i);
 
         if (c) {
-            return node_in_system_header(c);
+            return first_leaf_in_system_header(c);
         }
     }
 
     return false;
+}
+
+static bool
+subtree_all_system_headers(ncc_parse_tree_t *node)
+{
+    if (!node) {
+        return false;
+    }
+
+    if (ncc_tree_is_leaf(node)) {
+        ncc_token_info_t *tok = ncc_tree_leaf_value(node);
+        return tok && tok->system_header;
+    }
+
+    size_t nch = ncc_tree_num_children(node);
+    if (nch == 0) {
+        return false;
+    }
+
+    for (size_t i = 0; i < nch; i++) {
+        ncc_parse_tree_t *c = ncc_tree_child(node, i);
+        if (!c || !subtree_all_system_headers(c)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool
+node_in_system_header(ncc_parse_tree_t *node)
+{
+    if (!node) {
+        return false;
+    }
+
+    if (ncc_tree_is_leaf(node)) {
+        return first_leaf_in_system_header(node);
+    }
+
+    // Group nodes (from BNF +, *, ?) can span both system and user code.
+    // Skip them only when the entire grouped subtree is system-header text.
+    // Mixed groups still need traversal so user declarations after includes
+    // are not hidden.
+    ncc_nt_node_t pn = ncc_tree_node_value(node);
+    if (pn.group_top || pn.group_item) {
+        return subtree_all_system_headers(node);
+    }
+
+    return first_leaf_in_system_header(node);
 }
 
 // ============================================================================

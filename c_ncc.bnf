@@ -122,6 +122,8 @@
     | %"__nonnull"
     | %"__null_unspecified"
     | %"__nullable"
+    | %"__ptr32"
+    | %"__ptr64"
     | %"__restrict__"
     | %"__restrict"
     | %"__signed__"
@@ -352,6 +354,7 @@
     | %"{" %"}"
 
 <cast_expression> ::= %"(" <type_name> %")" <cast_expression>
+    | %"__extension__" <cast_expression>
     | <unary_expression>
 
 <compound_literal> ::= %"(" <storage_class_specifiers>? <type_name> %")" <braced_initializer>
@@ -740,6 +743,8 @@
     | %"__nullable"
     | %"__nonnull"
     | %"__null_unspecified"
+    | %"__ptr32"
+    | %"__ptr64"
 
 <type_qualifier_list> ::= <_kw_kw_type_qualifier>+
 

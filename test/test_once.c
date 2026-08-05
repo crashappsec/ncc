@@ -83,10 +83,10 @@ param_attr_once(int (__attribute__((unused)) value), int scale)
     return value * scale;
 }
 
-static long _Once
+static long long _Once
 interleaved_once(void)
 {
-    return 1099511627776L;
+    return 1099511627776LL;
 }
 
 _Once int *
@@ -167,8 +167,8 @@ main(void)
         return 1;
     }
 
-    if (interleaved_once() != 1099511627776L) {
-        fprintf(stderr, "FAIL: static long once return was not preserved\n");
+    if (interleaved_once() != 1099511627776LL) {
+        fprintf(stderr, "FAIL: static long long once return was not preserved\n");
         return 1;
     }
 

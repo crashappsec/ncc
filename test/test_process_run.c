@@ -203,7 +203,7 @@ test_missing_executable(void)
                    "missing executable should report launch failure");
     pass &= expect(result.signal_number == 0,
                    "missing executable should not report a signal");
-    pass &= expect(result.exception_code == 0,
+    pass &= expect(result.windows_exception_code == 0,
                    "missing executable should not report an exception");
     pass &= expect(result.stderr_data && result.stderr_data[0],
                    "missing executable should produce an error message");
@@ -241,7 +241,7 @@ test_captured_output_during_stdin(const char *self)
                    "early-output child should exit successfully");
     pass &= expect(result.signal_number == 0,
                    "early-output child should not report a signal");
-    pass &= expect(result.exception_code == 0,
+    pass &= expect(result.windows_exception_code == 0,
                    "early-output child should not report an exception");
     pass &= expect(result.stdout_data != nullptr,
                    "early-output child stdout should be captured");
@@ -281,7 +281,7 @@ test_early_stdin_close(const char *self)
                    "early stdin close should report the child exit status");
     pass &= expect(result.signal_number == 0,
                    "early stdin close should not report a signal");
-    pass &= expect(result.exception_code == 0,
+    pass &= expect(result.windows_exception_code == 0,
                    "early stdin close should not report an exception");
     pass &= expect(result.stderr_data
                        && strstr(result.stderr_data,
@@ -408,7 +408,7 @@ test_signal_termination(const char *self)
     pass &= expect(ok, "exception child should launch");
     pass &= expect(result.term_kind == NCC_PROCESS_TERM_EXCEPTION,
                    "exception child should report exception termination");
-    pass &= expect(result.exception_code != 0,
+    pass &= expect(result.windows_exception_code != 0,
                    "exception child should report exception code");
     pass &= expect(result.signal_number == 0,
                    "exception child should not report a POSIX signal");
