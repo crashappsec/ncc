@@ -93,5 +93,16 @@ bool ncc_layout_typedef_name_is_pointer(ncc_xform_ctx_t *ctx,
 // exclude such fields from GC pointer maps.
 bool ncc_layout_typedef_name_is_function_pointer(ncc_xform_ctx_t *ctx,
                                                  const char *name);
+// True if `name` is a typedef of the form `typedef _Atomic <aggregate> <name>;`
+// (an _Atomic-qualified aggregate). The gc-typemap walker must NOT emit
+// offsetof through such a type (ill-formed C) and falls back to a conservative
+// scan. See crashappsec/ncc#56.
+bool ncc_layout_typedef_name_is_atomic_aggregate(ncc_xform_ctx_t *ctx,
+                                                 const char *name);
+// The inner, non-atomic aggregate type recorded for a `typedef _Atomic
+// <aggregate> <name>;` typedef, or nullptr. The gc-typemap walker offsets
+// through this type (offsetof cannot traverse the _Atomic). See ncc#56.
+const char *ncc_layout_atomic_aggregate_typedef_offset_type(
+    ncc_xform_ctx_t *ctx, const char *name);
 void ncc_layout_collect_type_info(ncc_xform_ctx_t *ctx,
                                   ncc_parse_tree_t *tu);

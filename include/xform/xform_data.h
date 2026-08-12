@@ -59,6 +59,16 @@ typedef struct {
     // Subset of gc_pointer_typedefs that are FUNCTION pointers (code, not
     // heap). The gc-typemap walker excludes these from GC pointer maps.
     ncc_dict_t                 gc_function_pointer_typedefs;
+    // Typedef names of the form `typedef _Atomic <aggregate> <name>;` — an
+    // _Atomic-qualified AGGREGATE (not an atomic pointer). offsetof() into an
+    // _Atomic-qualified type is ill-formed (clang rejects it on Linux; some
+    // toolchains accept it), so the gc-typemap walker must fall back to a
+    // conservative scan for these instead of emitting offsetof through them.
+    // Recorded by NAME at the typedef declaration (where `_Atomic` is literally
+    // present) because the double-typedef case (`_Atomic <typedef-name>`) is
+    // resolved at emit time via the symtab fallback, which does not carry the
+    // is_atomic flag. See crashappsec/ncc#56.
+    ncc_dict_t                 gc_atomic_aggregate_typedefs;
     ncc_template_registry_t   *template_reg;
     const char                *vargs_type;
     const char                *once_prefix;

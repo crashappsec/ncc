@@ -691,6 +691,64 @@ ncc_layout_typedef_name_is_function_pointer(ncc_xform_ctx_t *ctx,
     return found;
 }
 
+static ncc_dict_t *
+layout_atomic_aggregate_typedefs(ncc_xform_ctx_t *ctx)
+{
+    ncc_xform_data_t *data = ncc_xform_get_data(ctx);
+    return data ? &data->gc_atomic_aggregate_typedefs : nullptr;
+}
+
+// Record a `typedef _Atomic <aggregate> <name>;` typedef so the gc-typemap
+// walker can offset THROUGH it legally: offsetof() cannot traverse an _Atomic
+// member, so fields beneath such a member are reached via the inner (raw,
+// non-atomic) aggregate type. The dict maps the typedef name to that inner
+// `offset_type` string. See crashappsec/ncc#56.
+static void
+record_atomic_aggregate_typedef(ncc_xform_ctx_t *ctx, const char *name,
+                                const char *offset_type)
+{
+    ncc_dict_t *atomics = layout_atomic_aggregate_typedefs(ctx);
+    if (!atomics || !name || !*name || !offset_type || !*offset_type) {
+        return;
+    }
+    bool found = false;
+    ncc_dict_get(atomics, (void *)name, &found);
+    if (!found) {
+        ncc_dict_put(atomics, ncc_layout_copy_cstr(name),
+                     ncc_layout_copy_cstr(offset_type));
+    }
+}
+
+bool
+ncc_layout_typedef_name_is_atomic_aggregate(ncc_xform_ctx_t *ctx,
+                                            const char *name)
+{
+    ncc_dict_t *atomics = layout_atomic_aggregate_typedefs(ctx);
+    if (!atomics || !name) {
+        return false;
+    }
+    bool found = false;
+    (void)ncc_dict_get(atomics, (void *)name, &found);
+    return found;
+}
+
+// The inner, non-atomic aggregate type name recorded for an
+// `typedef _Atomic <aggregate> <name>;` typedef (crashappsec/ncc#56), or
+// nullptr if `name` is not such a typedef. The gc-typemap walker offsets
+// through this type instead of the _Atomic typedef.
+const char *
+ncc_layout_atomic_aggregate_typedef_offset_type(ncc_xform_ctx_t *ctx,
+                                                const char *name)
+{
+    ncc_dict_t *atomics = layout_atomic_aggregate_typedefs(ctx);
+    if (!atomics || !name) {
+        return nullptr;
+    }
+    bool  found = false;
+    void *v     = ncc_dict_get(atomics, (void *)name, &found);
+    return found ? (const char *)v : nullptr;
+}
+
 static char *
 struct_or_union_kind_text(ncc_parse_tree_t *su)
 {
@@ -1288,20 +1346,33 @@ collect_typedef_aliases_from_decl(ncc_xform_ctx_t *ctx,
             continue;
         }
 
+        // A `typedef _Atomic <T> <name>;` where the whole thing is
+        // _Atomic-qualified. offsetof() cannot traverse an _Atomic member, so
+        // the gc-typemap walker offsets through the inner (raw, non-atomic)
+        // aggregate instead. Record the typedef name -> inner offset_type here,
+        // independent of whether aggregate_spec_from_specs resolves below,
+        // because the double-typedef case (`_Atomic <typedef-name>`) does NOT
+        // resolve inline — it goes through the symtab fallback at emit time,
+        // which drops the is_atomic flag on the recorded aggregate info.
+        // Recording by name closes that gap. (crashappsec/ncc#56)
+        bool decl_is_atomic = ncc_layout_specs_have_atomic_type_wrapper(
+            decl_specs);
+        char *offset_type =
+            decl_is_atomic
+                ? ncc_layout_aggregate_offset_type_from_specs(ctx, decl_specs)
+                : nullptr;
+        if (decl_is_atomic) {
+            record_atomic_aggregate_typedef(ctx, name,
+                                            offset_type ? offset_type : name);
+        }
+
         ncc_parse_tree_t *aggregate = ncc_layout_aggregate_spec_from_specs(
             ctx, decl_specs);
         if (aggregate) {
-            bool  is_atomic = ncc_layout_specs_have_atomic_type_wrapper(
-                decl_specs);
-            char *offset_type =
-                is_atomic
-                    ? ncc_layout_aggregate_offset_type_from_specs(ctx,
-                                                                  decl_specs)
-                    : nullptr;
-            record_aggregate_type(ctx, name, aggregate, is_atomic,
+            record_aggregate_type(ctx, name, aggregate, decl_is_atomic,
                                   offset_type ? offset_type : name);
-            ncc_free(offset_type);
         }
+        ncc_free(offset_type);
 
         ncc_free(name);
     }
