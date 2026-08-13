@@ -377,12 +377,19 @@ static bool
 dump_section(const char *objcopy, const char *obj_path, const char *section,
              const char *out_path, bool *absent, char **err_out)
 {
-    char *dump_arg = make_objcopy_section_arg("--dump-section=", section,
-                                             out_path);
-    const char *argv[] = {
+    char         *dump_arg    = make_objcopy_section_arg("--dump-section=",
+                                                         section, out_path);
+    ncc_buffer_t *discard_buf = ncc_buffer_empty();
+
+    ncc_buffer_puts(discard_buf, out_path);
+    ncc_buffer_puts(discard_buf, ".discard");
+
+    char       *discard = ncc_buffer_take(discard_buf);
+    const char *argv[]  = {
         objcopy,
         dump_arg,
         obj_path,
+        discard,
         nullptr,
     };
     ncc_process_spec_t spec = {
@@ -395,6 +402,8 @@ dump_section(const char *objcopy, const char *obj_path, const char *section,
     bool launched = ncc_process_run(&spec, &proc);
     bool ok       = launched && proc.exit_code == 0;
 
+    ncc_platform_remove_file(discard);
+
     if (ok) {
         bool exists = false;
         if (!path_exists(out_path, &exists, err_out)) {
@@ -406,6 +415,7 @@ dump_section(const char *objcopy, const char *obj_path, const char *section,
             }
             ncc_process_result_free(&proc);
             ncc_free(dump_arg);
+            ncc_free(discard);
             return false;
         }
     }
@@ -423,6 +433,7 @@ dump_section(const char *objcopy, const char *obj_path, const char *section,
 
     ncc_process_result_free(&proc);
     ncc_free(dump_arg);
+    ncc_free(discard);
     return ok;
 }
 
