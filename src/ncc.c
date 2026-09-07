@@ -511,6 +511,70 @@ is_ncc_path(const char *path)
 // Argument parsing (simple hand-rolled, no commander dependency)
 // ============================================================================
 
+/* Compiler-query flags: they ask the compiler about ITSELF and expect its
+ * answer on stdout, verbatim. They take no translation unit.
+ *
+ * ncc must not parse the response. It used to (n00b#302): meson probes with
+ * `--print-search-dirs`, clang answers
+ *
+ *     programs: =/usr/bin:/usr/local/bin
+ *
+ * and ncc fed that text back through its own C parser, which died on the `:`
+ *
+ *     ncc: parse FAILED (2 tokens produced)
+ *       context: programs >>> : = / Library /
+ *
+ * and then exited 0, so the caller could not even detect it. meson read the
+ * garbage as a failed compiler check and refused to configure -- which is what
+ * made fork PRs (always a cold configure, never a cached probe) unable to
+ * build at all.
+ *
+ * Prefix-matched entries take a value with `=`; the rest are exact.
+ */
+static bool
+ncc_arg_is_compiler_query(const char *arg)
+{
+    static const char *const exact[] = {
+        "--version",
+        "-v",
+        "-dumpversion",
+        "-dumpmachine",
+        "-dumpspecs",
+        "--print-search-dirs",
+        "-print-search-dirs",
+        "--print-libgcc-file-name",
+        "-print-libgcc-file-name",
+        "--print-multiarch",
+        "-print-multiarch",
+        "--print-sysroot",
+        "-print-sysroot",
+        "--print-target-triple",
+        "-print-target-triple",
+        "--print-resource-dir",
+        "-print-resource-dir",
+        nullptr,
+    };
+    static const char *const prefixes[] = {
+        "--print-file-name=",
+        "-print-file-name=",
+        "--print-prog-name=",
+        "-print-prog-name=",
+        nullptr,
+    };
+
+    for (int i = 0; exact[i]; i++) {
+        if (strcmp(arg, exact[i]) == 0) {
+            return true;
+        }
+    }
+    for (int i = 0; prefixes[i]; i++) {
+        if (strncmp(arg, prefixes[i], strlen(prefixes[i])) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void
 parse_argv(ncc_opts_t *opts, int argc, const char **argv)
 {
@@ -583,6 +647,13 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
 
         if (strcmp(arg, "--") == 0) {
             after_dashdash = true;
+            continue;
+        }
+
+        // n00b#302: hand compiler-query flags to the backend untouched.
+        if (ncc_arg_is_compiler_query(arg)) {
+            opts->has_compiler_query = true;
+            add_clang_arg(opts, arg);
             continue;
         }
 
@@ -4486,6 +4557,13 @@ main(int argc, char **argv)
     }
 
     if (opts.has_dep_only) {
+        return compiler_passthrough(&opts, argc, (const char **)argv);
+    }
+
+    // n00b#302: a compiler query has no translation unit to compile. Pass it
+    // through and return the backend's own exit status, so a caller probing
+    // ncc gets exactly what it would get from clang.
+    if (opts.has_compiler_query) {
         return compiler_passthrough(&opts, argc, (const char **)argv);
     }
 

@@ -14,6 +14,11 @@ typedef struct {
     bool         has_S;
     bool         has_fsyntax_only;
     bool         has_dep_only;
+    // A compiler-query flag (--version, --print-search-dirs, ...). These ask
+    // the compiler ABOUT ITSELF and take no translation unit, so ncc must hand
+    // them straight to the backend rather than run its own parser. See
+    // ncc_arg_is_compiler_query() and n00b#302.
+    bool         has_compiler_query;
     bool         has_std;       // user specified -std=
     bool         no_ncc;
     bool         ncc_help;
