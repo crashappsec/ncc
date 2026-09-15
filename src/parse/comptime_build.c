@@ -1022,6 +1022,55 @@ ncc_gcmap_emit_to_path(const ncc_opts_t  *opts,
     return ok;
 }
 
+bool
+ncc_gcraw_dump_to_path(const char *const *objects,
+                       int                n_objects,
+                       const char        *out_path,
+                       char             **err_out)
+{
+    if (err_out) {
+        *err_out = nullptr;
+    }
+
+#if defined(__APPLE__)
+    const char *section = "__DATA,n00b_gcraw";
+#else
+    const char *section = "n00b_gcraw";
+#endif
+
+    ncc_buffer_t *acc = ncc_buffer_empty();
+    for (int i = 0; i < n_objects; i++) {
+        uint8_t *bytes = nullptr;
+        size_t   n     = 0;
+        char    *rerr  = nullptr;
+        if (!ncc_ct_read_input_section(objects[i], section, &bytes, &n, &rerr)) {
+            set_err(err_out, "gcraw-dump: %s",
+                    rerr ? rerr : "section read failed");
+            ncc_free(rerr);
+            ncc_free(ncc_buffer_take(acc));
+            return false;
+        }
+        if (bytes && n) {
+            ncc_buffer_append(acc, (const char *)bytes, n);
+        }
+        ncc_free(bytes);
+    }
+
+    size_t total = acc->byte_len;
+    char  *blob  = ncc_buffer_take(acc);
+
+    char *write_err = nullptr;
+    bool  ok = ncc_platform_write_file(out_path, blob, total, &write_err);
+    ncc_free(blob);
+    if (!ok) {
+        set_err(err_out, "gcraw-dump: write of '%s' failed: %s", out_path,
+                write_err ? write_err : "(no detail)");
+        ncc_free(write_err);
+        return false;
+    }
+    return true;
+}
+
 int
 ncc_comptime_run_and_link(const ncc_opts_t *opts,
                           const ncc_comptime_plan_t *plan,

@@ -592,6 +592,7 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
     opts->gc_typemaps = true;
     opts->gcmap_prelink = false;
     opts->gcmap_emit_out = nullptr;
+    opts->gcraw_dump_out = nullptr;
 
     opts->compiler = getenv("NCC_COMPILER");
     if (opts->compiler) {
@@ -723,6 +724,11 @@ parse_argv(ncc_opts_t *opts, int argc, const char **argv)
         }
         if (strncmp(arg, "--ncc-gcmap-include=", 20) == 0) {
             add_gcmap_include(opts, arg + 20);
+            continue;
+        }
+        if (strncmp(arg, "--ncc-gcraw-dump=", 17) == 0) {
+            opts->gcraw_dump_out = arg + 17;
+            opts->gcmap_prelink  = true;
             continue;
         }
         if (strncmp(arg, "--ncc-gcmap-emit=", 17) == 0) {
@@ -1841,6 +1847,8 @@ run_preprocessor(const ncc_opts_t *opts, size_t *out_len)
 
 static bool ncc_arg_is_ncc_only_with_value(const char *arg);
 
+static bool is_gcraw_input(const char *arg); // defined below
+
 static int
 compiler_passthrough(const ncc_opts_t *opts, int argc, const char **argv)
 {
@@ -1861,6 +1869,9 @@ compiler_passthrough(const ncc_opts_t *opts, int argc, const char **argv)
             if (ncc_arg_is_ncc_only_with_value(arg) && i + 1 < argc) {
                 i++;
             }
+            continue;
+        }
+        if (is_gcraw_input(arg)) {
             continue;
         }
         new_argv[n++] = arg;
@@ -2031,6 +2042,20 @@ write_transformed_source_temp(ncc_temp_workspace_t *workspace,
     return path;
 }
 
+// A .gcraw blob holds record bytes already extracted from some other input. It
+// stands in for that input when records are collected, but no compiler or
+// linker can consume one, so it is filtered out of every argv ncc passes on,
+// exactly like an --ncc- flag.
+static bool
+is_gcraw_input(const char *arg)
+{
+    if (!arg || arg[0] == '-') {
+        return false;
+    }
+    const char *dot = strrchr(arg, '.');
+    return dot && strcmp(dot, ".gcraw") == 0;
+}
+
 static bool
 is_linker_input(const char *arg)
 {
@@ -2053,6 +2078,45 @@ is_linker_input(const char *arg)
     }
 
     return false;
+}
+
+// Collect the inputs to read records from. `X.gcraw` holds what `X.a` would
+// have yielded, so when both are on the line the archive is not scanned again:
+// the blob shadows it by stem. Caller frees with ncc_free.
+static const char **
+collect_record_inputs(int argc, const char *const *argv, int *n_out)
+{
+    const char **objs   = ncc_alloc_array(const char *, argc);
+    int          n_objs = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if (!is_linker_input(argv[i]) && !is_gcraw_input(argv[i])) {
+            continue;
+        }
+        const char *dot = strrchr(argv[i], '.');
+        if (dot && strcmp(dot, ".a") == 0) {
+            bool shadowed = false;
+            size_t stem   = (size_t)(dot - argv[i]);
+            for (int j = 1; j < argc; j++) {
+                const char *jdot = strrchr(argv[j], '.');
+                if (!jdot || strcmp(jdot, ".gcraw") != 0) {
+                    continue;
+                }
+                if ((size_t)(jdot - argv[j]) == stem
+                    && strncmp(argv[i], argv[j], stem) == 0) {
+                    shadowed = true;
+                    break;
+                }
+            }
+            if (shadowed) {
+                continue;
+            }
+        }
+        objs[n_objs++] = argv[i];
+    }
+
+    *n_out = n_objs;
+    return objs;
 }
 
 static bool
@@ -2161,6 +2225,9 @@ ncc_collect_link_inputs_from_clang_args(const ncc_opts_t *opts,
     for (int i = 0; opts && i < opts->n_clang_args; i++) {
         const char *arg = opts->clang_args[i];
 
+        if (is_gcraw_input(arg)) {
+            continue;
+        }
         if (strcmp(arg, "-o") == 0) {
             i++;
             continue;
@@ -2214,6 +2281,9 @@ ncc_collect_link_inputs_from_argv(const ncc_opts_t *opts, int argc,
             if (ncc_arg_is_ncc_only_with_value(arg) && i + 1 < argc) {
                 i++;
             }
+            continue;
+        }
+        if (is_gcraw_input(arg)) {
             continue;
         }
         if (strcmp(arg, "-o") == 0) {
@@ -2440,6 +2510,9 @@ ncc_compile_transformed_object(const ncc_opts_t *opts, const char *c_source,
     for (int i = 0; i < opts->n_clang_args; i++) {
         const char *arg = opts->clang_args[i];
 
+        if (is_gcraw_input(arg)) {
+            continue;
+        }
         if (strcmp(arg, "-o") == 0) {
             i++;
             continue;
@@ -3337,6 +3410,9 @@ custom_entry_link_passthrough(const ncc_opts_t *opts, int argc,
             if (ncc_arg_is_ncc_only_with_value(arg) && i + 1 < argc) {
                 i++;
             }
+            continue;
+        }
+        if (is_gcraw_input(arg)) {
             continue;
         }
 
@@ -4567,11 +4643,11 @@ main(int argc, char **argv)
         return compiler_passthrough(&opts, argc, (const char **)argv);
     }
 
-    if (opts.gcmap_emit_out) {
-        // Standalone aggregation: read n00b_gcraw from the link-input objects /
-        // archives on the command line, generate+compile the typed dictionary
-        // TU, and write it to the requested output path. No link is performed.
-        // For build systems where ncc does not drive the final executable link.
+    if (opts.gcraw_dump_out) {
+        // Standalone extraction: concatenate the raw n00b_gcraw bytes carried by
+        // the link inputs and write them out. No dictionary is generated and no
+        // link is performed. A build system runs this once per archive and feeds
+        // the blob to --ncc-gcmap-emit in place of the archive.
         const char **objs   = ncc_alloc_array(const char *, argc);
         int          n_objs = 0;
         for (int i = 1; i < argc; i++) {
@@ -4579,6 +4655,26 @@ main(int argc, char **argv)
                 objs[n_objs++] = argv[i];
             }
         }
+        char *gc_err = nullptr;
+        bool  ok     = ncc_gcraw_dump_to_path(objs, n_objs,
+                                              opts.gcraw_dump_out, &gc_err);
+        ncc_free(objs);
+        if (!ok) {
+            print_process_message("gcraw-dump failed", gc_err);
+            ncc_free(gc_err);
+            return 1;
+        }
+        return 0;
+    }
+
+    if (opts.gcmap_emit_out) {
+        // Standalone aggregation: read n00b_gcraw from the link-input objects /
+        // archives on the command line, generate+compile the typed dictionary
+        // TU, and write it to the requested output path. No link is performed.
+        // For build systems where ncc does not drive the final executable link.
+        int          n_objs = 0;
+        const char **objs   = collect_record_inputs(argc, (const char *const *)argv,
+                                              &n_objs);
         char *gc_err = nullptr;
         bool  ok     = ncc_gcmap_emit_to_path(&opts, objs, n_objs,
                                           opts.gcmap_emit_out, &gc_err);
@@ -4601,13 +4697,9 @@ main(int argc, char **argv)
         const char **link_argv = (const char **)argv;
         ncc_temp_workspace_t gc_tmp = {0};
         if (opts.gcmap_prelink) {
-            const char **objs   = ncc_alloc_array(const char *, argc);
             int          n_objs = 0;
-            for (int i = 1; i < argc; i++) {
-                if (is_linker_input(argv[i])) {
-                    objs[n_objs++] = argv[i];
-                }
-            }
+            const char **objs   = collect_record_inputs(argc, (const char *const *)argv,
+                                              &n_objs);
             char *gc_obj = nullptr;
             char *gc_err = nullptr;
             char *tmp_err = nullptr;

@@ -14,8 +14,10 @@
 
 #include "lib/alloc.h"
 #include "lib/buffer.h"
+#include "lib/dict.h"
 #include "parse/emit.h"
 #include "util/platform.h"
+#include "util/sha256.h"
 #include "xform/xform_data.h"
 #include "xform/xform_helpers.h"
 
@@ -23,6 +25,9 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <string.h>
 
 // ============================================================================
@@ -80,10 +85,379 @@ static void set_helper_exit_error(char **err_out, const char *phase,
   *err_out = ncc_buffer_take(buf);
 }
 
+
+// ============================================================================
+// Constexpr evaluation cache
+// ============================================================================
+//
+// compile_and_run builds a self-contained program from `source` and returns its
+// stdout, so the source text and the compiler that builds it determine the
+// result completely: nothing about the surrounding translation unit can change
+// the answer. That makes the pair a sound cache key. Headers push the same
+// expressions through every TU that includes them, so one build evaluates the
+// same program many times over.
+//
+// The key covers the source, the compiler's path/size/mtime, the fixed helper
+// flags, the host, and a format version. A compiler upgrade, a flag change or a
+// format change therefore misses rather than returning a stale answer. Only
+// successful runs are stored; a failure re-runs so its diagnostic is produced
+// fresh.
+//
+// NCC_CONSTEXPR_CACHE names the directory. Setting it to "0", "off" or "" turns
+// both tiers off, for checking a cached answer against a recomputed one.
+
+// The helper runs on this machine, so an entry is only valid for the same
+// host shape. Kept coarse on purpose: it is part of the key, not a check.
+#if defined(__APPLE__) && defined(__aarch64__)
+#define NCC_CE_HOST_TAG "darwin-arm64"
+#elif defined(__APPLE__)
+#define NCC_CE_HOST_TAG "darwin-x86_64"
+#elif defined(_WIN32)
+#define NCC_CE_HOST_TAG "windows"
+#elif defined(__linux__) && defined(__aarch64__)
+#define NCC_CE_HOST_TAG "linux-arm64"
+#elif defined(__linux__)
+#define NCC_CE_HOST_TAG "linux-x86_64"
+#else
+#define NCC_CE_HOST_TAG "unknown-host"
+#endif
+
+#define NCC_CE_CACHE_VERSION "ncc-constexpr-2"
+#define NCC_CE_HELPER_FLAGS  "-x c -std=gnu23 -w"
+
+static ncc_dict_t ce_memo;
+static bool       ce_memo_ready = false;
+static int        ce_disk_state = 0;  // 0 unknown, 1 on, -1 off
+static char      *ce_disk_dir   = nullptr;
+
+static char *ce_dup(const char *s, size_t n) {
+  char *d = (char *)ncc_alloc_array(char, n + 1);
+  memcpy(d, s, n);
+  d[n] = '\0';
+  return d;
+}
+
+// The compiler often arrives as a bare name ("cc"), which cannot be stat'd.
+// Resolve it against PATH so the key can carry its identity; an unresolvable
+// compiler yields nullptr and disables caching rather than weakening the key.
+static const char *ce_resolve_compiler(const char *compiler) {
+  static const char *resolved = nullptr;
+  static const char *resolved_for = nullptr;
+
+  if (!compiler) {
+    return nullptr;
+  }
+
+  if (resolved_for == compiler) {
+    return resolved;
+  }
+
+  resolved_for = compiler;
+  resolved     = nullptr;
+
+  if (strchr(compiler, '/')) {
+    resolved = compiler;
+    return resolved;
+  }
+
+  const char *path = getenv("PATH");
+
+  if (!path) {
+    return nullptr;
+  }
+
+  size_t nlen = strlen(compiler);
+
+  for (const char *p = path; *p;) {
+    const char *sep = strchr(p, ':');
+    size_t      dlen = sep ? (size_t)(sep - p) : strlen(p);
+
+    if (dlen) {
+      char *cand = (char *)ncc_alloc_array(char, dlen + nlen + 2);
+      memcpy(cand, p, dlen);
+      cand[dlen] = '/';
+      memcpy(cand + dlen + 1, compiler, nlen + 1);
+
+      if (access(cand, X_OK) == 0) {
+        resolved = cand;
+        return resolved;
+      }
+      ncc_free(cand);
+    }
+
+    if (!sep) {
+      break;
+    }
+    p = sep + 1;
+  }
+
+  return nullptr;
+}
+
+// Hex of sha256(version | flags | host | compiler identity | source), or false
+// when the compiler cannot be resolved and stat'd -- without its identity an
+// upgrade could not invalidate the entry, so caching is refused, not risked.
+static bool ce_cache_key(const char *compiler, const char *source,
+                         char out[65]) {
+  struct stat st;
+
+  compiler = ce_resolve_compiler(compiler);
+
+  if (!compiler || !source || stat(compiler, &st) != 0) {
+    return false;
+  }
+
+  ncc_sha256_ctx_t ctx;
+  ncc_sha256_init(&ctx);
+
+  const char *v = NCC_CE_CACHE_VERSION "\0" NCC_CE_HELPER_FLAGS "\0";
+  ncc_sha256_update(&ctx, v, sizeof(NCC_CE_CACHE_VERSION)
+                                + sizeof(NCC_CE_HELPER_FLAGS));
+
+  // The helper is compiled AND executed here, so the host decides the answer.
+  const char *host = NCC_CE_HOST_TAG;
+  ncc_sha256_update(&ctx, host, strlen(host) + 1);
+
+  ncc_sha256_update(&ctx, compiler, strlen(compiler) + 1);
+  uint64_t sz = (uint64_t)st.st_size;
+  uint64_t mt = (uint64_t)st.st_mtime;
+  ncc_sha256_update(&ctx, &sz, sizeof(sz));
+  ncc_sha256_update(&ctx, &mt, sizeof(mt));
+  ncc_sha256_update(&ctx, source, strlen(source) + 1);
+
+  ncc_sha256_digest_t d;
+  ncc_sha256_finalize(&ctx, d);
+
+  for (int i = 0; i < NCC_SHA256_DIGEST_WORDS; i++) {
+    snprintf(out + i * 8, 9, "%08x", d[i]);
+  }
+  out[64] = '\0';
+
+  return true;
+}
+
+static bool ce_disk_enabled(void) {
+  if (ce_disk_state != 0) {
+    return ce_disk_state > 0;
+  }
+
+  const char *env = getenv("NCC_CONSTEXPR_CACHE");
+
+  if (env && (!*env || !strcmp(env, "0") || !strcmp(env, "off"))) {
+    ce_disk_state = -1;
+    return false;
+  }
+
+  if (env) {
+    ce_disk_dir = ce_dup(env, strlen(env));
+  } else {
+    const char *base = getenv("XDG_CACHE_HOME");
+    char       *tmp  = nullptr;
+
+    if (!base || !*base) {
+      const char *home = getenv("HOME");
+
+      if (!home || !*home) {
+        ce_disk_state = -1;
+        return false;
+      }
+      tmp  = ncc_platform_join_path(home, ".cache");
+      base = tmp;
+    }
+
+    char *n = ncc_platform_join_path(base, "ncc");
+    ce_disk_dir = ncc_platform_join_path(n, "constexpr");
+    ncc_free(n);
+    ncc_free(tmp);
+  }
+
+  ce_disk_state = ce_disk_dir ? 1 : -1;
+
+  return ce_disk_state > 0;
+}
+
+static char *ce_entry_path(const char *key) {
+  // Shard on the first two hex digits so one directory does not collect every
+  // entry in the build.
+  char shard[3] = {key[0], key[1], '\0'};
+  char *dir     = ncc_platform_join_path(ce_disk_dir, shard);
+
+  if (!dir) {
+    return nullptr;
+  }
+
+  mkdir(ce_disk_dir, 0755);
+  mkdir(dir, 0755);
+
+  char *p = ncc_platform_join_path(dir, key + 2);
+  ncc_free(dir);
+
+  return p;
+}
+
+static char *ce_disk_get(const char *key) {
+  if (!ce_disk_enabled()) {
+    return nullptr;
+  }
+
+  char *path = ce_entry_path(key);
+
+  if (!path) {
+    return nullptr;
+  }
+
+  char *out = nullptr;
+  FILE *f   = fopen(path, "rb");
+
+  if (f) {
+    if (!fseek(f, 0, SEEK_END)) {
+      long n = ftell(f);
+
+      if (n >= 0 && !fseek(f, 0, SEEK_SET)) {
+        char *buf = (char *)ncc_alloc_array(char, (size_t)n + 1);
+
+        if (fread(buf, 1, (size_t)n, f) == (size_t)n) {
+          buf[n] = '\0';
+          out    = buf;
+        } else {
+          ncc_free(buf);
+        }
+      }
+    }
+    fclose(f);
+  }
+
+  ncc_free(path);
+
+  return out;
+}
+
+// Written to a unique temp name and renamed, so a concurrent build never
+// observes a half-written entry.
+static void ce_disk_put(const char *key, const char *value) {
+  if (!ce_disk_enabled()) {
+    return;
+  }
+
+  char *path = ce_entry_path(key);
+
+  if (!path) {
+    return;
+  }
+
+  char tmp[64];
+  snprintf(tmp, sizeof(tmp), ".tmp.%ld", (long)getpid());
+
+  size_t n    = strlen(path) + strlen(tmp) + 1;
+  char  *tpath = (char *)ncc_alloc_array(char, n);
+  snprintf(tpath, n, "%s%s", path, tmp);
+
+  char *werr = nullptr;
+
+
+  if (ncc_platform_write_file(tpath, value, strlen(value), &werr)) {
+    if (rename(tpath, path) != 0) {
+      ncc_platform_remove_file(tpath);
+    }
+  } else {
+    // A cache that cannot be written is not an error: the answer was already
+    // computed, so drop the entry and carry on.
+    ncc_free(werr);
+  }
+
+  ncc_free(tpath);
+  ncc_free(path);
+}
+
+static char *ce_memo_get(const char *key) {
+  if (!ce_memo_ready) {
+    return nullptr;
+  }
+
+  bool  found = false;
+  void *v     = ncc_dict_get(&ce_memo, (void *)key, &found);
+
+  return found && v ? ce_dup((const char *)v, strlen((const char *)v))
+                    : nullptr;
+}
+
+static void ce_memo_put(const char *key, const char *value) {
+  if (!ce_memo_ready) {
+    ncc_dict_init(&ce_memo, ncc_hash_cstring, ncc_dict_cstr_eq);
+    ce_memo_ready = true;
+  }
+
+  ncc_dict_put(&ce_memo, ce_dup(key, strlen(key)),
+               ce_dup(value, strlen(value)));
+}
+
+// `deterministic` reports whether a failure was the helper itself exiting
+// nonzero (same program, same answer every time) rather than the toolchain
+// failing to launch. Only the former is cacheable; a launch failure is an
+// environment problem that must be retried, not remembered.
+static char *compile_and_run_uncached(const char *compiler, const char *source,
+                                      char **err_out, bool *deterministic);
+
 char *compile_and_run(const char *compiler, const char *source,
                       char **err_out) {
   if (err_out) {
     *err_out = nullptr;
+  }
+
+  char key[65];
+  bool keyed = ce_cache_key(compiler, source, key);
+
+
+
+  if (keyed) {
+    char *hit = ce_memo_get(key);
+
+    if (!hit) {
+      hit = ce_disk_get(key);
+
+      if (hit) {
+        ce_memo_put(key, hit);
+      }
+    }
+
+    if (hit) {
+      char *out = nullptr;
+
+      if (hit[0] == 'S') {
+        out = ce_dup(hit + 1, strlen(hit + 1));
+      } else if (err_out) {
+        *err_out = ce_dup(hit + 1, strlen(hit + 1));
+      }
+
+      ncc_free(hit);
+
+      return out;
+    }
+  }
+
+  bool  deterministic = false;
+  char *result = compile_and_run_uncached(compiler, source, err_out,
+                                          &deterministic);
+
+  if (keyed && (result || deterministic)) {
+    ncc_buffer_t *ent = ncc_buffer_empty();
+
+    ncc_buffer_putc(ent, result ? 'S' : 'F');
+    ncc_buffer_puts(ent, result ? result : (err_out && *err_out ? *err_out : ""));
+
+    char *blob = ncc_buffer_take(ent);
+    ce_memo_put(key, blob);
+    ce_disk_put(key, blob);
+    ncc_free(blob);
+  }
+
+  return result;
+}
+
+static char *compile_and_run_uncached(const char *compiler, const char *source,
+                                      char **err_out, bool *deterministic) {
+  if (deterministic) {
+    *deterministic = false;
   }
 
   ncc_temp_workspace_t tmp = {0};
@@ -134,6 +508,9 @@ char *compile_and_run(const char *compiler, const char *source,
   }
 
   if (compile_proc.exit_code != 0) {
+    if (deterministic) {
+      *deterministic = true;
+    }
     set_helper_exit_error(err_out, "compile", compile_proc.exit_code,
                           compile_proc.stderr_data,
                           compile_proc.stderr_len);
@@ -156,6 +533,9 @@ char *compile_and_run(const char *compiler, const char *source,
   }
 
   if (run_proc.exit_code != 0) {
+    if (deterministic) {
+      *deterministic = true;
+    }
     set_helper_exit_error(err_out, "execution", run_proc.exit_code,
                           run_proc.stderr_data, run_proc.stderr_len);
     goto cleanup;

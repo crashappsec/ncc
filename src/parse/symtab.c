@@ -59,6 +59,7 @@ ncc_symtab_t *
 ncc_symtab_new(void)
 {
     ncc_symtab_t *st = ncc_alloc(ncc_symtab_t);
+    ncc_dict_init(&st->scope_by_node, nullptr, nullptr);
     return st;
 }
 
@@ -68,6 +69,8 @@ ncc_symtab_free(ncc_symtab_t *st)
     if (!st) {
         return;
     }
+
+    ncc_dict_free(&st->scope_by_node);
 
     // Scopes are retained (pop no longer frees), so free every scope and its
     // entries via the retained list. Each entry belongs to exactly one scope's
@@ -267,6 +270,10 @@ ncc_symtab_set_scope_node(ncc_symtab_t *st, ncc_string_t ns_name,
     ncc_namespace_t *ns = ncc_symtab_ns(st, ns_name);
     if (ns && ns->current) {
         ns->current->node = node;
+
+        if (node) {
+            ncc_dict_put(&st->scope_by_node, node, ns->current);
+        }
     }
 }
 
@@ -276,12 +283,9 @@ ncc_symtab_scope_for_node(ncc_symtab_t *st, ncc_parse_tree_t *node)
     if (!st || !node) {
         return nullptr;
     }
-    for (ncc_scope_t *s = st->all_scopes; s; s = s->all_next) {
-        if (s->node == node) {
-            return s;
-        }
-    }
-    return nullptr;
+    bool found = false;
+
+    return (ncc_scope_t *)ncc_dict_get(&st->scope_by_node, node, &found);
 }
 
 ncc_sym_entry_t *
