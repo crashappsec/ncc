@@ -101,6 +101,13 @@ bool ncc_platform_remove_file(const char *path);
 bool ncc_platform_remove_dir(const char *path);
 
 /*
+ * ncc_platform_mkdir() creates a single directory and treats an existing
+ * directory as success, so callers can use it to make a cache path without
+ * racing another process that is doing the same. It does not create parents.
+ */
+bool ncc_platform_mkdir(const char *path);
+
+/*
  * Owns a private temporary directory and removes it recursively during cleanup.
  * The path returned by ncc_temp_workspace_path() and the workspace->path member
  * are owned by the workspace. Paths returned by ncc_temp_workspace_join() are
