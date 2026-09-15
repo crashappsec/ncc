@@ -14,9 +14,15 @@
 # target).
 name: windows-ncc-build
 
+# main is here because downstream pins resolve an artifact by exact SHA:
+# n00b's Windows validation looks up the newest successful windows-ncc-build run
+# matching its NCC_REV_DEFAULT and fails closed when there is none. Without a
+# main trigger every ncc bump downstream needs someone to remember to dispatch
+# this by hand -- a90dbc3e, a4eee6a2 and 4cd3d8a8 were all manual -- and a repin
+# PR is red until they do (n00b#418).
 on:
   push:
-    branches: [baron/windows]
+    branches: [main, baron/windows]
     paths-ignore: ["**/*.md", "docs/**"]
   workflow_dispatch:
   release:
