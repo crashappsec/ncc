@@ -286,8 +286,8 @@ static char *ce_entry_path(const char *key) {
     return nullptr;
   }
 
-  mkdir(ce_disk_dir, 0755);
-  mkdir(dir, 0755);
+  ncc_platform_mkdir(ce_disk_dir);
+  ncc_platform_mkdir(dir);
 
   char *p = ncc_platform_join_path(dir, key + 2);
   ncc_free(dir);

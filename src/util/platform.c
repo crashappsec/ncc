@@ -584,6 +584,26 @@ ncc_platform_remove_dir(const char *path)
     return rc == 0 || errno == ENOENT;
 }
 
+bool
+ncc_platform_mkdir(const char *path)
+{
+    if (!path || !path[0]) {
+        return false;
+    }
+
+    wchar_t *wpath = utf8_to_utf16(path);
+    if (!wpath) {
+        return false;
+    }
+
+    // _wmkdir takes no mode: Windows has no POSIX permission bits to apply, and
+    // the directory inherits its parent's ACL.
+    int rc = _wmkdir(wpath);
+    ncc_free(wpath);
+
+    return rc == 0 || errno == EEXIST;
+}
+
 static bool
 windows_is_dot_dir(const wchar_t *name)
 {
@@ -1590,6 +1610,16 @@ ncc_platform_remove_dir(const char *path)
     }
 
     return rmdir(path) == 0 || errno == ENOENT;
+}
+
+bool
+ncc_platform_mkdir(const char *path)
+{
+    if (!path || !path[0]) {
+        return false;
+    }
+
+    return mkdir(path, 0755) == 0 || errno == EEXIST;
 }
 
 static bool
