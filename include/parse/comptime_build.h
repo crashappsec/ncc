@@ -77,6 +77,20 @@ bool ncc_gcmap_emit_to_path(const ncc_opts_t  *opts,
                             char             **err_out);
 
 /**
+ * Concatenate the raw n00b_gcraw record bytes carried by the given link inputs
+ * and write them to `out_path`. No dictionary is generated and nothing is
+ * linked. The blob is itself accepted as an input by ncc_gcmap_emit_to_path, so
+ * a build can extract an archive's records once and hand the result to every
+ * executable that links that archive. Writes an empty file when the inputs carry
+ * no records, so the output always exists for a build system to depend on.
+ * Returns false (sets *err_out) on error.
+ */
+bool ncc_gcraw_dump_to_path(const char *const *objects,
+                            int                n_objects,
+                            const char        *out_path,
+                            char             **err_out);
+
+/**
  * Link a runtime-degraded comptime program without executing comptime at build.
  *
  * @pre  opts and plan are non-null; plan->meta has a comptime_main record, one

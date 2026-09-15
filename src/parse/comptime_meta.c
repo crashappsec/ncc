@@ -314,40 +314,59 @@ try_objcopy_candidate(const char *program)
     return ok;
 }
 
+// Probing spawns the candidate, and section reads happen once per object in
+// every archive on the link line, so memoize. The tool cannot change under a
+// single ncc process.
 static const char *
 find_objcopy(void)
 {
+    static const char *cached = nullptr;
+    static bool        probed = false;
+
+    if (probed) {
+        return cached;
+    }
+    probed = true;
+
     const char *env = getenv("NCC_LLVM_OBJCOPY");
 
     if (try_objcopy_candidate(env)) {
-        return env;
+        cached = env;
     }
-    if (try_objcopy_candidate("llvm-objcopy")) {
-        return "llvm-objcopy";
+    else if (try_objcopy_candidate("llvm-objcopy")) {
+        cached = "llvm-objcopy";
     }
-    if (try_objcopy_candidate("objcopy")) {
-        return "objcopy";
+    else if (try_objcopy_candidate("objcopy")) {
+        cached = "objcopy";
     }
 
-    return nullptr;
+    return cached;
 }
 
 static const char *
 find_ar(void)
 {
+    static const char *cached = nullptr;
+    static bool        probed = false;
+
+    if (probed) {
+        return cached;
+    }
+    probed = true;
+
     const char *env = getenv("NCC_LLVM_AR");
 
     if (try_objcopy_candidate(env)) {
-        return env;
+        cached = env;
     }
-    if (try_objcopy_candidate("llvm-ar")) {
-        return "llvm-ar";
+    else if (try_objcopy_candidate("llvm-ar")) {
+        cached = "llvm-ar";
     }
-    if (try_objcopy_candidate("ar")) {
-        return "ar";
+    else if (try_objcopy_candidate("ar")) {
+        cached = "ar";
     }
 
-    return nullptr;
+    return cached;
 }
 
 static const char *const ct_section_names[] = {
@@ -381,8 +400,19 @@ dump_section(const char *objcopy, const char *obj_path, const char *section,
                                                          section, out_path);
     ncc_buffer_t *discard_buf = ncc_buffer_empty();
 
+#ifdef _WIN32
+    // The Windows null device is not a valid objcopy output object, so write the
+    // copy next to the dump and delete it.
     ncc_buffer_puts(discard_buf, out_path);
     ncc_buffer_puts(discard_buf, ".discard");
+    bool discard_on_disk = true;
+#else
+    // objcopy insists on an output object even when only --dump-section is
+    // wanted, and that copy is the size of the input. Send it to the null
+    // device: over an archive's worth of members it is the bulk of the I/O.
+    ncc_buffer_puts(discard_buf, "/dev/null");
+    bool discard_on_disk = false;
+#endif
 
     char       *discard = ncc_buffer_take(discard_buf);
     const char *argv[]  = {
@@ -402,7 +432,9 @@ dump_section(const char *objcopy, const char *obj_path, const char *section,
     bool launched = ncc_process_run(&spec, &proc);
     bool ok       = launched && proc.exit_code == 0;
 
-    ncc_platform_remove_file(discard);
+    if (discard_on_disk) {
+        ncc_platform_remove_file(discard);
+    }
 
     if (ok) {
         bool exists = false;
@@ -496,6 +528,8 @@ ncc_ct_read_object_section(const char *obj_path,
 }
 
 static char *join_dir_leaf(const char *dir, const char *leaf); // defined below
+static bool  contains_bytes(const char *data, size_t len, const char *needle,
+                            size_t needle_len);
 static bool  list_archive_members(const char *ar, const char *archive_path,
                                   ncc_process_result_t *proc, char **err_out);
 static bool  extract_archive_members(const char *ar, const char *archive_path,
@@ -520,6 +554,29 @@ ncc_ct_read_input_section(const char *input_path,
     *len_out   = 0;
 
     const char *ext = strrchr(input_path, '.');
+    if (ext && strcmp(ext, ".gcraw") == 0) {
+        // Record bytes extracted from some other input on an earlier run; they
+        // are already in the concatenated form this function returns. A blob
+        // holds one section's bytes with nothing left to say which, so it
+        // answers for the gcraw section only.
+        const char *comma     = strrchr(section, ',');
+        const char *sect_leaf = comma ? comma + 1 : section;
+        if (strcmp(sect_leaf, "n00b_gcraw") != 0) {
+            return true;
+        }
+        size_t n    = 0;
+        char  *data = read_binary_file(input_path, &n, err_out);
+        if (!data) {
+            return false;
+        }
+        if (n == 0) {
+            ncc_free(data);
+            return true;
+        }
+        *bytes_out = (uint8_t *)data;
+        *len_out   = n;
+        return true;
+    }
     if (ext && (strcmp(ext, ".o") == 0
 #ifdef _WIN32
                 || ascii_streq_ignore_case(ext, ".obj")
@@ -613,6 +670,24 @@ ncc_ct_read_input_section(const char *input_path,
         char *member = thin ? resolve_thin_archive_member(input_path, name)
                             : join_dir_leaf(dir, name);
         ncc_free(name);
+
+        // An object that carries the section names it in a header, so a
+        // member without that string cannot contribute records and does not
+        // need the objcopy spawn. The name is the part after the segment on
+        // Mach-O and the whole string elsewhere.
+        const char *comma     = strrchr(section, ',');
+        const char *sect_leaf = comma ? comma + 1 : section;
+        size_t      probe_len = 0;
+        char       *probe     = read_binary_file(member, &probe_len, nullptr);
+        // An unreadable member is not skipped: let the read below report it.
+        bool        possible  = !probe
+                         || contains_bytes(probe, probe_len, sect_leaf,
+                                           strlen(sect_leaf));
+        ncc_free(probe);
+        if (!possible) {
+            ncc_free(member);
+            continue;
+        }
 
         uint8_t *mbytes = nullptr;
         size_t   mlen_b = 0;

@@ -10,6 +10,7 @@
  * annotation walks on ambiguity-aware parse forests.
  */
 
+#include "lib/dict.h"
 #include "parse/types.h"
 #include "parse/parse_tree.h"
 
@@ -101,6 +102,8 @@ struct ncc_symtab_t {
     int32_t           ns_cap;
     // Head of the retained-scope list (every pushed scope, all namespaces).
     ncc_scope_t     *all_scopes;
+    // Parse node -> the scope it creates, for ncc_symtab_scope_for_node.
+    ncc_dict_t        scope_by_node;
 };
 
 // ============================================================================

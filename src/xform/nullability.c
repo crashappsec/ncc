@@ -94,18 +94,53 @@ ns_join_into(nstate_t *dst, nstate_t *other)
 
 // A non-leaf whose entire text is "?" — the nullable qualifier (not the ternary
 // `?`, which is a bare leaf).
+// A node's leaf text is exactly "?" when the subtree carries one non-empty
+// leaf and that leaf is "?". Scanning for that answer stops at the second
+// leaf, so a large subtree costs a short descent rather than a full
+// serialization. Empty leaves contribute nothing to the joined text and are
+// skipped here for the same reason.
+static bool
+q_scan(ncc_parse_tree_t *node, int *found)
+{
+    if (!node) {
+        return true;
+    }
+
+    if (ncc_tree_is_leaf(node)) {
+        const char *t = ncc_xform_leaf_text(node);
+
+        if (!t || !*t) {
+            return true;
+        }
+
+        if (++*found > 1) {
+            return false;
+        }
+
+        return strcmp(t, "?") == 0;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+
+    for (size_t i = 0; i < nc; i++) {
+        if (!q_scan(ncc_tree_child(node, i), found)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 static bool
 node_is_q(ncc_parse_tree_t *node)
 {
     if (!node || ncc_tree_is_leaf(node)) {
         return false;
     }
-    ncc_string_t t = ncc_xform_node_to_text(node);
-    bool         m = t.data && strcmp(t.data, "?") == 0;
-    if (t.data) {
-        ncc_free(t.data);
-    }
-    return m;
+
+    int found = 0;
+
+    return q_scan(node, &found) && found == 1;
 }
 
 static bool

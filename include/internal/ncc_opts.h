@@ -41,6 +41,13 @@ typedef struct {
     // link driver (e.g. an ObjC linker drives the final executable link), so the
     // dictionary object can be produced as an explicit build step and linked in.
     const char  *gcmap_emit_out;
+    // Standalone gcraw-extraction mode: read the raw n00b_gcraw record bytes
+    // from the link-input objects/archives on the command line and write them,
+    // concatenated, to this path. The resulting blob is accepted as a link
+    // input by the aggregation modes above, so an archive whose records every
+    // executable in a build needs can be scanned once instead of once per
+    // executable. Records are self-delimiting, so concatenation is valid.
+    const char  *gcraw_dump_out;
     bool         custom_entry;
     bool         system_entry;
     bool         no_comptime;
