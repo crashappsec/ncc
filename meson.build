@@ -516,6 +516,13 @@ ncc_compile_tests = {
                                  test_dir / 'test_windows_sdk_extension_cast.c'],
   'rstr':         ['compile_run',  test_dir / 'test_rstr.c'],
   'vargs':        ['compile_run',  test_dir / 'test_vargs.c'],
+  'vargs_struct_byvalue': ['compile_run',
+                           test_dir / 'test_vargs_struct_byvalue.c',
+                           # The fixture only detects its defect when
+                           # optimized, and #errors out if this goes missing.
+                           '-O2'],
+  'vargs_many_args': ['compile_run',
+                      test_dir / 'test_vargs_many_args.c'],
   'once':         ['compile_run',  test_dir / 'test_once.c'],
   'option':       ['compile_run',  test_dir / 'test_option.c'],
   'generic_struct': ['compile_run', test_dir / 'test_generic_struct.c'],
@@ -542,8 +549,12 @@ ncc_compile_tests = {
                           test_dir / 'test_comptime_var.c'],
 }
 
+# Entries are [mode, source, extra ncc flags...].
 foreach name, params : ncc_compile_tests
   extra_args = []
+  foreach i : range(2, params.length())
+    extra_args += params[i]
+  endforeach
   test_deps = [ncc_exe]
   # WP-002 Phase 1 (D-031): stack-maps default flipped to on. These
   # compile_run fixtures don't link the libn00b runtime that

@@ -9,6 +9,7 @@
 //   - Post-order on "postfix_expression": transform call sites.
 
 #include "lib/alloc.h"
+#include "lib/buffer.h"
 #include "lib/string.h"
 #include "xform/xform_data.h"
 #include "xform/xform_helpers.h"
@@ -113,9 +114,8 @@ static ncc_string_t resolve_ncc_type_calls(const char *text) {
     return ncc_string_from_cstr(text);
   }
 
-  char result[16384];
-  size_t rpos = 0;
-  const char *p = text;
+  ncc_buffer_t *out = ncc_buffer_empty();
+  const char   *p   = text;
 
   while (*p) {
     // Look for "typeid" or "typehash" token boundaries.
@@ -129,7 +129,7 @@ static ncc_string_t resolve_ncc_type_calls(const char *text) {
            (p[8] >= '0' && p[8] <= '9') || p[8] == '_'));
 
     if (!is_typeid && !is_typehash) {
-      result[rpos++] = *p++;
+      ncc_buffer_putc(out, *p++);
       continue;
     }
 
@@ -143,9 +143,7 @@ static ncc_string_t resolve_ncc_type_calls(const char *text) {
 
     if (*after_kw != '(') {
       // Not a call — copy the keyword literally.
-      for (size_t i = 0; i < kw_len; i++) {
-        result[rpos++] = p[i];
-      }
+      ncc_buffer_append(out, p, kw_len);
       p += kw_len;
       continue;
     }
@@ -168,7 +166,7 @@ static ncc_string_t resolve_ncc_type_calls(const char *text) {
 
     if (depth != 0) {
       // Unbalanced — copy literally.
-      result[rpos++] = *p++;
+      ncc_buffer_putc(out, *p++);
       continue;
     }
 
@@ -186,9 +184,8 @@ static ncc_string_t resolve_ncc_type_calls(const char *text) {
       // Build the type string from the comma-separated arguments.
       // Each argument may be a quoted string or a type expression.
       // Strip quotes from string arguments, concatenate all.
-      char type_str[4096];
-      size_t tpos = 0;
-      const char *r = resolved_inner.data;
+      ncc_buffer_t *type_str = ncc_buffer_empty();
+      const char   *r        = resolved_inner.data;
 
       while (*r) {
         // Skip leading whitespace.
@@ -203,7 +200,7 @@ static ncc_string_t resolve_ncc_type_calls(const char *text) {
           // Quoted string argument — extract content.
           r++;
           while (*r && *r != '"') {
-            type_str[tpos++] = *r++;
+            ncc_buffer_putc(type_str, *r++);
           }
           if (*r == '"') {
             r++;
@@ -211,19 +208,20 @@ static ncc_string_t resolve_ncc_type_calls(const char *text) {
         } else {
           // Type expression — copy until comma or end.
           while (*r && *r != ',') {
-            type_str[tpos++] = *r++;
+            ncc_buffer_putc(type_str, *r++);
           }
           // Trim trailing whitespace from type expression.
-          while (tpos > 0 && type_str[tpos - 1] == ' ') {
-            tpos--;
+          while (type_str->byte_len > 0
+                 && type_str->data[type_str->byte_len - 1] == ' ') {
+            type_str->data[--type_str->byte_len] = '\0';
           }
         }
       }
-      type_str[tpos] = '\0';
 
-      ncc_string_t mangled = ncc_type_mangle(type_str);
-      memcpy(result + rpos, mangled.data, mangled.u8_bytes);
-      rpos += mangled.u8_bytes;
+      ncc_string_t mangled =
+          ncc_type_mangle(type_str->data ? type_str->data : "");
+      ncc_buffer_free(type_str);
+      ncc_buffer_append(out, mangled.data, mangled.u8_bytes);
       ncc_free(mangled.data);
     } else {
       // typehash — compute the uint64 hash.
@@ -241,17 +239,17 @@ static ncc_string_t resolve_ncc_type_calls(const char *text) {
       uint64_t hash = ncc_type_hash_u64(type_for_hash);
       char hash_buf[32];
       snprintf(hash_buf, sizeof(hash_buf), "%" PRIu64 "ULL", hash);
-      size_t hlen = strlen(hash_buf);
-      memcpy(result + rpos, hash_buf, hlen);
-      rpos += hlen;
+      ncc_buffer_puts(out, hash_buf);
     }
 
     ncc_free(resolved_inner.data);
     p = q + 1; // skip past closing paren
   }
 
-  result[rpos] = '\0';
-  return ncc_string_from_cstr(result);
+  ncc_string_t result = ncc_string_from_cstr(out->data ? out->data : "");
+  ncc_buffer_free(out);
+
+  return result;
 }
 
 // ============================================================================
@@ -654,33 +652,34 @@ static ncc_parse_tree_t *generate_kargs_struct(ncc_grammar_t *g,
   //     unsigned _has_param1:1;
   //     unsigned _has_param2:1;
   // };
-  char buf[8192];
-  size_t pos = 0;
+  ncc_buffer_t *buf = ncc_buffer_empty();
 
   // Resolve any typeid/typehash calls in func_name so the generated
   // struct name doesn't contain ncc builtins that would re-enter the
   // parser.
   ncc_string_t resolved_name = resolve_ncc_type_calls(func_name);
-  pos += (size_t)snprintf(buf + pos, sizeof(buf) - pos, "struct _%s__kargs { ",
-                          resolved_name.data);
+  ncc_buffer_printf(buf, "struct _%s__kargs { ", resolved_name.data);
   ncc_free(resolved_name.data);
 
   // Actual param members
   for (int i = 0; i < kw->num_params; i++) {
-    pos +=
-        (size_t)snprintf(buf + pos, sizeof(buf) - pos, "%s %s ; ",
-                         kw->params[i].type_text.data, kw->params[i].name.data);
+    ncc_buffer_printf(buf, "%s %s ; ", kw->params[i].type_text.data,
+                      kw->params[i].name.data);
   }
 
   // Bitfield members for _has_xxx
   for (int i = 0; i < kw->num_params; i++) {
-    pos += (size_t)snprintf(buf + pos, sizeof(buf) - pos,
-                            "unsigned _has_%s : 1 ; ", kw->params[i].name.data);
+    ncc_buffer_printf(buf, "unsigned _has_%s : 1 ; ",
+                      kw->params[i].name.data);
   }
 
-  pos += (size_t)snprintf(buf + pos, sizeof(buf) - pos, "} ;");
+  ncc_buffer_printf(buf, "} ;");
 
-  return parse_template(g, "external_declaration", buf);
+  ncc_parse_tree_t *result =
+      parse_template(g, "external_declaration", buf->data);
+  ncc_buffer_free(buf);
+
+  return result;
 }
 
 // ============================================================================
@@ -1809,11 +1808,10 @@ static ncc_parse_tree_t *xform_kw_func(ncc_xform_ctx_t *ctx,
   // the call site. This keeps side-effecting defaults single-evaluation.
   // Resolve any typeid/typehash in target_name before interpolation.
   ncc_string_t resolved_target = resolve_ncc_type_calls(target_name);
-  char literal_src[16384];
-  size_t pos = 0;
+  ncc_buffer_t *literal_src = ncc_buffer_empty();
 
-  pos += (size_t)snprintf(literal_src + pos, sizeof(literal_src) - pos,
-                          "& ( struct _%s__kargs ) { ", resolved_target.data);
+  ncc_buffer_printf(literal_src, "& ( struct _%s__kargs ) { ",
+                    resolved_target.data);
   ncc_free(resolved_target.data);
 
   bool first = true;
@@ -1825,18 +1823,15 @@ static ncc_parse_tree_t *xform_kw_func(ncc_xform_ctx_t *ctx,
     }
     ncc_string_t val_text = ncc_xform_node_to_text(args[i].expr);
     if (!first) {
-      pos +=
-          (size_t)snprintf(literal_src + pos, sizeof(literal_src) - pos, " , ");
+      ncc_buffer_printf(literal_src, " , ");
     }
-    pos += (size_t)snprintf(literal_src + pos, sizeof(literal_src) - pos,
-                            ". _has_%s = 1 , . %s = %s", args[i].name,
-                            args[i].name, val_text.data);
+    ncc_buffer_printf(literal_src, ". _has_%s = 1 , . %s = %s", args[i].name,
+                      args[i].name, val_text.data);
     first = false;
     ncc_free(val_text.data);
   }
 
-  pos += (size_t)snprintf(literal_src + pos, sizeof(literal_src) - pos, " }");
-  literal_src[pos] = '\0';
+  ncc_buffer_printf(literal_src, " }");
 
   // Free collected args.
   for (int i = 0; i < arg_count; i++) {
@@ -1845,7 +1840,8 @@ static ncc_parse_tree_t *xform_kw_func(ncc_xform_ctx_t *ctx,
   ncc_free(args);
 
   // Resolve any embedded typeid/typehash in the text.
-  ncc_string_t resolved = resolve_ncc_type_calls(literal_src);
+  ncc_string_t resolved = resolve_ncc_type_calls(literal_src->data);
+  ncc_buffer_free(literal_src);
 
   // &(struct ...){ ... } is a unary_expression (address-of a compound
   // literal), which sits above postfix_expression in the grammar.
@@ -1865,6 +1861,36 @@ static ncc_parse_tree_t *xform_kw_func(ncc_xform_ctx_t *ctx,
 
 static void rewrite_nested_kargs_calls(ncc_xform_ctx_t *ctx,
                                        ncc_parse_tree_t *node);
+
+// Rewrite `type` in place as its spelling without a top-level `const`, and
+// return the start of that spelling. Compound literals with a const-qualified
+// type need not designate distinct objects (C11 6.5.2.5p7), and every
+// by-value varg copy has to be an object of its own.
+static char *strip_top_level_const(char *type) {
+  static const char kw[]    = "const";
+  const size_t      kwlen   = sizeof(kw) - 1;
+  size_t            len     = strlen(type);
+
+  // "field_t const", "field_t * const".
+  while (len > kwlen && type[len - kwlen - 1] == ' '
+         && memcmp(type + len - kwlen, kw, kwlen) == 0) {
+    len -= kwlen + 1;
+    while (len > 0 && type[len - 1] == ' ') {
+      len--;
+    }
+    type[len] = '\0';
+  }
+
+  // "const field_t".
+  while (strncmp(type, kw, kwlen) == 0 && type[kwlen] == ' ') {
+    type += kwlen + 1;
+    while (*type == ' ') {
+      type++;
+    }
+  }
+
+  return type;
+}
 
 static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
                                     ncc_parse_tree_t *node) {
@@ -2064,8 +2090,7 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
   }
 
   // Build new argument list text.
-  char new_args[16384];
-  size_t pos = 0;
+  ncc_buffer_t *new_args = ncc_buffer_empty();
 
   // Determine how many positional args belong to vargs.
   int fixed_positional = n_positional;
@@ -2110,19 +2135,18 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
       continue;
     }
     ncc_string_t text = ncc_xform_node_to_text(args[i].expr);
-    if (pos > 0) {
-      pos += (size_t)snprintf(new_args + pos, sizeof(new_args) - pos, " , ");
+    if (new_args->byte_len > 0) {
+      ncc_buffer_printf(new_args, " , ");
     }
-    pos += (size_t)snprintf(new_args + pos, sizeof(new_args) - pos, "%s",
-                            text.data);
+    ncc_buffer_printf(new_args, "%s", text.data);
     ncc_free(text.data);
     pos_idx++;
   }
 
   // Build vargs compound literal.
   if (meta->va && meta->va->style == NCC_VARGS_N00B) {
-    if (pos > 0) {
-      pos += (size_t)snprintf(new_args + pos, sizeof(new_args) - pos, " , ");
+    if (new_args->byte_len > 0) {
+      ncc_buffer_printf(new_args, " , ");
     }
 
     // Determine if the vargs have a typed hint (e.g. "ncc_tc_field_t +").
@@ -2130,30 +2154,36 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
     // than 64 bits and we need to pass pointers to compound literals
     // instead of casting to void *.
     ncc_string_t va_type_text = {0};
-    bool va_type_is_large = false;
+    const char  *va_type_name = nullptr;
+    bool         va_type_is_large = false;
 
     if (meta->va->type_node) {
       va_type_text = ncc_xform_node_to_text(meta->va->type_node);
-      // Heuristic: if the type text does NOT end with '*', it's
-      // a value type that may be larger than a pointer.  We pass
-      // a pointer to a compound-literal copy instead.
       if (va_type_text.data) {
         size_t tlen = va_type_text.u8_bytes;
         // Trim trailing spaces.
         while (tlen > 0 && va_type_text.data[tlen - 1] == ' ') {
           tlen--;
         }
-        if (tlen > 0 && va_type_text.data[tlen - 1] != '*') {
+        va_type_text.data[tlen] = '\0';
+        va_type_name            = strip_top_level_const(va_type_text.data);
+
+        // Heuristic: if the type text does NOT end with '*', it's a value
+        // type that may be larger than a pointer.  We pass a pointer to a
+        // compound-literal copy instead.  Test the unqualified spelling:
+        // `field_t * const` is a pointer and fits in a void * even though
+        // its last character is not '*'.
+        size_t nlen = strlen(va_type_name);
+        if (nlen > 0 && va_type_name[nlen - 1] != '*') {
           va_type_is_large = true;
         }
       }
     }
 
     if (vargs_count > 0) {
-      pos += (size_t)snprintf(new_args + pos, sizeof(new_args) - pos,
-                              "& ( %s ) { . nargs = %d , . cur_ix = 0 , "
-                              ". args = ( void * [] ) { ",
-                              get_vargs_type(ctx), vargs_count);
+      ncc_buffer_printf(new_args, "& ( %s ) { . nargs = %d , . cur_ix = 0 , "
+                                  ". args = ( void * [] ) { ",
+                        get_vargs_type(ctx), vargs_count);
 
       // Collect the vargs (positional args past fixed_positional).
       // Stop at vargs_count to exclude a trailing kw_func kargs
@@ -2167,21 +2197,24 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
         if (cur_pos >= fixed_positional) {
           ncc_string_t text = ncc_xform_node_to_text(args[i].expr);
           if (va_idx > 0) {
-            pos +=
-                (size_t)snprintf(new_args + pos, sizeof(new_args) - pos, " , ");
+            ncc_buffer_printf(new_args, " , ");
           }
           if (va_type_is_large) {
-            // Large value type: use a statement expression
-            // to capture the value in a temp and take its
-            // address so it fits in void *.
-            pos +=
-                (size_t)snprintf(new_args + pos, sizeof(new_args) - pos,
-                                 "({ %s _va_tmp_%d = %s ; "
-                                 "( void * ) & _va_tmp_%d ; })",
-                                 va_type_text.data, va_idx, text.data, va_idx);
+            // Large value type: the value does not fit in a void *, so copy
+            // it into a one-element array compound literal and pass that
+            // address.
+            //
+            // The literal has automatic storage duration tied to the
+            // enclosing block (C11 6.5.2.5p5), so it is still alive when the
+            // callee dereferences it, and non-const compound literals
+            // designate distinct objects (6.5.2.5p7), so the copies in one
+            // argument list cannot share storage. va_type_name is what keeps
+            // that second guarantee: a const-qualified literal type forfeits
+            // it.
+            ncc_buffer_printf(new_args, "( void * ) ( %s [] ) { %s }",
+                              va_type_name, text.data);
           } else {
-            pos += (size_t)snprintf(new_args + pos, sizeof(new_args) - pos,
-                                    "( void * ) ( %s )", text.data);
+            ncc_buffer_printf(new_args, "( void * ) ( %s )", text.data);
           }
           ncc_free(text.data);
           va_idx++;
@@ -2189,12 +2222,11 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
         cur_pos++;
       }
 
-      pos += (size_t)snprintf(new_args + pos, sizeof(new_args) - pos, " } }");
+      ncc_buffer_printf(new_args, " } }");
     } else {
-      pos += (size_t)snprintf(new_args + pos, sizeof(new_args) - pos,
-                              "& ( %s ) { . nargs = 0 , . cur_ix = 0 , "
-                              ". args = ( void * [] ) { 0 } }",
-                              get_vargs_type(ctx));
+      ncc_buffer_printf(new_args, "& ( %s ) { . nargs = 0 , . cur_ix = 0 , "
+                                  ". args = ( void * [] ) { 0 } }",
+                        get_vargs_type(ctx));
     }
 
     ncc_free(va_type_text.data);
@@ -2204,15 +2236,14 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
   if (meta->kw && meta->kw->is_opaque) {
     // Opaque kargs: pass the kw_func literal, a forwarded keyword arg,
     // or nullptr.
-    if (pos > 0) {
-      pos += (size_t)snprintf(new_args + pos, sizeof(new_args) - pos, " , ");
+    if (new_args->byte_len > 0) {
+      ncc_buffer_printf(new_args, " , ");
     }
 
     if (kw_func_kargs_text.data) {
       // kw_func() built a kargs literal that was among the positional
       // args — pass it through as the opaque kargs pointer.
-      pos += (size_t)snprintf(new_args + pos, sizeof(new_args) - pos, "%s",
-                              kw_func_kargs_text.data);
+      ncc_buffer_printf(new_args, "%s", kw_func_kargs_text.data);
     } else {
       // Check if any keyword args were provided at this call site.
       bool has_kw = false;
@@ -2228,32 +2259,28 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
         for (int i = 0; i < arg_count; i++) {
           if (args[i].name) {
             ncc_string_t val_text = ncc_xform_node_to_text(args[i].expr);
-            pos += (size_t)snprintf(new_args + pos, sizeof(new_args) - pos,
-                                    "%s", val_text.data);
+            ncc_buffer_printf(new_args, "%s", val_text.data);
             ncc_free(val_text.data);
             break;
           }
         }
       } else {
-        pos += (size_t)snprintf(new_args + pos, sizeof(new_args) - pos,
-                                "( ( void * ) 0 )");
+        ncc_buffer_printf(new_args, "( ( void * ) 0 )");
       }
     }
   } else if (meta->kw && !meta->kw->is_opaque) {
-    if (pos > 0) {
-      pos += (size_t)snprintf(new_args + pos, sizeof(new_args) - pos, " , ");
+    if (new_args->byte_len > 0) {
+      ncc_buffer_printf(new_args, " , ");
     }
 
     if (kw_func_kargs_text.data) {
       // kw_func() already built the kargs compound literal with the
       // user's overrides baked in — emit it directly.
-      pos += (size_t)snprintf(new_args + pos, sizeof(new_args) - pos, "%s",
-                              kw_func_kargs_text.data);
+      ncc_buffer_printf(new_args, "%s", kw_func_kargs_text.data);
     } else {
       ncc_string_t resolved_callee = resolve_ncc_type_calls(callee);
-      pos +=
-          (size_t)snprintf(new_args + pos, sizeof(new_args) - pos,
-                           "& ( struct _%s__kargs ) { ", resolved_callee.data);
+      ncc_buffer_printf(new_args, "& ( struct _%s__kargs ) { ",
+                        resolved_callee.data);
       ncc_free(resolved_callee.data);
 
       // For each kw param: emit user overrides only. Omitted defaults are
@@ -2277,37 +2304,34 @@ static ncc_parse_tree_t *xform_call(ncc_xform_ctx_t *ctx,
           ncc_string_t val_text =
               ncc_xform_node_to_text(args[override_idx].expr);
           if (!first) {
-            pos +=
-                (size_t)snprintf(new_args + pos, sizeof(new_args) - pos, " , ");
+            ncc_buffer_printf(new_args, " , ");
           }
-          pos += (size_t)snprintf(new_args + pos, sizeof(new_args) - pos,
-                                  ". _has_%s = 1 , . %s = %s", p->name.data,
-                                  p->name.data, val_text.data);
+          ncc_buffer_printf(new_args, ". _has_%s = 1 , . %s = %s",
+                            p->name.data, p->name.data, val_text.data);
           first = false;
           ncc_free(val_text.data);
         }
       }
 
-      pos += (size_t)snprintf(new_args + pos, sizeof(new_args) - pos, " }");
+      ncc_buffer_printf(new_args, " }");
     }
   }
-
-  new_args[pos] = '\0';
 
   // Build complete call expression.
   ncc_string_t callee_text = ncc_xform_node_to_text(ncc_tree_child(node, 0));
 
-  char call_src[32768];
-  if (pos > 0) {
-    snprintf(call_src, sizeof(call_src), "%s ( %s )", callee_text.data,
-             new_args);
+  ncc_buffer_t *call_src = ncc_buffer_empty();
+  if (new_args->byte_len > 0) {
+    ncc_buffer_printf(call_src, "%s ( %s )", callee_text.data, new_args->data);
   } else {
-    snprintf(call_src, sizeof(call_src), "%s ( )", callee_text.data);
+    ncc_buffer_printf(call_src, "%s ( )", callee_text.data);
   }
   ncc_free(callee_text.data);
+  ncc_buffer_free(new_args);
 
   // Resolve any embedded typeid/typehash calls in the template text.
-  ncc_string_t resolved_src = resolve_ncc_type_calls(call_src);
+  ncc_string_t resolved_src = resolve_ncc_type_calls(call_src->data);
+  ncc_buffer_free(call_src);
   ncc_parse_tree_t *replacement =
       parse_template(ctx->grammar, "postfix_expression", resolved_src.data);
   ncc_free(resolved_src.data);
