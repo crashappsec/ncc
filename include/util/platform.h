@@ -56,6 +56,11 @@ typedef struct {
  */
 bool ncc_process_run(const ncc_process_spec_t *spec, ncc_process_result_t *out);
 void ncc_process_result_free(ncc_process_result_t *out);
+#ifdef _WIN32
+/* Returns the same executable path ncc_process_run selects; caller frees it. */
+char *ncc_platform_resolve_process_application(const char *program,
+                                               char **err_out);
+#endif
 
 typedef struct {
     char *path;

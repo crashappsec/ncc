@@ -27,7 +27,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 #include <string.h>
 
 // ============================================================================
@@ -155,6 +159,10 @@ static const char *ce_resolve_compiler(const char *compiler) {
   resolved_for = compiler;
   resolved     = nullptr;
 
+#ifdef _WIN32
+  resolved = ncc_platform_resolve_process_application(compiler, nullptr);
+  return resolved;
+#else
   if (strchr(compiler, '/')) {
     resolved = compiler;
     return resolved;
@@ -192,6 +200,7 @@ static const char *ce_resolve_compiler(const char *compiler) {
   }
 
   return nullptr;
+#endif
 }
 
 // Hex of sha256(version | flags | host | compiler identity | source), or false
@@ -346,7 +355,11 @@ static void ce_disk_put(const char *key, const char *value) {
   }
 
   char tmp[64];
+#ifdef _WIN32
+  snprintf(tmp, sizeof(tmp), ".tmp.%ld", (long)_getpid());
+#else
   snprintf(tmp, sizeof(tmp), ".tmp.%ld", (long)getpid());
+#endif
 
   size_t n    = strlen(path) + strlen(tmp) + 1;
   char  *tpath = (char *)ncc_alloc_array(char, n);

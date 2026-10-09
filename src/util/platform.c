@@ -906,8 +906,8 @@ windows_resolve_program_on_path(const char *program)
     return nullptr;
 }
 
-static char *
-windows_resolve_process_application(const char *program, char **err_out)
+char *
+ncc_platform_resolve_process_application(const char *program, char **err_out)
 {
     if (windows_program_has_path_component(program)) {
         char *resolved = ncc_platform_realpath(program);
@@ -1315,7 +1315,7 @@ ncc_process_run(const ncc_process_spec_t *spec, ncc_process_result_t *out)
     HANDLE std_output = spec->capture_stdout ? stdout_child : GetStdHandle(STD_OUTPUT_HANDLE);
     HANDLE std_error  = spec->capture_stderr ? stderr_child : GetStdHandle(STD_ERROR_HANDLE);
 
-    application_path = windows_resolve_process_application(
+    application_path = ncc_platform_resolve_process_application(
         spec->program, out ? &out->stderr_data : nullptr);
 
     if (!application_path) {
