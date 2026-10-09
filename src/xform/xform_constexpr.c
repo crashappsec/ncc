@@ -27,7 +27,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <io.h>
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 #include <string.h>
 
 // ============================================================================
@@ -178,7 +183,11 @@ static const char *ce_resolve_compiler(const char *compiler) {
       cand[dlen] = '/';
       memcpy(cand + dlen + 1, compiler, nlen + 1);
 
+#ifdef _WIN32
+      if (_access(cand, 0) == 0) {
+#else
       if (access(cand, X_OK) == 0) {
+#endif
         resolved = cand;
         return resolved;
       }
@@ -346,7 +355,11 @@ static void ce_disk_put(const char *key, const char *value) {
   }
 
   char tmp[64];
+#ifdef _WIN32
+  snprintf(tmp, sizeof(tmp), ".tmp.%ld", (long)_getpid());
+#else
   snprintf(tmp, sizeof(tmp), ".tmp.%ld", (long)getpid());
+#endif
 
   size_t n    = strlen(path) + strlen(tmp) + 1;
   char  *tpath = (char *)ncc_alloc_array(char, n);
