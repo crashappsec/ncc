@@ -28,7 +28,6 @@
 #include <string.h>
 #include <sys/stat.h>
 #ifdef _WIN32
-#include <io.h>
 #include <process.h>
 #else
 #include <unistd.h>
@@ -160,6 +159,10 @@ static const char *ce_resolve_compiler(const char *compiler) {
   resolved_for = compiler;
   resolved     = nullptr;
 
+#ifdef _WIN32
+  resolved = ncc_platform_resolve_process_application(compiler, nullptr);
+  return resolved;
+#else
   if (strchr(compiler, '/')) {
     resolved = compiler;
     return resolved;
@@ -183,11 +186,7 @@ static const char *ce_resolve_compiler(const char *compiler) {
       cand[dlen] = '/';
       memcpy(cand + dlen + 1, compiler, nlen + 1);
 
-#ifdef _WIN32
-      if (_access(cand, 0) == 0) {
-#else
       if (access(cand, X_OK) == 0) {
-#endif
         resolved = cand;
         return resolved;
       }
@@ -201,6 +200,7 @@ static const char *ce_resolve_compiler(const char *compiler) {
   }
 
   return nullptr;
+#endif
 }
 
 // Hex of sha256(version | flags | host | compiler identity | source), or false

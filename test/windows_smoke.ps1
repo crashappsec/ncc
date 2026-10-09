@@ -100,7 +100,11 @@ try {
     Invoke-Step $NccPath '-o' $OptionExe $OptionSrc
     Invoke-Step $OptionExe
 
+    $env:NCC_CONSTEXPR_CACHE = Join-Path $WorkDir 'constexpr-cache'
     Invoke-Step $NccPath '-o' $ConstexprExe $ConstexprSrc
+    if (@(Get-ChildItem -LiteralPath $env:NCC_CONSTEXPR_CACHE -Recurse -File -ErrorAction SilentlyContinue).Count -eq 0) {
+        throw 'constexpr compilation did not write cache entries'
+    }
     Invoke-Step $ConstexprExe
 }
 finally {
