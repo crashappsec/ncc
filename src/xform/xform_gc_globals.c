@@ -219,6 +219,12 @@ typedef struct {
     // the first field of the run (e.g. "a", "in.p"). Used to build
     // the address-of expression `&(name).<field_path>`.
     char       *field_path;
+    // For STRUCT_RUN only: the variable is an _Atomic aggregate, so
+    // `&(name).field` is UB and clang rejects it (n00b#533). The emit
+    // uses offsetof-on-typeof_unqual instead.
+    bool        is_atomic;
+    // For STRUCT_RUN only: borrowed decl node, for diagnostics. Not owned.
+    ncc_parse_tree_t *decl;
 } cand_t;
 
 typedef struct {
@@ -1471,6 +1477,38 @@ classify_declaration(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                 continue;
             }
 
+            // n00b#533: `_Atomic T x;` (the qualifier form, which is how
+            // n00b_pinref_t is spelled) and `_Atomic(T) x;` both make
+            // `&(x).field` undefined. Detect either.
+            // Both spellings reach here: `_Atomic(T) x;` parses as an
+            // atomic_type_specifier, while `_Atomic T x;` -- which is how
+            // n00b_pinref_t is written -- is a bare `_Atomic` type_qualifier
+            // token in the spec chain. The typedef case
+            // (`typedef _Atomic S n00b_pinref_t;`) resolves through the same
+            // chain by the time we get here.
+            // Three spellings reach here and all three make
+            // `&(x).field` undefined:
+            //   `_Atomic(T) x;`  -> an atomic_type_specifier in the specs
+            //   `_Atomic T x;`   -> a bare `_Atomic` qualifier token
+            //   `typedef _Atomic S A; A x;`  -> neither appears in THIS
+            //       decl's specs; the qualifier is on the typedef, which
+            //       is the n00b_pinref_t case and the one n00b#533 hit.
+            // The layout pass already records the third on the resolved
+            // aggregate (`is_atomic`), so consult it rather than
+            // re-deriving typedef resolution here.
+            // NOTE the distinction, which an existing test pins
+            // (ncc_auto_gc_roots_atomic_struct_member): it is the
+            // VARIABLE that must be atomic, not its members. A plain
+            // `static struct { _Atomic(T *) head; } holder;` is a normal
+            // aggregate -- `&(holder).head` is perfectly legal and must
+            // keep being emitted. So this deliberately does NOT scan the
+            // spec chain for an `_Atomic` token: that would also match a
+            // member's qualifier and rewrite a case that was already
+            // correct.
+            bool decl_is_atomic =
+                specs_atomic_type_specifier(decl_specs) != nullptr
+                || (agg_info != nullptr && agg_info->is_atomic);
+
             for (size_t r = 0; r < runs.len; r++) {
                 cand_t cand = {
                     .kind       = CAND_STRUCT_RUN,
@@ -1478,6 +1516,8 @@ classify_declaration(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *decl,
                     .num_words  = runs.items[r].num_words,
                     .field_path = ncc_layout_copy_cstr(
                         runs.items[r].field_path),
+                    .is_atomic  = decl_is_atomic,
+                    .decl       = decl,
                 };
                 candvec_push(out_cands, cand);
             }
@@ -1565,6 +1605,54 @@ build_emit_source(ncc_xform_ctx_t *ctx, const char *tu_uniq, candvec_t *cands)
             // sub-expression yields the same byte address. The
             // run length (one entry covering N consecutive
             // pointer-words) is preserved in `.num_words`.
+            //
+            // EXCEPT when the variable is _Atomic (n00b#533). Taking
+            // `&(x).field` on an atomic aggregate is undefined
+            // behaviour and clang REJECTS it outright:
+            //
+            //   error: accessing a member of an atomic structure or
+            //          union is undefined behavior [-Watomic-access]
+            //
+            // That is a hard error in ncc's own generated table, so
+            // the TU does not compile -- and in a build configured
+            // without the gcmap prelink the table is never emitted,
+            // so the same decl silently gets NO ROOT instead. That is
+            // how n00b#533 presented: an object published through a
+            // file-scope `n00b_pinref_t` survived under conservative
+            // scanning and was collected the moment the precise
+            // type-map dictionary was linked.
+            //
+            // The canonical offsetof form is legal here because it
+            // never names the member as an lvalue, and
+            // `typeof_unqual` strips the `_Atomic` that offsetof
+            // itself rejects. It is exactly what
+            // xform_gc_stack_maps.c:1746-1753 already does for the
+            // same shape on the stack side. The grammar restriction
+            // above still applies, so this path is taken only for a
+            // single-identifier field -- which covers the pinref
+            // shape (`.raw`). A nested path inside an atomic
+            // aggregate cannot be expressed either way, so it is
+            // diagnosed rather than silently mis-rooted.
+            if (c->is_atomic) {
+                if (strchr(c->field_path, '.') != nullptr
+                    || strchr(c->field_path, '[') != nullptr) {
+                    gc_globals_warnf(
+                        c->decl,
+                        "auto-gc-roots: cannot register '%s.%s': a nested "
+                        "field of an _Atomic aggregate has no expressible "
+                        "address (n00b#533); add [[n00b::nomap]] and root "
+                        "it by hand",
+                        c->name, c->field_path);
+                    break;
+                }
+                ncc_buffer_printf(buf,
+                    "    { .addr = (void *)((char *)&%s + "
+                    "__builtin_offsetof(typeof_unqual(%s), %s)), "
+                    ".num_words = %llu },\n",
+                    c->name, c->name, c->field_path,
+                    (unsigned long long)c->num_words);
+                break;
+            }
             ncc_buffer_printf(buf,
                 "    { .addr = (void *)&(%s).%s, .num_words = %llu },\n",
                 c->name, c->field_path,
