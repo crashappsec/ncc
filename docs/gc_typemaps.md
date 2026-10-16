@@ -86,9 +86,12 @@ Skipped shapes:
 
 ncc also recognizes a n00b runtime-scan struct shape containing
 `n00b_gc_scan_kind_t scan_kind`, `n00b_gc_scan_cb_t scan_cb`, and pointer
-`scan_user`. For that exact shape, runtime infrastructure fields such as
-`scan_cb`, `scan_user`, `lock`, and `allocator` are skipped while ordinary
-payload pointers are still mapped.
+`scan_user`. For that exact shape, the runtime infrastructure fields
+`scan_cb`, `scan_user`, and `allocator` are skipped while ordinary payload
+pointers are still mapped. The container's `n00b_rwlock_t *lock` is mapped:
+n00b allocates it from the container's allocator, usually a collected arena,
+so a copying collection must keep it alive and update the pointer
+(n00b-lang/n00b#557).
 
 ## Build Requirements
 
