@@ -283,6 +283,12 @@ member_is_runtime_infra(bool runtime_scan_shape, const char *name,
     // These fields are runtime scan policy, not managed payload edges. Gate
     // this on the exact n00b scan triple so ordinary user fields named
     // `scan_user`, `allocator`, etc. are still walked normally.
+    //
+    // A container's `lock` is NOT one of them, though it sits beside them. n00b
+    // allocates it from the container's own allocator, which is usually the
+    // collected default arena, so it is a managed object the container owns:
+    // leaving it out of the map let a copying collection free it under a live
+    // container and leave `lock` dangling (n00b-lang/n00b#557).
     if (strcmp(name, "scan_user") == 0
         || (strcmp(name, "scan_cb") == 0
             && member_specs_typedef_is(member_specs, "n00b_gc_scan_cb_t"))) {
@@ -292,10 +298,8 @@ member_is_runtime_infra(bool runtime_scan_shape, const char *name,
     char *tdname = ncc_layout_first_typedef_name_text(member_specs);
     bool  result = false;
     if (tdname) {
-        result = (strcmp(name, "lock") == 0
-                  && strcmp(tdname, "n00b_rwlock_t") == 0)
-              || (strcmp(name, "allocator") == 0
-                  && strcmp(tdname, "n00b_allocator_t") == 0);
+        result = strcmp(name, "allocator") == 0
+              && strcmp(tdname, "n00b_allocator_t") == 0;
         ncc_free(tdname);
     }
 
