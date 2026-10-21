@@ -1316,8 +1316,8 @@ test('ncc_gc_typemap_runtime_scan_user_skipped', test_runner,
   depends : ncc_exe,
 )
 
-test('ncc_gc_typemap_runtime_lock_skipped', test_runner,
-  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
+test('ncc_gc_typemap_runtime_lock_mapped', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap.c',
           '__builtin_offsetof(gcmap_runtime_shape_t,lock)']
          + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
