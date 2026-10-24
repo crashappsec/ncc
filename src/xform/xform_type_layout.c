@@ -1142,8 +1142,19 @@ ncc_layout_implicit_member_field_name(ncc_parse_tree_t *member,
 
     ncc_parse_tree_t *su = ncc_layout_first_descendant_nt(
         member_specs, "struct_or_union_specifier");
+    // A member that is only a typedef name has no field name. But after
+    // `_Atomic(type-name)` the parser can read the declarator as a typedef
+    // name: `_Atomic(void *) head;` comes back with `head` in the specifier
+    // list and no declarator. C does not let a typedef name join
+    // `_Atomic(type-name)`, so there that identifier is the field name.
+    // Without this, a struct with an `_Atomic(void *)` or
+    // `_Atomic(const char *)` member lost its GC type map, and a global
+    // holding one lost the member's root (ncc#67).
+    bool atomic_specifier = ncc_layout_first_descendant_nt(
+                                member_specs, "atomic_type_specifier")
+                         != nullptr;
     char *td_name = ncc_layout_first_typedef_name_text(member_specs);
-    if (!su && td_name && strcmp(td_name, name) == 0) {
+    if (!su && !atomic_specifier && td_name && strcmp(td_name, name) == 0) {
         ncc_free(td_name);
         ncc_free(name);
         return nullptr;

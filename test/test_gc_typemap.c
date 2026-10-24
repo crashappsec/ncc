@@ -75,6 +75,15 @@ typedef struct gcmap_noscan_prefix_t {
     [[n00b::noscan]] gcmap_payload_t *noscan_ptr;
 } gcmap_noscan_prefix_t;
 
+// _Atomic(T *) members whose T is a builtin type (ncc#67). The parser reads
+// the declarator after `_Atomic(void *)` as a typedef name, which used to cost
+// the whole struct its map; `payload` is here to show the struct is described.
+typedef struct gcmap_atomic_builtin_t {
+    _Atomic(void *)       head;
+    _Atomic(const char *) name;
+    gcmap_payload_t      *payload;
+} gcmap_atomic_builtin_t;
+
 static uint64_t h_direct = typehash(gcmap_direct_fn_t *);
 static uint64_t h_typedef = typehash(gcmap_typedef_fn_t *);
 static uint64_t h_user    = typehash(gcmap_user_scan_field_t *);
@@ -84,11 +93,12 @@ static uint64_t h_array   = typehash(gcmap_pointer_array_t *);
 static uint64_t h_union   = typehash(gcmap_union_mixed_t *);
 static uint64_t h_nstrail = typehash(gcmap_noscan_trailing_t *);
 static uint64_t h_nspref  = typehash(gcmap_noscan_prefix_t *);
+static uint64_t h_atomic  = typehash(gcmap_atomic_builtin_t *);
 
 int
 main(void)
 {
     return (int)((h_direct ^ h_typedef ^ h_user ^ h_runtime ^ h_near
-                  ^ h_array ^ h_union ^ h_nstrail ^ h_nspref)
+                  ^ h_array ^ h_union ^ h_nstrail ^ h_nspref ^ h_atomic)
                  == 0);
 }

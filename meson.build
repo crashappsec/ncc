@@ -1271,6 +1271,33 @@ test('ncc_gc_typemap_direct_pointer_offset', test_runner,
   depends : ncc_exe,
 )
 
+test('ncc_gc_typemap_atomic_builtin_pointer_head', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__builtin_offsetof(gcmap_atomic_builtin_t,head)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_atomic_builtin_pointer_name', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__builtin_offsetof(gcmap_atomic_builtin_t,name)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_gc_typemap_atomic_builtin_pointer_payload', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_gc_typemap.c',
+          '__builtin_offsetof(gcmap_atomic_builtin_t,payload)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 test('ncc_gc_typemap_direct_function_pointer_skipped', test_runner,
   args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
           test_dir / 'test_gc_typemap.c',
@@ -2307,6 +2334,15 @@ test('ncc_auto_gc_roots_atomic_struct_member', test_runner,
   args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_auto_gc_roots_atomic_struct_member.c',
           '& (atomic_member_holder).head']
+         + ncc_test_flags + ['--ncc-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+test('ncc_auto_gc_roots_atomic_struct_member_builtin_pointee', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_auto_gc_roots_atomic_struct_member.c',
+          '& (atomic_member_holder).label']
          + ncc_test_flags + ['--ncc-auto-gc-roots'],
   suite : 'ncc',
   depends : ncc_exe,
