@@ -150,7 +150,7 @@ expect_style_value(n00b_string_t *key, const test_style_t *expect)
 int
 main(void)
 {
-    if (state.lock != 0 || state.store == nullptr) {
+    if (state.lock != 0 || n00b_pinref_unsafe((n00b_pinref_t *)&state.store_pin) == nullptr) {
         return 10;
     }
     if (!state.skip_obj_hash) {
@@ -168,7 +168,7 @@ main(void)
         return 13;
     }
 
-    if (empty.lock != 0 || empty.store == nullptr) {
+    if (empty.lock != 0 || n00b_pinref_unsafe((n00b_pinref_t *)&empty.store_pin) == nullptr) {
         return 20;
     }
     found = true;
@@ -178,7 +178,7 @@ main(void)
     }
 
     auto large_store =
-        (__n00b_internal_type_erased_store_t *)large.store;
+        (__n00b_internal_type_erased_store_t *)n00b_pinref_unsafe((n00b_pinref_t *)&large.store_pin);
     if (large_store == nullptr || large_store->last_slot != 31u
         || large_store->threshold != 23u || large_store->used_count != 20u) {
         return 40;
@@ -191,7 +191,7 @@ main(void)
         }
     }
 
-    if (string_keys.lock != 0 || string_keys.store == nullptr) {
+    if (string_keys.lock != 0 || n00b_pinref_unsafe((n00b_pinref_t *)&string_keys.store_pin) == nullptr) {
         return 50;
     }
     if (string_keys.skip_obj_hash
@@ -205,7 +205,7 @@ main(void)
     }
 
     auto string_store =
-        (__n00b_internal_type_erased_store_t *)string_keys.store;
+        (__n00b_internal_type_erased_store_t *)n00b_pinref_unsafe((n00b_pinref_t *)&string_keys.store_pin);
     if (string_store->used_count != 2u) {
         return 53;
     }
@@ -219,7 +219,7 @@ main(void)
         return 54;
     }
 
-    if (pointer_values.lock != 0 || pointer_values.store == nullptr) {
+    if (pointer_values.lock != 0 || n00b_pinref_unsafe((n00b_pinref_t *)&pointer_values.store_pin) == nullptr) {
         return 70;
     }
     if (!pointer_values.skip_obj_hash
@@ -242,7 +242,7 @@ main(void)
         return 73;
     }
 
-    if (buffer_keys.lock != 0 || buffer_keys.store == nullptr) {
+    if (buffer_keys.lock != 0 || n00b_pinref_unsafe((n00b_pinref_t *)&buffer_keys.store_pin) == nullptr) {
         return 74;
     }
     if (buffer_keys.skip_obj_hash
@@ -255,7 +255,7 @@ main(void)
         return 76;
     }
 
-    if (buffer_values.lock != 0 || buffer_values.store == nullptr) {
+    if (buffer_values.lock != 0 || n00b_pinref_unsafe((n00b_pinref_t *)&buffer_values.store_pin) == nullptr) {
         return 77;
     }
     if (!buffer_values.skip_obj_hash
@@ -268,7 +268,7 @@ main(void)
         return 79;
     }
 
-    if (style_values.lock != 0 || style_values.store == nullptr) {
+    if (style_values.lock != 0 || n00b_pinref_unsafe((n00b_pinref_t *)&style_values.store_pin) == nullptr) {
         return 100;
     }
     if (style_values.skip_obj_hash
@@ -298,7 +298,7 @@ main(void)
     }
 
     auto state_store_after =
-        (__n00b_internal_type_erased_store_t *)state.store;
+        (__n00b_internal_type_erased_store_t *)n00b_pinref_unsafe((n00b_pinref_t *)&state.store_pin);
     if (state_store_after == nullptr || state_store_after->last_slot != 15u) {
         return 91;
     }
@@ -328,7 +328,7 @@ main(void)
     }
 
     auto large_store_after =
-        (__n00b_internal_type_erased_store_t *)large.store;
+        (__n00b_internal_type_erased_store_t *)n00b_pinref_unsafe((n00b_pinref_t *)&large.store_pin);
     if (large_store_after == nullptr) {
         return 93;
     }

@@ -328,7 +328,8 @@ text_looks_like_dict_value_initializer(const char *s)
     }
     compact[out] = '\0';
 
-    bool result = strstr(compact, ".store=") != nullptr
+    bool result = strstr(compact, "n00b_pinref_init(") != nullptr
+        && strstr(compact, "store_pin,") != nullptr
         && strstr(compact, ".length=") != nullptr
         && strstr(compact, ".skip_obj_hash=") != nullptr;
     ncc_free(compact);
@@ -531,7 +532,7 @@ helper_source(ncc_sym_entry_t *entry, const char *name, const char *init_expr)
         if (patches.len > 0) {
             ncc_buffer_printf(buf,
                 "    __n00b_internal_type_erased_store_t *__ncc_patch_store =\n"
-                "        (__n00b_internal_type_erased_store_t *)*(void *const *)&%s.store;\n",
+                "        (__n00b_internal_type_erased_store_t *)n00b_pinref_unsafe((n00b_pinref_t *)&%s.store_pin);\n",
                 name);
             for (size_t i = 0; i < patches.len; i++) {
                 ncc_buffer_printf(buf,
