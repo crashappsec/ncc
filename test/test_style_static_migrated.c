@@ -72,7 +72,7 @@ static int
 check_style_dict(n00b_dict_t(n00b_string_t *, const n00b_text_style_t *) *dict,
                  n00b_gc_scan_kind_t value_scan_kind)
 {
-    if (dict->lock != 0 || dict->store == nullptr) {
+    if (dict->lock != 0 || n00b_pinref_unsafe((n00b_pinref_t *)&dict->store_pin) == nullptr) {
         return 10;
     }
     if (dict->skip_obj_hash
