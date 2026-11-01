@@ -27,17 +27,20 @@ n00b_dict_t(uint64_t, marker_t const *) suffix_const_dict = d{
 static int
 expect_snapshot(n00b_dict_t(uint64_t, const marker_t *) *candidate)
 {
+    __n00b_internal_type_erased_store_t *store =
+        n00b_pinref_unsafe((n00b_pinref_t *)&candidate->store_pin);
+
     if (candidate->length != 1
-        || candidate->store == nullptr
-        || candidate->store->values == nullptr) {
+        || store == nullptr
+        || store->values == nullptr) {
         return 1;
     }
     if (candidate->value_scan_kind != N00B_GC_SCAN_KIND_ALL) {
         return 2;
     }
 
-    const marker_t **values = (const marker_t **)candidate->store->values;
-    for (uint32_t i = 0; i <= candidate->store->last_slot; i++) {
+    const marker_t **values = (const marker_t **)store->values;
+    for (uint32_t i = 0; i <= store->last_slot; i++) {
         if (values[i] != nullptr) {
             if (values[i] == &marker) {
                 return 3;

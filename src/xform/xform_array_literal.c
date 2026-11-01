@@ -5042,7 +5042,7 @@ build_static_init_dict_maker(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *site,
                       ".key_scan_kind=%s,"
                       ".value_scan_kind=%s,"
                       ".key_tid=%s,.value_tid=%s};"
-                      "*(void **)&__ncc_dict.store=(void *)__ncc_store;"
+                      "n00b_pinref_init((n00b_pinref_t *)&__ncc_dict.store_pin, __ncc_store);"
                       "__ncc_dict;})",
                       (unsigned int)(cap - 1), threshold, pair_count,
                       type->object_type, type->object_type, pair_count, skip_obj_hash,
