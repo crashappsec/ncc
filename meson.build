@@ -1529,6 +1529,70 @@ test('ncc_transient_attribute_stripped', test_runner,
   depends : ncc_exe,
 )
 
+# A transient leaf inside a nested by-value aggregate -- including one reached
+# through an _Atomic(struct) typedef member (n00b_pinref_t) -- emits a trmap
+# that compiles: the containing member's offset is folded in.
+test('ncc_transient_nested_compiles', test_runner,
+  args : test_runner_args + [ncc_exe, 'compile_run',
+          test_dir / 'test_transient_nested.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# Across the _Atomic boundary: outer member offset + offset in the raw type.
+test('ncc_transient_nested_atomic_offset', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_transient_nested.c',
+          '(__builtin_offsetof(tn_atomic_outer_t,store_pin)+__builtin_offsetof(tn_raw_pinref_t,pins))']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# An inline _Atomic(struct { void *raw; ... }) member is an atomic struct, not
+# an atomic pointer (the `*` is in the struct body): its transient leaves are
+# found, addressed through the member's typeof_unqual type.
+test('ncc_transient_nested_inline_atomic_offset', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_transient_nested.c',
+          '(__builtin_offsetof(tn_inline_outer_t,store_pin)+__builtin_offsetof(__typeof_unqual__(((tn_inline_outer_t *)0)->store_pin),lock))']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# The GC map reaches the pointer inside the same inline atomic struct.
+test('ncc_gc_typemap_inline_atomic_struct', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_transient_nested.c',
+          '(__builtin_offsetof(tn_inline_outer_t,store_pin)+__builtin_offsetof(__typeof_unqual__(((tn_inline_outer_t *)0)->store_pin),raw))']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# `_Atomic T` qualifier on a typedef-named aggregate member: offsetof is not
+# spelled through the atomic member (that does not compile).
+test('ncc_transient_nested_atomic_qualifier_offset', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_transient_nested.c',
+          '(__builtin_offsetof(tn_qual_outer_t,ref)+__builtin_offsetof(__typeof_unqual__(((tn_qual_outer_t *)0)->ref),pins))']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# Non-atomic nesting keeps the dotted offsetof path.
+test('ncc_transient_nested_plain_offset', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_transient_nested.c',
+          '__builtin_offsetof(tn_plain_outer_t,ref.pins)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 test('ncc_gc_typemap_static_assert_c23', test_runner,
   args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap.c',

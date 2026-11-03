@@ -350,6 +350,35 @@ combine_prefix(const char *prefix, const char *elem_type, const char *path)
     return ncc_layout_format_cstr("__builtin_offsetof(%s,%s)", elem_type, path);
 }
 
+// The type to re-base offsetof on when a walk crosses the by-value aggregate
+// member at `path` of `elem_type`, or null when the member is not atomic and
+// the walk can keep spelling nested paths as base.name. offsetof cannot
+// descend through an _Atomic member, so the walk restarts on the member's
+// non-atomic type with the member's offset folded into the prefix.
+//
+// - An `_Atomic` written in the member's own specifiers, as in
+//   `_Atomic(struct { ... }) p` (the n00b_pinref(T) shape) or
+//   `_Atomic inner_t p`, may name an anonymous struct, so the type is spelled
+//   from the member itself: typeof_unqual drops the _Atomic qualifier.
+// - A typedef of an atomic aggregate (n00b_pinref_t) records its underlying
+//   type name.
+// The caller frees the result.
+static char *
+atomic_member_offset_type(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *member_specs,
+                          const char *elem_type, const char *path)
+{
+    if (ncc_layout_specs_have_atomic_type_wrapper(member_specs)) {
+        return ncc_layout_format_cstr("__typeof_unqual__(((%s *)0)->%s)",
+                                      elem_type, path);
+    }
+    ncc_layout_aggregate_type_info_t *ainfo =
+        ncc_layout_aggregate_info_from_specs(ctx, member_specs);
+    if (ainfo && ainfo->is_atomic && ainfo->offset_type) {
+        return ncc_layout_copy_cstr(ainfo->offset_type);
+    }
+    return nullptr;
+}
+
 // ---------------------------------------------------------------------------
 // Discriminated unions (n00b_variant_t).
 //
@@ -965,13 +994,15 @@ walk_struct_member(ncc_xform_ctx_t *ctx, const char *elem_type,
                                                                 member_specs);
             char *nbase = field ? path_join(base, field)
                                 : ncc_layout_copy_cstr(base);
-            ncc_layout_aggregate_type_info_t *ainfo =
-                ncc_layout_aggregate_info_from_specs(ctx, member_specs);
-            if (ainfo && ainfo->is_atomic && ainfo->offset_type) {
+            char *otype = *nbase ? atomic_member_offset_type(ctx, member_specs,
+                                                             elem_type, nbase)
+                                 : nullptr;
+            if (otype) {
                 char *nprefix = combine_prefix(prefix, elem_type, nbase);
-                gc_walk(ctx, ainfo->offset_type, nspec, "", nprefix,
-                        offs, asserts, count, vacc, ok, depth + 1);
+                gc_walk(ctx, otype, nspec, "", nprefix, offs, asserts, count,
+                        vacc, ok, depth + 1);
                 ncc_free(nprefix);
+                ncc_free(otype);
             }
             else {
                 gc_walk(ctx, elem_type, nspec, nbase, prefix, offs, asserts,
@@ -1086,18 +1117,18 @@ walk_struct_member(ncc_xform_ctx_t *ctx, const char *elem_type,
             ncc_parse_tree_t *nspec = ncc_layout_aggregate_spec_from_specs(
                 ctx, member_specs);
             if (nspec) {
-                ncc_layout_aggregate_type_info_t *ainfo =
-                    ncc_layout_aggregate_info_from_specs(ctx, member_specs);
-                if (ainfo && ainfo->is_atomic && ainfo->offset_type) {
-                    // Crossing an _Atomic(struct) boundary (possibly via a
-                    // typedef like n00b_pinref_t): offsetof cannot descend
-                    // through the atomic member, so re-base the walk on the
-                    // underlying non-atomic type and fold this member's offset
-                    // into the additive prefix.
+                char *otype = atomic_member_offset_type(ctx, member_specs,
+                                                        elem_type, path);
+                if (otype) {
+                    // Crossing an _Atomic(struct) boundary: offsetof cannot
+                    // descend through the atomic member, so re-base the walk on
+                    // the underlying non-atomic type and fold this member's
+                    // offset into the additive prefix.
                     char *nprefix = combine_prefix(prefix, elem_type, path);
-                    gc_walk(ctx, ainfo->offset_type, nspec, "", nprefix,
-                            offs, asserts, count, vacc, ok, depth + 1);
+                    gc_walk(ctx, otype, nspec, "", nprefix, offs, asserts,
+                            count, vacc, ok, depth + 1);
                     ncc_free(nprefix);
+                    ncc_free(otype);
                 }
                 else {
                     gc_walk(ctx, elem_type, nspec, path, prefix, offs, asserts,
@@ -1530,12 +1561,21 @@ derive_tridx_attr(const char *stobj_attr)
 // Marshal zeroes these byte ranges on the content-hash / store path.
 // ---------------------------------------------------------------------------
 
+//
+// `prefix` is the same additive byte offset gc_walk accumulates when it crosses
+// an _Atomic(struct) boundary (e.g. an n00b_pinref_t member): offsetof cannot
+// descend through an atomic member, so the walk re-bases `elem_type` on the
+// underlying non-atomic type and carries the atomic member's own offset here.
+// Empty for the common case, giving byte-identical output to before.
 static void
-tr_emit_field(const char *elem_type, const char *path,
+tr_emit_field(const char *elem_type, const char *path, const char *prefix,
               ncc_buffer_t *offs, ncc_buffer_t *sizes, int *count)
 {
-    char *oe = ncc_layout_format_cstr("__builtin_offsetof(%s,%s)", elem_type,
-                                      path);
+    char *oe = (prefix && *prefix)
+                 ? ncc_layout_format_cstr("(%s+__builtin_offsetof(%s,%s))",
+                                          prefix, elem_type, path)
+                 : ncc_layout_format_cstr("__builtin_offsetof(%s,%s)",
+                                          elem_type, path);
     char *se = ncc_layout_format_cstr("sizeof(((%s *)0)->%s)", elem_type, path);
     if (*count > 0) {
         ncc_buffer_puts(offs, ",");
@@ -1565,13 +1605,61 @@ member_decl_has_prefix_transient(ncc_parse_tree_t *member)
 
 static void
 tr_walk(ncc_xform_ctx_t *ctx, const char *elem_type, ncc_parse_tree_t *spec,
-        const char *base, ncc_buffer_t *offs, ncc_buffer_t *sizes, int *count,
-        int depth);
+        const char *base, const char *prefix, ncc_buffer_t *offs,
+        ncc_buffer_t *sizes, int *count, int depth);
+
+// Descend into a by-value aggregate member at `path` looking for nested
+// transient leaves. Crossing an _Atomic(struct) boundary (possibly via a
+// typedef like n00b_pinref_t) re-bases the walk on the underlying non-atomic
+// type and folds the member's offset into the additive prefix, exactly as
+// gc_walk does; otherwise the nested path is spelled base.name.
+static void
+tr_descend(ncc_xform_ctx_t *ctx, const char *elem_type,
+           ncc_parse_tree_t *member_specs, ncc_parse_tree_t *nspec,
+           const char *path, const char *prefix, ncc_buffer_t *offs,
+           ncc_buffer_t *sizes, int *count, int depth)
+{
+    char *otype = atomic_member_offset_type(ctx, member_specs, elem_type, path);
+    if (otype) {
+        char *nprefix = combine_prefix(prefix, elem_type, path);
+        tr_walk(ctx, otype, nspec, "", nprefix, offs, sizes, count, depth + 1);
+        ncc_free(nprefix);
+        ncc_free(otype);
+    }
+    else {
+        tr_walk(ctx, elem_type, nspec, path, prefix, offs, sizes, count,
+                depth + 1);
+    }
+}
+
+// True when a member_declaration with no member_declarator_list carries a
+// trailing `[[n00b::transient]]` outside its specifiers. The specifiers are
+// skipped so an inline aggregate body's own transient leaves are not mistaken
+// for a mark on the whole member.
+static bool
+member_has_trailing_transient(ncc_parse_tree_t *member,
+                              ncc_parse_tree_t *member_specs)
+{
+    if (!member || ncc_tree_is_leaf(member)) {
+        return false;
+    }
+    size_t nc = ncc_tree_num_children(member);
+    for (size_t i = 0; i < nc; i++) {
+        ncc_parse_tree_t *kid = ncc_tree_child(member, i);
+        if (kid == member_specs) {
+            continue;
+        }
+        if (ncc_xform_subtree_carries_n00b_named_attr(kid, "transient")) {
+            return true;
+        }
+    }
+    return false;
+}
 
 static void
 tr_walk_member(ncc_xform_ctx_t *ctx, const char *elem_type,
-               ncc_parse_tree_t *member, const char *base, ncc_buffer_t *offs,
-               ncc_buffer_t *sizes, int *count, int depth)
+               ncc_parse_tree_t *member, const char *base, const char *prefix,
+               ncc_buffer_t *offs, ncc_buffer_t *sizes, int *count, int depth)
 {
     ncc_parse_tree_t *member_specs = ncc_xform_find_child_nt(
         member, "specifier_qualifier_list");
@@ -1584,27 +1672,42 @@ tr_walk_member(ncc_xform_ctx_t *ctx, const char *elem_type,
         member, "member_declarator_list");
 
     if (!member_list) {
-        // Anonymous by-value aggregate: recurse with the base unchanged (its
-        // members are accessed by their own name in offsetof). A prefix mark on
-        // a whole anonymous aggregate is not a v1 case.
+        // The parser surfaces some single-declarator members without a
+        // member_declarator_list: a typedef-named member such as
+        // `n00b_pinref_t store_pin;`, a typedef-pointer member, or a truly
+        // anonymous by-value aggregate. Name it the same way gc_walk does; a
+        // null name means an anonymous aggregate, whose members are addressed
+        // by their own name in offsetof (base unchanged).
         ncc_parse_tree_t *nspec = ncc_layout_aggregate_spec_from_specs(
             ctx, member_specs);
-        if (nspec) {
-            tr_walk(ctx, elem_type, nspec, base, offs, sizes, count, depth + 1);
-            return;
+        char *field = ncc_layout_implicit_member_field_name(member,
+                                                            member_specs);
+        bool  marked = field
+                   && (prefix_transient
+                       || member_has_trailing_transient(member, member_specs));
+        if (marked) {
+            // The whole named field is transient — zero its bytes.
+            char *path = path_join(base, field);
+            tr_emit_field(elem_type, path, prefix, offs, sizes, count);
+            ncc_free(path);
         }
-        // Single declarator with no list wrapper (e.g. a typedef-pointer
-        // member): mark it if prefix- or (member-local) trailing-transient.
-        if (prefix_transient
-            || ncc_xform_subtree_carries_n00b_named_attr(member, "transient")) {
-            char *field = ncc_layout_implicit_member_field_name(member,
-                                                                member_specs);
+        else if (nspec) {
+            // Unmarked by-value aggregate: look for nested transient leaves.
+            // A prefix mark on a whole anonymous aggregate is not a v1 case.
+            char *nbase = field ? path_join(base, field)
+                                : ncc_layout_copy_cstr(base);
             if (field) {
-                char *path = path_join(base, field);
-                tr_emit_field(elem_type, path, offs, sizes, count);
-                ncc_free(path);
-                ncc_free(field);
+                tr_descend(ctx, elem_type, member_specs, nspec, nbase, prefix,
+                           offs, sizes, count, depth);
             }
+            else {
+                tr_walk(ctx, elem_type, nspec, nbase, prefix, offs, sizes,
+                        count, depth + 1);
+            }
+            ncc_free(nbase);
+        }
+        if (field) {
+            ncc_free(field);
         }
         return;
     }
@@ -1628,7 +1731,7 @@ tr_walk_member(ncc_xform_ctx_t *ctx, const char *elem_type,
             // The whole field is transient — zero its bytes. Works for a
             // scalar, a pointer, an array, or an entire by-value sub-aggregate.
             char *path = path_join(base, name);
-            tr_emit_field(elem_type, path, offs, sizes, count);
+            tr_emit_field(elem_type, path, prefix, offs, sizes, count);
             ncc_free(path);
         }
         else {
@@ -1645,8 +1748,8 @@ tr_walk_member(ncc_xform_ctx_t *ctx, const char *elem_type,
                     ctx, member_specs);
                 if (nspec) {
                     char *path = path_join(base, name);
-                    tr_walk(ctx, elem_type, nspec, path, offs, sizes, count,
-                            depth + 1);
+                    tr_descend(ctx, elem_type, member_specs, nspec, path,
+                               prefix, offs, sizes, count, depth);
                     ncc_free(path);
                 }
             }
@@ -1660,8 +1763,8 @@ tr_walk_member(ncc_xform_ctx_t *ctx, const char *elem_type,
 
 static void
 tr_walk(ncc_xform_ctx_t *ctx, const char *elem_type, ncc_parse_tree_t *spec,
-        const char *base, ncc_buffer_t *offs, ncc_buffer_t *sizes, int *count,
-        int depth)
+        const char *base, const char *prefix, ncc_buffer_t *offs,
+        ncc_buffer_t *sizes, int *count, int depth)
 {
     if (depth > 64 || *count > NCC_GCMAP_MAX_OFFSETS) {
         return;
@@ -1678,8 +1781,8 @@ tr_walk(ncc_xform_ctx_t *ctx, const char *elem_type, ncc_parse_tree_t *spec,
     ncc_layout_parse_tree_list_t mlist = {0};
     ncc_layout_collect_nt_children(members, "member_declaration", &mlist);
     for (size_t i = 0; i < mlist.len; i++) {
-        tr_walk_member(ctx, elem_type, mlist.data[i], base, offs, sizes, count,
-                       depth);
+        tr_walk_member(ctx, elem_type, mlist.data[i], base, prefix, offs, sizes,
+                       count, depth);
     }
     if (mlist.data) {
         ncc_free(mlist.data);
@@ -1762,7 +1865,7 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
         if (!scalar_no_ptr) {
             gc_walk(ctx, records[i].elem_type, spec, "", "", offs, asserts,
                     &count, &vacc, &ok, 0);
-            tr_walk(ctx, records[i].elem_type, spec, "", tr_offs, tr_sizes,
+            tr_walk(ctx, records[i].elem_type, spec, "", "", tr_offs, tr_sizes,
                     &tr_count, 0);
         }
 
