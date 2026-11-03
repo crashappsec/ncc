@@ -73,6 +73,10 @@ static const char embedded_grammar[] = {
 };
 static const size_t embedded_grammar_len = sizeof(embedded_grammar) - 1;
 
+// Predefined for every source ncc preprocesses, so code can test
+// `#ifdef __NCC__`. Not defined under --no-ncc passthrough.
+#define NCC_PREDEFINE_ARG "-D__NCC__=1"
+
 // Transform registration prototypes.
 extern void ncc_register_rpc_xform(ncc_xform_registry_t *reg);
 extern void ncc_register_generic_struct_xform(ncc_xform_registry_t *reg);
@@ -1729,11 +1733,11 @@ run_preprocessor(const ncc_opts_t *opts, size_t *out_len)
         ncc_verbose("preprocess include dir=%s", include_dir);
     }
 
-    // Build argv: compiler -E -std=gnu23 -fno-blocks [-I src_dir]
-    //             [filtered clang_args...] tmp_path
+    // Build argv: compiler -E -std=gnu23 -fno-blocks -D__NCC__=1
+    //             [-I src_dir] [filtered clang_args...] tmp_path
     // Filter out -c, -o (and its argument) from preprocessor args.
     int extra = include_dir ? 2 : 0;
-    int argc  = 6 + extra + n_clang_args; // extra room for -std/-fno-blocks
+    int argc  = 7 + extra + n_clang_args; // extra room for -std/-fno-blocks/-D
 
     const char **argv = ncc_alloc_array(const char *, (size_t)(argc + 1));
     int          ai   = 0;
@@ -1749,6 +1753,10 @@ run_preprocessor(const ncc_opts_t *opts, size_t *out_len)
 
     // Disable Apple block syntax in system headers.
     argv[ai++] = "-fno-blocks";
+
+    // Let sources detect that they are being compiled by ncc. Placed before
+    // user args so a user -U__NCC__ / -D__NCC__=... still wins.
+    argv[ai++] = NCC_PREDEFINE_ARG;
 
     if (include_dir) {
         argv[ai++] = "-I";
@@ -3674,6 +3682,8 @@ generate_depfile(const ncc_opts_t *opts)
     }
 
     argv[ai++] = "-fno-blocks";
+    // Match the preprocess pass so `#ifdef __NCC__` includes are tracked.
+    argv[ai++] = NCC_PREDEFINE_ARG;
 
     if (!opts->has_std) {
         argv[ai++] = "-std=gnu23";

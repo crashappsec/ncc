@@ -482,6 +482,8 @@ ncc_static_descriptor_flags = [
 # Compiler-level tests (run through ncc executable)
 ncc_compile_tests = {
   'bang':          ['compile_run',  test_dir / 'test_bang.c'],
+  'predefined_macro': ['compile_run',
+                       test_dir / 'test_ncc_predefined_macro.c'],
   'typehash_expr': ['compile_run',  test_dir / 'test_typehash_expr.c'],
   'typehash_scoped': ['compile_run',  test_dir / 'test_typehash_scoped.c'],
   'typehash_autotag': ['compile_run',  test_dir / 'test_typehash_autotag.c'],
