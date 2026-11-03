@@ -924,6 +924,34 @@ first_known_type_alias_text(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *node,
     return nullptr;
 }
 
+// True when `node` holds a `*` that is not inside a struct or union body.
+// In `_Atomic(struct { void *raw; ... })` the `*` belongs to a member of the
+// inline struct, so the atomic type is the struct, not a pointer.
+static bool
+has_pointer_outside_aggregate_body(ncc_parse_tree_t *node)
+{
+    if (!node) {
+        return false;
+    }
+
+    if (ncc_tree_is_leaf(node)) {
+        return ncc_xform_leaf_text_eq(node, "*");
+    }
+
+    if (ncc_xform_nt_name_is(node, "member_declaration_list")) {
+        return false;
+    }
+
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        if (has_pointer_outside_aggregate_body(ncc_tree_child(node, i))) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static bool
 atomic_type_specifier_is_pointer(ncc_parse_tree_t *node)
 {
@@ -936,17 +964,7 @@ atomic_type_specifier_is_pointer(ncc_parse_tree_t *node)
     }
 
     if (ncc_xform_nt_name_is(node, "atomic_type_specifier")) {
-        if (ncc_layout_first_descendant_nt(node, "pointer") != nullptr) {
-            return true;
-        }
-
-        char *text = ncc_layout_node_text(node);
-        bool  result = text && strstr(text, "_Atomic") != nullptr
-                    && strchr(text, '*') != nullptr;
-        if (text) {
-            ncc_free(text);
-        }
-        return result;
+        return has_pointer_outside_aggregate_body(node);
     }
 
     size_t nc = ncc_tree_num_children(node);
