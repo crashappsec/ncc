@@ -1656,6 +1656,34 @@ member_has_trailing_transient(ncc_parse_tree_t *member,
     return false;
 }
 
+// A field whose type is a whole [[n00b::transient]] type is itself transient:
+// by value (every byte of the sub-object), as an array of it, or as a single
+// pointer to it (zeroed, so it marshals as null). `declarator` is null for a
+// member the parser surfaced without a member_declarator_list. A function
+// pointer returning T * is a code pointer, not a pointer to T.
+static bool
+tr_field_type_is_transient(ncc_xform_ctx_t *ctx, ncc_parse_tree_t *specs,
+                           ncc_parse_tree_t *declarator)
+{
+    bool via_typedef = false;
+    if (!ncc_layout_specs_type_is_transient(ctx, specs, &via_typedef)) {
+        return false;
+    }
+    int depth = 0;
+    if (declarator) {
+        if (ncc_layout_first_descendant_nt(declarator, "parameter_type_list")
+            || ncc_layout_first_descendant_nt(declarator, "parameter_list")) {
+            return false;
+        }
+        depth = ncc_layout_pointer_depth_in_declarator(declarator);
+    }
+    if (!via_typedef) {
+        // `_Atomic(struct T *)` carries its `*` in the specifiers.
+        depth += ncc_layout_pointer_depth_for_specs(ctx, specs);
+    }
+    return depth <= 1;
+}
+
 static void
 tr_walk_member(ncc_xform_ctx_t *ctx, const char *elem_type,
                ncc_parse_tree_t *member, const char *base, const char *prefix,
@@ -1684,7 +1712,9 @@ tr_walk_member(ncc_xform_ctx_t *ctx, const char *elem_type,
                                                             member_specs);
         bool  marked = field
                    && (prefix_transient
-                       || member_has_trailing_transient(member, member_specs));
+                       || member_has_trailing_transient(member, member_specs)
+                       || tr_field_type_is_transient(ctx, member_specs,
+                                                     nullptr));
         if (marked) {
             // The whole named field is transient — zero its bytes.
             char *path = path_join(base, field);
@@ -1726,7 +1756,8 @@ tr_walk_member(ncc_xform_ctx_t *ctx, const char *elem_type,
         }
         bool marked = prefix_transient
                    || ncc_xform_subtree_carries_n00b_named_attr(decls.data[i],
-                                                                "transient");
+                                                                "transient")
+                   || tr_field_type_is_transient(ctx, member_specs, declarator);
         if (marked) {
             // The whole field is transient — zero its bytes. Works for a
             // scalar, a pointer, an array, or an entire by-value sub-aggregate.
@@ -1790,6 +1821,53 @@ tr_walk(ncc_xform_ctx_t *ctx, const char *elem_type, ncc_parse_tree_t *spec,
 }
 
 static char *
+whole_transient_size(const char *elem_type)
+{
+    return ncc_layout_format_cstr("sizeof(%s)", elem_type);
+}
+
+// Transient table for record `i`. The trmap ENTRY carries the real
+// type_hash, so the marshal reader can scan n00b_trmap directly; the tridx
+// placeholder is a post-link-fillable acceleration index that mirrors
+// n00b_gcidx. Returns the number of records emitted (always 1).
+static size_t
+emit_trmap(ncc_buffer_t *out, size_t i, uint64_t type_hash,
+           const char *off_csv, const char *sz_csv, int count,
+           const char *trmap_attr, const char *tridx_attr)
+{
+    ncc_buffer_printf(out, "static const uint64_t __ncc_trmap_off_%zu[]={%s};",
+                      i, off_csv);
+    ncc_buffer_printf(out, "static const uint64_t __ncc_trmap_sz_%zu[]={%s};",
+                      i, sz_csv);
+    // Type-name-free: anonymous structs whose layouts match
+    // n00b_transient_layout_t / n00b_transient_map_entry_t /
+    // n00b_transient_map_index_entry_t exactly (the n00b-side layout guard TU
+    // _Static_asserts this). The entry's `layout` is a `const void *`
+    // (byte-identical to the typed pointer). The TU needs no codegen-ABI
+    // header.
+    ncc_buffer_printf(
+        out,
+        "static const struct{uint64_t field_count;"
+        "const uint64_t*byte_offsets;const uint64_t*byte_sizes;} "
+        "__ncc_trmap_lay_%zu="
+        "{.field_count=%dULL,.byte_offsets=__ncc_trmap_off_%zu,"
+        ".byte_sizes=__ncc_trmap_sz_%zu};",
+        i, count, i, i);
+    ncc_buffer_printf(
+        out,
+        "%s static const struct{uint64_t type_hash;const void*layout;} "
+        "__ncc_trmap_ent_%zu={.type_hash=%lluULL,.layout="
+        "(const void*)&__ncc_trmap_lay_%zu};",
+        trmap_attr, i, (unsigned long long)type_hash, i);
+    ncc_buffer_printf(
+        out,
+        "%s static const struct{uint64_t type_hash;uint64_t entry_index;} "
+        "__ncc_tridx_ent_%zu={.type_hash=0ULL,.entry_index=%zuULL};",
+        tridx_attr, i, i);
+    return 1;
+}
+
+static char *
 derive_gcraw_attr(const char *stobj_attr)
 {
     return derive_gc_section_attr(stobj_attr, "n00b_gcraw");
@@ -1826,6 +1904,12 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
             continue;
         }
 
+        // A whole [[n00b::transient]] type: marshal zeroes the entire object,
+        // so its transient table is the single range [0, sizeof(T)). This
+        // holds even for a scalar typedef or a type with no aggregate body.
+        bool whole_transient =
+            ncc_layout_type_name_is_transient(ctx, records[i].elem_type);
+
         bool scalar_no_ptr = elem_type_is_scalar_no_ptr(records[i].elem_type);
         ncc_parse_tree_t *spec = nullptr;
         if (!scalar_no_ptr) {
@@ -1837,6 +1921,12 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
                                                          records[i].elem_type);
             if (!info || !info->specifier
                 || !aggregate_type_is_file_visible(info) || info->is_atomic) {
+                if (whole_transient) {
+                    char *sz = whole_transient_size(records[i].elem_type);
+                    n_emitted += emit_trmap(out, i, records[i].hash, "0", sz,
+                                            1, trmap_attr, tridx_attr);
+                    ncc_free(sz);
+                }
                 continue;
             }
             spec = info->specifier;
@@ -1865,8 +1955,17 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
         if (!scalar_no_ptr) {
             gc_walk(ctx, records[i].elem_type, spec, "", "", offs, asserts,
                     &count, &vacc, &ok, 0);
-            tr_walk(ctx, records[i].elem_type, spec, "", "", tr_offs, tr_sizes,
-                    &tr_count, 0);
+            if (!whole_transient) {
+                tr_walk(ctx, records[i].elem_type, spec, "", "", tr_offs,
+                        tr_sizes, &tr_count, 0);
+            }
+        }
+        if (whole_transient) {
+            char *sz = whole_transient_size(records[i].elem_type);
+            ncc_buffer_puts(tr_offs, "0");
+            ncc_buffer_puts(tr_sizes, sz);
+            ncc_free(sz);
+            tr_count = 1;
         }
 
         if (ok) {
@@ -1978,49 +2077,15 @@ ncc_gc_typemap_emit(ncc_xform_ctx_t *ctx)
         }
 
         // Transient table for this type — emitted whether or not the GC
-        // pointer map succeeded (ok). The trmap ENTRY carries the real
-        // type_hash, so the marshal reader can scan n00b_trmap directly; the
-        // tridx placeholder is a post-link-fillable acceleration index that
-        // mirrors n00b_gcidx.
+        // pointer map succeeded (ok).
         if (tr_count > 0) {
             char *tr_off_csv = ncc_buffer_take(tr_offs);
             char *tr_sz_csv  = ncc_buffer_take(tr_sizes);
-            ncc_buffer_printf(
-                out,
-                "static const uint64_t __ncc_trmap_off_%zu[]={%s};",
-                i, tr_off_csv);
-            ncc_buffer_printf(
-                out,
-                "static const uint64_t __ncc_trmap_sz_%zu[]={%s};",
-                i, tr_sz_csv);
-            // Type-name-free: anonymous structs whose layouts match
-            // n00b_transient_layout_t / n00b_transient_map_entry_t /
-            // n00b_transient_map_index_entry_t exactly (the n00b-side layout
-            // guard TU _Static_asserts this). The entry's `layout` is a
-            // `const void *` (byte-identical to the typed pointer). The TU
-            // needs no codegen-ABI header.
-            ncc_buffer_printf(
-                out,
-                "static const struct{uint64_t field_count;"
-                "const uint64_t*byte_offsets;const uint64_t*byte_sizes;} "
-                "__ncc_trmap_lay_%zu="
-                "{.field_count=%dULL,.byte_offsets=__ncc_trmap_off_%zu,"
-                ".byte_sizes=__ncc_trmap_sz_%zu};",
-                i, tr_count, i, i);
-            ncc_buffer_printf(
-                out,
-                "%s static const struct{uint64_t type_hash;const void*layout;} "
-                "__ncc_trmap_ent_%zu={.type_hash=%lluULL,.layout="
-                "(const void*)&__ncc_trmap_lay_%zu};",
-                trmap_attr, i, (unsigned long long)records[i].hash, i);
-            ncc_buffer_printf(
-                out,
-                "%s static const struct{uint64_t type_hash;uint64_t entry_index;} "
-                "__ncc_tridx_ent_%zu={.type_hash=0ULL,.entry_index=%zuULL};",
-                tridx_attr, i, i);
+            n_emitted += emit_trmap(out, i, records[i].hash, tr_off_csv,
+                                    tr_sz_csv, tr_count, trmap_attr,
+                                    tridx_attr);
             ncc_free(tr_off_csv);
             ncc_free(tr_sz_csv);
-            n_emitted++;
         }
         else {
             ncc_free(ncc_buffer_take(tr_offs));

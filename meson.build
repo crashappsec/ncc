@@ -1595,6 +1595,138 @@ test('ncc_transient_nested_plain_offset', test_runner,
   depends : ncc_exe,
 )
 
+# --- [[n00b::transient]] on a whole struct type or typedef ---------------
+
+# A whole-type mark (struct tag, prefix typedef, trailing typedef, or an alias
+# of one) emits a trmap that compiles and runs.
+test('ncc_transient_type_compiles', test_runner,
+  args : test_runner_args + [ncc_exe, 'compile_run',
+          test_dir / 'test_transient_type.c']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# A single pointer to a transient struct is zeroed (marshals as null)...
+test('ncc_transient_type_ptr_to_struct', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_transient_type.c',
+          'sizeof(((tt_holder_t *)0)->hptr)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# ...and is still GC-scanned.
+test('ncc_transient_type_ptr_still_gc_scanned', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_transient_type.c',
+          '(__builtin_offsetof(tt_holder_t,hptr)/sizeof(void*))']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# A by-value field of an alias of a transient struct is zeroed whole.
+test('ncc_transient_type_by_value_alias', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_transient_type.c',
+          'sizeof(((tt_holder_t *)0)->hval)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# A field of a trailing-marked scalar typedef is zeroed.
+test('ncc_transient_type_trailing_typedef', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_transient_type.c',
+          'sizeof(((tt_holder_t *)0)->fd)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# A pointer typedef to a transient struct is itself transient.
+test('ncc_transient_type_pointer_typedef', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_transient_type.c',
+          'sizeof(((tt_holder_t *)0)->href)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# A pointer to a prefix-marked typedef is zeroed.
+test('ncc_transient_type_ptr_to_typedef', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_transient_type.c',
+          'sizeof(((tt_holder_t *)0)->lptr)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# An array of a transient type is zeroed whole.
+test('ncc_transient_type_array', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_transient_type.c',
+          'sizeof(((tt_array_holder_t *)0)->locks)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# A pointer-to-pointer is not a pointer to the transient type.
+test('ncc_transient_type_ptr_ptr_absent', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_transient_type.c',
+          'sizeof(((tt_holder_t *)0)->lpp)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# A function pointer returning T * is a code pointer, not transient.
+test('ncc_transient_type_fn_ptr_absent', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_transient_type.c',
+          'sizeof(((tt_holder_t *)0)->mk)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# An unrelated pointer sibling stays out of the table.
+test('ncc_transient_type_unrelated_absent', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_transient_type.c',
+          'sizeof(((tt_holder_t *)0)->keep)']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# A typehash of the transient type itself covers the whole object.
+test('ncc_transient_type_whole_object', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_contains',
+          test_dir / 'test_transient_type.c',
+          '__ncc_trmap_sz_2[]={sizeof(tt_handle_t)}']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
+# The type-level attribute is stripped from emitted C.
+test('ncc_transient_type_attribute_stripped', test_runner,
+  args : test_runner_args + [ncc_exe, 'preprocess_not_contains',
+          test_dir / 'test_transient_type.c',
+          'n00b::transient']
+         + ncc_test_flags + ['--ncc-no-gc-stack-maps', '--ncc-no-auto-gc-roots'],
+  suite : 'ncc',
+  depends : ncc_exe,
+)
+
 test('ncc_gc_typemap_static_assert_c23', test_runner,
   args : test_runner_args + [ncc_exe, 'preprocess_contains',
           test_dir / 'test_gc_typemap.c',
