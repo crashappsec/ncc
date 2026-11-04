@@ -4187,6 +4187,8 @@ compile_file(ncc_opts_t *opts)
                             ncc_hash_cstring, ncc_dict_cstr_eq);
     ncc_dict_init(&xdata.gc_function_pointer_typedefs,
                             ncc_hash_cstring, ncc_dict_cstr_eq);
+    ncc_dict_init(&xdata.gc_transient_typedefs,
+                            ncc_hash_cstring, ncc_dict_cstr_eq);
     // Parent pointers let expression typing map an expression back to its
     // lexical scope (scope_for_expr walks up to the enclosing scope node).
     // Set before any ncc_type_of_expr use (nodiscard below, typehash/typeid/
@@ -4234,6 +4236,7 @@ compile_file(ncc_opts_t *opts)
         ncc_dict_free(&xdata.gc_aggregate_types);
         ncc_dict_free(&xdata.gc_pointer_typedefs);
         ncc_dict_free(&xdata.gc_function_pointer_typedefs);
+        ncc_dict_free(&xdata.gc_transient_typedefs);
         free_gc_stack_roots(xdata.gc_stack_roots);
         ncc_template_registry_free(&tmpl_reg);
         ncc_xform_registry_free(&xreg);
@@ -4262,6 +4265,7 @@ compile_file(ncc_opts_t *opts)
         ncc_dict_free(&xdata.gc_aggregate_types);
         ncc_dict_free(&xdata.gc_pointer_typedefs);
         ncc_dict_free(&xdata.gc_function_pointer_typedefs);
+        ncc_dict_free(&xdata.gc_transient_typedefs);
         free_gc_stack_roots(xdata.gc_stack_roots);
         ncc_template_registry_free(&tmpl_reg);
         ncc_xform_registry_free(&xreg);
@@ -4337,6 +4341,7 @@ compile_file(ncc_opts_t *opts)
     ncc_dict_free(&xdata.gc_aggregate_types);
     ncc_dict_free(&xdata.gc_pointer_typedefs);
     ncc_dict_free(&xdata.gc_function_pointer_typedefs);
+    ncc_dict_free(&xdata.gc_transient_typedefs);
     if (xdata.symtab) {
         ncc_symtab_free(xdata.symtab);
         xdata.symtab = nullptr;

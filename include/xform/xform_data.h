@@ -59,6 +59,11 @@ typedef struct {
     // Subset of gc_pointer_typedefs that are FUNCTION pointers (code, not
     // heap). The gc-typemap walker excludes these from GC pointer maps.
     ncc_dict_t                 gc_function_pointer_typedefs;
+    // Typedef names whose type is [[n00b::transient]]: marked directly, an
+    // alias of a transient struct/typedef, or a single pointer to one. The
+    // transient walk zeroes every field of such a type (a pointer to it
+    // marshals as null).
+    ncc_dict_t                 gc_transient_typedefs;
     ncc_template_registry_t   *template_reg;
     const char                *vargs_type;
     const char                *once_prefix;

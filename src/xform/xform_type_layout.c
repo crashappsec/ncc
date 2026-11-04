@@ -1270,6 +1270,232 @@ contains_leaf_text(ncc_parse_tree_t *node, const char *text)
     return false;
 }
 
+static ncc_dict_t *
+layout_transient_typedefs(ncc_xform_ctx_t *ctx)
+{
+    ncc_xform_data_t *data = ncc_xform_get_data(ctx);
+    return data ? &data->gc_transient_typedefs : nullptr;
+}
+
+static void
+record_transient_typedef(ncc_xform_ctx_t *ctx, const char *name)
+{
+    ncc_dict_t *trs = layout_transient_typedefs(ctx);
+    if (!trs || !name || !*name) {
+        return;
+    }
+    bool found = false;
+    ncc_dict_get(trs, (void *)name, &found);
+    if (!found) {
+        ncc_dict_put(trs, ncc_layout_copy_cstr(name), (void *)(uintptr_t)1);
+    }
+}
+
+static bool
+typedef_name_is_transient(ncc_xform_ctx_t *ctx, const char *name)
+{
+    ncc_dict_t *trs = layout_transient_typedefs(ctx);
+    if (!trs || !name) {
+        return false;
+    }
+    bool found = false;
+    (void)ncc_dict_get(trs, (void *)name, &found);
+    return found;
+}
+
+// The attribute must be the specifier's OWN sequence (`struct [[...]] T`),
+// not one on a member inside its body.
+static bool
+aggregate_specifier_is_transient(ncc_parse_tree_t *su)
+{
+    if (!su || ncc_tree_is_leaf(su)) {
+        return false;
+    }
+    ncc_parse_tree_t *seq = ncc_xform_find_child_nt(
+        su, "attribute_specifier_sequence");
+    return seq && ncc_xform_subtree_carries_n00b_named_attr(seq, "transient");
+}
+
+// A tag can carry the mark on its definition while a use spells only
+// `struct T`, so check the resolved definition as well as the use.
+static bool
+aggregate_specifier_or_definition_is_transient(ncc_xform_ctx_t  *ctx,
+                                               ncc_parse_tree_t *su)
+{
+    if (aggregate_specifier_is_transient(su)) {
+        return true;
+    }
+    ncc_parse_tree_t *def = ncc_layout_resolve_aggregate_specifier(ctx, su);
+    return def && def != su && aggregate_specifier_is_transient(def);
+}
+
+bool
+ncc_layout_specs_type_is_transient(ncc_xform_ctx_t  *ctx,
+                                   ncc_parse_tree_t *specs,
+                                   bool             *via_typedef)
+{
+    if (via_typedef) {
+        *via_typedef = false;
+    }
+    if (!specs) {
+        return false;
+    }
+
+    ncc_parse_tree_t *su = ncc_layout_first_descendant_nt(
+        specs, "struct_or_union_specifier");
+    if (su) {
+        return aggregate_specifier_or_definition_is_transient(ctx, su);
+    }
+
+    char *td_name = ncc_layout_first_typedef_name_text(specs);
+    if (!td_name) {
+        td_name = first_known_type_alias_text(ctx, specs, true, true);
+    }
+    bool result = false;
+    if (td_name) {
+        result = typedef_name_is_transient(ctx, td_name);
+        if (!result && !ncc_layout_typedef_name_is_pointer(ctx, td_name)) {
+            // A typedef the alias walk did not see (e.g. one the symbol
+            // table resolves): fall back to its aggregate definition.
+            ncc_layout_aggregate_type_info_t *info =
+                ncc_layout_lookup_aggregate_type(ctx, td_name);
+            result = info && aggregate_specifier_is_transient(info->specifier);
+        }
+    }
+    ncc_free(td_name);
+    if (result && via_typedef) {
+        *via_typedef = true;
+    }
+    return result;
+}
+
+bool
+ncc_layout_type_name_is_transient(ncc_xform_ctx_t *ctx, const char *type_name)
+{
+    if (!type_name) {
+        return false;
+    }
+    char *trimmed = ncc_layout_trim_copy(type_name);
+    bool  result  = typedef_name_is_transient(ctx, trimmed);
+    if (!result) {
+        ncc_layout_aggregate_type_info_t *info =
+            ncc_layout_lookup_aggregate_type(ctx, trimmed);
+        result = info && aggregate_specifier_is_transient(info->specifier);
+    }
+    ncc_free(trimmed);
+    return result;
+}
+
+// Decide whether typedef `name` (declared by `init_decl` inside `decl`) names
+// a transient type: marked itself (prefix on the declaration or trailing on
+// the declarator), or an alias of — or a single pointer to — a transient
+// type. A function-pointer typedef is never inherited as transient: a code
+// pointer returning T * is not a pointer to T.
+static bool
+typedef_decl_is_transient(ncc_xform_ctx_t  *ctx,
+                          ncc_parse_tree_t *decl,
+                          ncc_parse_tree_t *decl_specs,
+                          ncc_parse_tree_t *init_decl,
+                          ncc_parse_tree_t *declarator)
+{
+    ncc_parse_tree_t *prefix = ncc_xform_find_child_nt(
+        decl, "attribute_specifier_sequence");
+    if (prefix && ncc_xform_subtree_carries_n00b_named_attr(prefix,
+                                                            "transient")) {
+        return true;
+    }
+    if (ncc_xform_subtree_carries_n00b_named_attr(init_decl, "transient")) {
+        return true;
+    }
+    if (ncc_layout_first_descendant_nt(declarator, "parameter_type_list")
+        || ncc_layout_first_descendant_nt(declarator, "parameter_list")) {
+        return false;
+    }
+    bool via_typedef = false;
+    if (!ncc_layout_specs_type_is_transient(ctx, decl_specs, &via_typedef)) {
+        return false;
+    }
+    int depth = ncc_layout_pointer_depth_in_declarator(declarator);
+    if (!via_typedef) {
+        depth += ncc_layout_pointer_depth_for_specs(ctx, decl_specs);
+    }
+    return depth <= 1;
+}
+
+// Last identifier leaf in `node`, outside aggregate specifiers and attribute
+// sequences: the declared name of a typedef whose name the parser folded into
+// its declaration specifiers.
+static const char *
+last_declared_identifier(ncc_parse_tree_t *node)
+{
+    if (!node) {
+        return nullptr;
+    }
+    if (ncc_tree_is_leaf(node)) {
+        const char *text = ncc_xform_leaf_text(node);
+        return text && is_ident_start_char(text[0]) ? text : nullptr;
+    }
+    if (ncc_xform_nt_name_is(node, "struct_or_union_specifier")
+        || ncc_xform_nt_name_is(node, "attribute_specifier_sequence")) {
+        return nullptr;
+    }
+    const char *found = nullptr;
+    size_t      nc    = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        const char *c = last_declared_identifier(ncc_tree_child(node, i));
+        if (c) {
+            found = c;
+        }
+    }
+    return found;
+}
+
+// True when `node` carries [[n00b::transient]] anywhere except inside a
+// struct/union specifier (whose own mark names the aggregate, handled by
+// ncc_layout_specs_type_is_transient).
+static bool
+carries_transient_outside_aggregates(ncc_parse_tree_t *node)
+{
+    if (!node || ncc_tree_is_leaf(node)
+        || ncc_xform_nt_name_is(node, "struct_or_union_specifier")) {
+        return false;
+    }
+    if (ncc_xform_nt_name_is(node, "attribute_specifier_sequence")) {
+        return ncc_xform_subtree_carries_n00b_named_attr(node, "transient");
+    }
+    size_t nc = ncc_tree_num_children(node);
+    for (size_t i = 0; i < nc; i++) {
+        if (carries_transient_outside_aggregates(ncc_tree_child(node, i))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// `typedef int name [[n00b::transient]];` parses with the new name folded
+// into the declaration specifiers (the attribute after it) and no
+// init_declarator_list. Recover the name and the mark.
+static void
+collect_trailing_attr_typedef(ncc_xform_ctx_t  *ctx,
+                              ncc_parse_tree_t *decl,
+                              ncc_parse_tree_t *decl_specs)
+{
+    const char *name = last_declared_identifier(decl_specs);
+    if (!name || strcmp(name, "typedef") == 0) {
+        return;
+    }
+    ncc_parse_tree_t *prefix = ncc_xform_find_child_nt(
+        decl, "attribute_specifier_sequence");
+    bool marked = (prefix
+                   && ncc_xform_subtree_carries_n00b_named_attr(prefix,
+                                                                "transient"))
+               || carries_transient_outside_aggregates(decl_specs)
+               || ncc_layout_specs_type_is_transient(ctx, decl_specs, nullptr);
+    if (marked) {
+        record_transient_typedef(ctx, name);
+    }
+}
+
 static void
 collect_typedef_aliases_from_decl(ncc_xform_ctx_t *ctx,
                                   ncc_parse_tree_t *decl)
@@ -1278,6 +1504,10 @@ collect_typedef_aliases_from_decl(ncc_xform_ctx_t *ctx,
         decl, "declaration_specifiers");
     ncc_parse_tree_t *list = ncc_xform_find_child_nt(decl,
                                                      "init_declarator_list");
+    if (decl_specs && !list && contains_leaf_text(decl_specs, "typedef")) {
+        collect_trailing_attr_typedef(ctx, decl, decl_specs);
+        return;
+    }
     if (!decl_specs || !list || !contains_leaf_text(decl_specs, "typedef")) {
         return;
     }
@@ -1291,6 +1521,11 @@ collect_typedef_aliases_from_decl(ncc_xform_ctx_t *ctx,
         char *name = ncc_layout_declarator_name(declarator);
         if (!name) {
             continue;
+        }
+
+        if (typedef_decl_is_transient(ctx, decl, decl_specs, inits.data[i],
+                                      declarator)) {
+            record_transient_typedef(ctx, name);
         }
 
         // An _Atomic(T *) typedef ( typedef _Atomic(struct X *) name; ) hides

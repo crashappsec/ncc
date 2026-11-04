@@ -93,5 +93,18 @@ bool ncc_layout_typedef_name_is_pointer(ncc_xform_ctx_t *ctx,
 // exclude such fields from GC pointer maps.
 bool ncc_layout_typedef_name_is_function_pointer(ncc_xform_ctx_t *ctx,
                                                  const char *name);
+// [[n00b::transient]] on a whole type. True when the base type named by
+// `specs` is transient: a struct/union whose specifier carries the attribute
+// (`struct [[n00b::transient]] T { ... }`), or a typedef recorded as transient
+// (marked with a prefix or trailing attribute, or aliasing a transient type).
+// `*via_typedef` (optional) is set when the answer came from a typedef name,
+// whose own pointer depth is already part of the transient type.
+bool ncc_layout_specs_type_is_transient(ncc_xform_ctx_t  *ctx,
+                                        ncc_parse_tree_t *specs,
+                                        bool             *via_typedef);
+// Same test for a type spelled as text ("struct T" or a typedef name), as
+// carried in a typehash record.
+bool ncc_layout_type_name_is_transient(ncc_xform_ctx_t *ctx,
+                                       const char      *type_name);
 void ncc_layout_collect_type_info(ncc_xform_ctx_t *ctx,
                                   ncc_parse_tree_t *tu);
